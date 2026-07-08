@@ -446,6 +446,50 @@ def test_direct_signal_missing_repair_task_raises_when_repair_enabled():
         )
 
 
+def test_core_passes_judgment_repair_policy_to_evidence_gate():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Invalid evidence type.",
+            },
+            "repair_evidence_judgment": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "Core repaired judgment.",
+            },
+        }
+    )
+    core = BayesProbeCore(
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
+    )
+    cycle = make_cycle("cycle_core_repair")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_core_repair"),
+        signals=[make_active_signal()],
+    )
+
+    h1 = result.belief_state.hypotheses_by_id()["H1"]
+    h2 = result.belief_state.hypotheses_by_id()["H2"]
+    assert [request.task for request in gateway.requests] == [
+        "judge_evidence",
+        "repair_evidence_judgment",
+    ]
+    assert result.evidence_events[0].discard_reason is None
+    assert result.evidence_events[0].evidence_type == EvidenceType.SUPPORTING
+    assert len(result.belief_updates) == 2
+    assert h1.posterior > 0.5
+    assert h2.posterior < 0.5
+
+
 def test_active_plus_passive_cycle_accepts_mixed_signal_kinds():
     core = BayesProbeCore()
     cycle = CycleRecord(

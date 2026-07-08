@@ -7,7 +7,7 @@ from bayesprobe.evidence import EvidenceIntegrationGate, EvidenceIntegrationResu
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.model_gateway import ModelGateway
+from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGateway
 from bayesprobe.schemas import (
     BeliefState,
     BeliefUpdate,
@@ -37,9 +37,11 @@ class BayesProbeCore:
         self,
         ledger: JsonlLedgerStore | None = None,
         model_gateway: ModelGateway | None = None,
+        judgment_repair_policy: EvidenceJudgmentRepairPolicy | None = None,
     ) -> None:
         self._ledger = ledger
         self._model_gateway = model_gateway
+        self._judgment_repair_policy = judgment_repair_policy
         self._cycle_allocations: dict[str, int] = {}
         self._evidence_gate = self._create_evidence_integration_gate()
         self._evolution_policy = self._create_hypothesis_evolution_policy()
@@ -150,7 +152,10 @@ class BayesProbeCore:
         return SignalInbox(cycle_id=cycle.cycle_id)
 
     def _create_evidence_integration_gate(self) -> EvidenceIntegrationGate:
-        return EvidenceIntegrationGate(model_gateway=self._model_gateway)
+        return EvidenceIntegrationGate(
+            model_gateway=self._model_gateway,
+            judgment_repair_policy=self._judgment_repair_policy,
+        )
 
     def _create_hypothesis_evolution_policy(self) -> HypothesisEvolutionEngine:
         return HypothesisEvolutionEngine()
