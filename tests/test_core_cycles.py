@@ -378,6 +378,74 @@ def test_direct_signal_repair_success_produces_normal_evidence():
     assert event.reliability == 0.91
 
 
+def test_direct_signal_invalid_repair_becomes_schema_violation():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Invalid evidence type.",
+            },
+            "repair_evidence_judgment": {
+                "evidence_type": "still_not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Still invalid.",
+            },
+        }
+    )
+    gate = EvidenceIntegrationGate(
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
+    )
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_repair_failure"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_repair_failure"),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    assert [request.task for request in gateway.requests] == [
+        "judge_evidence",
+        "repair_evidence_judgment",
+    ]
+    assert event.evidence_type == EvidenceType.NEUTRAL
+    assert event.discard_reason.startswith(
+        "schema_violation: repair failed after 1 attempt(s): invalid evidence_type"
+    )
+    assert event.reliability == 0.0
+    assert event.independence == 0.0
+    assert event.relevance == 0.0
+    assert event.novelty == 0.0
+    assert event.specificity == 0.0
+    assert event.verifiability == 0.0
+
+
+def test_direct_signal_missing_repair_task_raises_when_repair_enabled():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Invalid evidence type.",
+            }
+        }
+    )
+    gate = EvidenceIntegrationGate(
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
+    )
+
+    with pytest.raises(ValueError, match="no scripted response for task: repair_evidence_judgment"):
+        gate.integrate(
+            cycle=make_cycle("cycle_repair_missing_task"),
+            belief_state=make_belief_state(cycle_id="cycle_0"),
+            probe_set=make_empty_probe_set("cycle_repair_missing_task"),
+            signals=[make_active_signal()],
+        )
+
+
 def test_active_plus_passive_cycle_accepts_mixed_signal_kinds():
     core = BayesProbeCore()
     cycle = CycleRecord(
