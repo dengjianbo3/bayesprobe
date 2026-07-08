@@ -159,8 +159,8 @@ invalid structured judgment
   -> no BeliefUpdate
 ```
 
-The planned repair/retry policy may add an opt-in repair step before this
-fallback. The fallback remains belief-neutral.
+The repair/retry policy can add an opt-in repair step before this fallback.
+The fallback remains belief-neutral.
 
 ## 4. Module Map
 
@@ -232,7 +232,7 @@ Current limitations:
 - quality assessment remains heuristic;
 - projection decomposition is cue-based;
 - direct evidence judgment uses deterministic/scripted gateway behavior;
-- schema repair/retry is not implemented yet.
+- schema repair/retry is opt-in through `EvidenceJudgmentRepairPolicy`.
 
 ### 4.4 Belief Solver
 
@@ -362,7 +362,7 @@ Current validation:
 - `evidence_judgment_from_mapping(...)`;
 - `ModelGatewayValidationError`.
 
-Near-term extension:
+Current repair support:
 
 - `repair_evidence_judgment` task behind an opt-in repair policy.
 
@@ -503,7 +503,7 @@ core's private internals.
 | Benchmark harness | Good MVP | Toy dataset and suite/report flow exist. |
 | Config/CLI/SDK | Good MVP | JSON experiment config, CLI, package exports exist. |
 | Model gateway | Partial | Structured seam and scripted/deterministic adapters exist; no real provider. |
-| Structured output robustness | Partial | Validation and neutral schema violation exist; repair/retry not yet implemented. |
+| Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Missing | Needed before serious provider-based experiments. |
 | Multi-agent protocol | Partial | Projection-as-signal semantics exist; transport/protocol schema not complete. |
 | Production persistence | Missing | JSONL only. |
@@ -615,6 +615,8 @@ signal types.
 ## 8. Near-Term Completion Roadmap
 
 ### Phase 1: Schema Repair / Retry Policy
+
+Status: implemented as MVP.
 
 Goal:
 
