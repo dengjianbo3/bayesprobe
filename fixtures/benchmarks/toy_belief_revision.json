@@ -1,0 +1,61 @@
+{
+  "dataset_name": "toy_belief_revision",
+  "metadata": {
+    "purpose": "Deterministic fixture covering active-only, passive-only, and active-plus-passive BayesProbe benchmark paths.",
+    "version": "0.1"
+  },
+  "samples": [
+    {
+      "gold_best_hypothesis": "H1",
+      "gold_update_directions": {
+        "H1": "strengthened"
+      },
+      "question_or_claim": "Does the autonomous active path support H1?",
+      "sample_id": "toy_active_support",
+      "signal_shape": "active_only"
+    },
+    {
+      "gold_best_hypothesis": "H2",
+      "gold_update_directions": {
+        "H1": "weakened",
+        "H2": "strengthened"
+      },
+      "passive_signals": [
+        {
+          "raw_content": "REFUTES: Benchmark passage contradicts H1 and supports H2.",
+          "signal_id": "S_toy_passive_refute",
+          "source": "fixture",
+          "source_type": "benchmark_stream",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Does the passive benchmark stream refute H1?",
+      "sample_id": "toy_passive_refute",
+      "signal_shape": "passive_only"
+    },
+    {
+      "gold_best_hypothesis": "H2",
+      "gold_update_directions": {
+        "H2": "strengthened"
+      },
+      "passive_signals": [
+        {
+          "raw_content": "REFUTES: Benchmark passage contradicts H1 and supports H2.",
+          "signal_id": "S_toy_mixed_refute",
+          "source": "fixture",
+          "source_type": "benchmark_stream",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Can mixed active and passive signals move belief toward H2?",
+      "sample_id": "toy_mixed_refute",
+      "signal_shape": "active_plus_passive"
+    }
+  ]
+}
