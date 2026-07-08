@@ -5,7 +5,7 @@ import pytest
 from bayesprobe.core import BayesProbeCore, EvidenceIntegrationGate
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.model_gateway import ScriptedModelGateway
+from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ScriptedModelGateway
 from bayesprobe.schemas import (
     BeliefState,
     CycleRecord,
@@ -107,6 +107,37 @@ def make_belief_state(cycle_id: str = "cycle_1", cycle_index: int = 0) -> Belief
                 predictions=["Refuting evidence is likely."],
             ),
         ],
+    )
+
+
+def make_cycle(cycle_id: str = "cycle_repair") -> CycleRecord:
+    return CycleRecord(
+        cycle_id=cycle_id,
+        run_id="run_1",
+        cycle_index=1,
+        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+    )
+
+
+def make_empty_probe_set(cycle_id: str = "cycle_repair") -> ProbeSet:
+    return ProbeSet(
+        probe_set_id=f"ps_{cycle_id}",
+        cycle_id=cycle_id,
+        probes=[],
+        selection_reason="Repair policy fixture.",
+        may_be_empty=True,
+    )
+
+
+def make_active_signal(cycle_id: str = "pending") -> ExternalSignal:
+    return ExternalSignal(
+        id="S_repair",
+        cycle_id=cycle_id,
+        signal_kind=SignalKind.ACTIVE,
+        source_type="benchmark_stream",
+        source="fixture",
+        raw_content="Malformed judgment fixture.",
+        initial_target_hypotheses=["H1", "H2"],
     )
 
 
@@ -256,6 +287,95 @@ def test_passive_only_cycle_rejects_active_signal():
                 )
             ],
         )
+
+
+def test_direct_signal_schema_violation_does_not_attempt_repair_by_default():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Invalid evidence type.",
+            },
+            "repair_evidence_judgment": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "This repair should not be called.",
+            },
+        }
+    )
+    gate = EvidenceIntegrationGate(model_gateway=gateway)
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_repair_default"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_repair_default"),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    assert [request.task for request in gateway.requests] == ["judge_evidence"]
+    assert event.evidence_type == EvidenceType.NEUTRAL
+    assert event.discard_reason.startswith("schema_violation:")
+
+
+def test_direct_signal_repair_success_produces_normal_evidence():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Invalid evidence type.",
+            },
+            "repair_evidence_judgment": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "Repaired supporting judgment.",
+                "quality_overrides": {"reliability": 0.91},
+            },
+        }
+    )
+    gate = EvidenceIntegrationGate(
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
+    )
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_repair_success"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_repair_success"),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    repair_input = gateway.requests[1].input
+    assert [request.task for request in gateway.requests] == [
+        "judge_evidence",
+        "repair_evidence_judgment",
+    ]
+    assert repair_input["original_request"]["task"] == "judge_evidence"
+    assert repair_input["original_request"]["input"]["signal_id"] == "S_repair"
+    assert repair_input["invalid_payload"]["evidence_type"] == "not_a_type"
+    assert repair_input["validation_error"].startswith("invalid evidence_type")
+    assert repair_input["attempt_index"] == 1
+    assert "boundary_condition" in repair_input["allowed_evidence_types"]
+    assert "moderately_confirming" in repair_input["allowed_likelihood_bands"]
+    assert repair_input["required_fields"] == [
+        "evidence_type",
+        "likelihoods",
+        "interpretation",
+    ]
+    assert event.evidence_type == EvidenceType.SUPPORTING
+    assert event.likelihoods["H1"] == LikelihoodBand.MODERATELY_CONFIRMING
+    assert event.discard_reason is None
+    assert event.interpretation == "Repaired supporting judgment."
+    assert event.reliability == 0.91
 
 
 def test_active_plus_passive_cycle_accepts_mixed_signal_kinds():

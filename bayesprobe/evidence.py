@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
+    EvidenceJudgment,
+    EvidenceJudgmentRepairPolicy,
     ModelGateway,
     ModelGatewayValidationError,
     StructuredModelRequest,
@@ -124,10 +128,12 @@ class EvidenceIntegrationGate:
         quality_assessor: SignalQualityAssessor | None = None,
         projection_decomposer: ProjectionDecomposer | None = None,
         model_gateway: ModelGateway | None = None,
+        judgment_repair_policy: EvidenceJudgmentRepairPolicy | None = None,
     ) -> None:
         self._quality_assessor = quality_assessor or SignalQualityAssessor()
         self._projection_decomposer = projection_decomposer or ProjectionDecomposer()
         self._model_gateway = model_gateway or DeterministicModelGateway()
+        self._judgment_repair_policy = judgment_repair_policy or EvidenceJudgmentRepairPolicy()
 
     def integrate(
         self,
@@ -167,6 +173,8 @@ class EvidenceIntegrationGate:
             self._projection_decomposer = ProjectionDecomposer()
         if not hasattr(self, "_model_gateway"):
             self._model_gateway = DeterministicModelGateway()
+        if not hasattr(self, "_judgment_repair_policy"):
+            self._judgment_repair_policy = EvidenceJudgmentRepairPolicy()
 
     def _build_signal_events(
         self,
@@ -234,23 +242,14 @@ class EvidenceIntegrationGate:
             belief_state=belief_state,
             probe_set=probe_set,
         )
+        request = self._build_judge_evidence_request(
+            signal=signal,
+            hypothesis_ids=hypothesis_ids,
+            cycle=cycle,
+            probe_set=probe_set,
+        )
         try:
-            judgment = evidence_judgment_from_mapping(
-                self._model_gateway.complete_structured(
-                    StructuredModelRequest(
-                        task="judge_evidence",
-                        input={
-                            "signal_id": signal.id,
-                            "source_type": signal.source_type,
-                            "source": signal.source,
-                            "raw_content": signal.raw_content,
-                            "target_hypotheses": hypothesis_ids,
-                            "cycle_id": cycle.cycle_id,
-                            "probe_ids": [probe.id for probe in probe_set.probes],
-                        },
-                    )
-                )
-            )
+            judgment = self._evidence_judgment_with_repair(request=request)
         except ModelGatewayValidationError as error:
             return self._schema_violation_event(
                 index=index,
@@ -270,6 +269,87 @@ class EvidenceIntegrationGate:
             interpretation=judgment.interpretation,
             is_duplicate=is_duplicate,
             quality_overrides=judgment.quality_overrides,
+        )
+
+    def _build_judge_evidence_request(
+        self,
+        *,
+        signal: ExternalSignal,
+        hypothesis_ids: list[str],
+        cycle: CycleRecord,
+        probe_set: ProbeSet,
+    ) -> StructuredModelRequest:
+        return StructuredModelRequest(
+            task="judge_evidence",
+            input={
+                "signal_id": signal.id,
+                "source_type": signal.source_type,
+                "source": signal.source,
+                "raw_content": signal.raw_content,
+                "target_hypotheses": hypothesis_ids,
+                "cycle_id": cycle.cycle_id,
+                "probe_ids": [probe.id for probe in probe_set.probes],
+            },
+        )
+
+    def _evidence_judgment_with_repair(
+        self,
+        *,
+        request: StructuredModelRequest,
+    ) -> EvidenceJudgment:
+        payload = self._model_gateway.complete_structured(request)
+        try:
+            return evidence_judgment_from_mapping(payload)
+        except ModelGatewayValidationError as error:
+            if self._judgment_repair_policy.max_attempts == 0:
+                raise
+            return self._repair_evidence_judgment(
+                original_request=request,
+                invalid_payload=payload,
+                validation_error=error,
+            )
+
+    def _repair_evidence_judgment(
+        self,
+        *,
+        original_request: StructuredModelRequest,
+        invalid_payload: Any,
+        validation_error: ModelGatewayValidationError,
+    ) -> EvidenceJudgment:
+        latest_invalid_payload = _repair_payload_from(invalid_payload)
+        latest_error = validation_error
+        max_attempts = self._judgment_repair_policy.max_attempts
+
+        for attempt_index in range(1, max_attempts + 1):
+            repair_payload = self._model_gateway.complete_structured(
+                StructuredModelRequest(
+                    task=self._judgment_repair_policy.repair_task,
+                    input={
+                        "original_request": {
+                            "task": original_request.task,
+                            "input": dict(original_request.input),
+                        },
+                        "invalid_payload": latest_invalid_payload,
+                        "validation_error": str(latest_error),
+                        "attempt_index": attempt_index,
+                        "allowed_evidence_types": [evidence_type.value for evidence_type in EvidenceType],
+                        "allowed_likelihood_bands": [band.value for band in LikelihoodBand],
+                        "required_fields": [
+                            "evidence_type",
+                            "likelihoods",
+                            "interpretation",
+                        ],
+                    },
+                )
+            )
+            try:
+                return evidence_judgment_from_mapping(repair_payload)
+            except ModelGatewayValidationError as error:
+                latest_invalid_payload = _repair_payload_from(repair_payload)
+                latest_error = error
+
+        raise ModelGatewayValidationError(
+            f"repair failed after {max_attempts} attempt(s): {latest_error}"
         )
 
     def _schema_violation_event(
@@ -521,6 +601,12 @@ def _endorsed_hypothesis(content: str, hypotheses: list[Hypothesis]) -> str | No
         if any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns):
             return hypothesis.id
     return None
+
+
+def _repair_payload_from(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return {"_raw_payload": payload}
 
 
 def _scoped_cycle_key(run_id: str, cycle_id: str) -> str:
