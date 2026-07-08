@@ -23,6 +23,37 @@ class ModelGatewayConfig:
     responses: dict[str, dict[str, Any]] | None = None
 
 
+@dataclass(frozen=True)
+class EvidenceJudgmentRepairPolicy:
+    max_attempts: int = 0
+    repair_task: str = "repair_evidence_judgment"
+
+    def __post_init__(self) -> None:
+        if type(self.max_attempts) is not int:
+            raise ValueError("judgment repair max_attempts must be an integer")
+        if self.max_attempts < 0:
+            raise ValueError("judgment repair max_attempts must be non-negative")
+        if not isinstance(self.repair_task, str):
+            raise ValueError("judgment repair task must be a string")
+        if not self.repair_task.strip():
+            raise ValueError("judgment repair task must not be empty")
+
+    @classmethod
+    def from_config(
+        cls,
+        config: "EvidenceJudgmentRepairPolicy | Mapping[str, Any] | None" = None,
+    ) -> "EvidenceJudgmentRepairPolicy":
+        if config is None:
+            return cls()
+        if isinstance(config, cls):
+            return config
+        if not isinstance(config, Mapping):
+            raise ValueError("judgment repair policy config must be an object")
+        max_attempts = config.get("max_attempts", 0)
+        repair_task = config.get("repair_task", "repair_evidence_judgment")
+        return cls(max_attempts=max_attempts, repair_task=repair_task)
+
+
 class ModelGateway(Protocol):
     def complete_structured(self, request: StructuredModelRequest) -> dict[str, Any]:
         ...
@@ -177,6 +208,7 @@ def _model_gateway_config_from_input(
 __all__ = [
     "DeterministicModelGateway",
     "EvidenceJudgment",
+    "EvidenceJudgmentRepairPolicy",
     "ModelGateway",
     "ModelGatewayConfig",
     "ModelGatewayValidationError",

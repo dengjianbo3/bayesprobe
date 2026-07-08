@@ -2,6 +2,7 @@ import pytest
 
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
+    EvidenceJudgmentRepairPolicy,
     ModelGatewayConfig,
     ModelGatewayValidationError,
     ScriptedModelGateway,
@@ -173,6 +174,44 @@ def test_build_model_gateway_rejects_scripted_without_responses():
 def test_build_model_gateway_rejects_non_object_responses():
     with pytest.raises(ValueError, match="model gateway responses must be an object"):
         build_model_gateway({"kind": "scripted", "responses": []})
+
+
+def test_evidence_judgment_repair_policy_defaults_to_disabled():
+    policy = EvidenceJudgmentRepairPolicy()
+
+    assert policy.max_attempts == 0
+    assert policy.repair_task == "repair_evidence_judgment"
+
+
+def test_evidence_judgment_repair_policy_from_config_accepts_mapping():
+    policy = EvidenceJudgmentRepairPolicy.from_config(
+        {"max_attempts": 2, "repair_task": "repair_evidence_judgment"}
+    )
+
+    assert policy.max_attempts == 2
+    assert policy.repair_task == "repair_evidence_judgment"
+
+
+def test_evidence_judgment_repair_policy_from_config_accepts_existing_policy():
+    existing = EvidenceJudgmentRepairPolicy(max_attempts=1)
+
+    assert EvidenceJudgmentRepairPolicy.from_config(existing) is existing
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_message"),
+    [
+        ([], "judgment repair policy config must be an object"),
+        ({"max_attempts": "1"}, "judgment repair max_attempts must be an integer"),
+        ({"max_attempts": -1}, "judgment repair max_attempts must be non-negative"),
+        ({"repair_task": 1}, "judgment repair task must be a string"),
+        ({"repair_task": ""}, "judgment repair task must not be empty"),
+        ({"repair_task": "   "}, "judgment repair task must not be empty"),
+    ],
+)
+def test_evidence_judgment_repair_policy_rejects_invalid_config(config, expected_message):
+    with pytest.raises(ValueError, match=expected_message):
+        EvidenceJudgmentRepairPolicy.from_config(config)
 
 
 @pytest.mark.parametrize(

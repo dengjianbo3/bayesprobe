@@ -14,6 +14,7 @@ from bayesprobe import (
     BenchmarkSuiteResult,
     DeterministicModelGateway,
     EvidenceJudgment,
+    EvidenceJudgmentRepairPolicy,
     ExperimentRunConfig,
     ExperimentRunResult,
     ModelGateway,
@@ -49,6 +50,7 @@ def test_public_sdk_exports_supported_names():
         "BenchmarkSuiteResult",
         "DeterministicModelGateway",
         "EvidenceJudgment",
+        "EvidenceJudgmentRepairPolicy",
         "ExperimentRunConfig",
         "ExperimentRunResult",
         "ModelGateway",
@@ -74,6 +76,7 @@ def test_public_sdk_exports_supported_names():
     assert BenchmarkSuiteResult is not None
     assert DeterministicModelGateway is not None
     assert EvidenceJudgment is not None
+    assert EvidenceJudgmentRepairPolicy is not None
     assert ExperimentRunConfig is not None
     assert ExperimentRunResult is not None
     assert ModelGateway is not None

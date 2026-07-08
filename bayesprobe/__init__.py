@@ -22,6 +22,7 @@ from bayesprobe.experiment_runner import (
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     EvidenceJudgment,
+    EvidenceJudgmentRepairPolicy,
     ModelGateway,
     ModelGatewayConfig,
     ModelGatewayValidationError,
@@ -41,6 +42,7 @@ __all__ = [
     "BenchmarkSuiteResult",
     "DeterministicModelGateway",
     "EvidenceJudgment",
+    "EvidenceJudgmentRepairPolicy",
     "ExperimentRunConfig",
     "ExperimentRunResult",
     "ModelGateway",
