@@ -7,7 +7,7 @@ from bayesprobe.controllers import ControllerResult, SynchronizedController
 from bayesprobe.core import BayesProbeCore, CycleResult
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.model_gateway import ModelGateway
+from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGateway
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
     ProbeExecutionContext,
@@ -123,10 +123,15 @@ class BenchmarkHarness:
         core: BayesProbeCore | None = None,
         ledger: JsonlLedgerStore | None = None,
         model_gateway: ModelGateway | None = None,
+        judgment_repair_policy: EvidenceJudgmentRepairPolicy | None = None,
         max_cycles: int = 1,
         max_probes_per_cycle: int = 1,
     ) -> None:
-        self.core = core or BayesProbeCore(ledger=ledger, model_gateway=model_gateway)
+        self.core = core or BayesProbeCore(
+            ledger=ledger,
+            model_gateway=model_gateway,
+            judgment_repair_policy=judgment_repair_policy,
+        )
         self.ledger = self.core.ledger
         self.max_cycles = max_cycles
         self.max_probes_per_cycle = max_probes_per_cycle

@@ -166,6 +166,24 @@ def test_experiment_config_from_mapping_parses_model_gateway_object(tmp_path: Pa
     assert config.model_gateway.responses["judge_evidence"]["evidence_type"] == "boundary_condition"
 
 
+def test_experiment_config_from_mapping_parses_judgment_repair_policy(tmp_path: Path):
+    config = experiment_config_from_mapping(
+        {
+            "dataset_path": "datasets/toy.json",
+            "report_path": "outputs/toy-report.json",
+            "judgment_repair_policy": {
+                "max_attempts": 1,
+                "repair_task": "repair_evidence_judgment",
+            },
+        },
+        base_dir=tmp_path,
+    )
+
+    assert isinstance(config.judgment_repair_policy, EvidenceJudgmentRepairPolicy)
+    assert config.judgment_repair_policy.max_attempts == 1
+    assert config.judgment_repair_policy.repair_task == "repair_evidence_judgment"
+
+
 def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
     config_path = tmp_path / "toy-experiment.json"
     report_path = tmp_path / "outputs" / "toy-report.json"
@@ -232,6 +250,50 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
                 }
             ),
             "experiment config field model_gateway must be an object",
+        ),
+        (
+            "non_object_judgment_repair_policy.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "judgment_repair_policy": [],
+                }
+            ),
+            "experiment config field judgment_repair_policy must be an object",
+        ),
+        (
+            "non_integer_judgment_repair_attempts.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "judgment_repair_policy": {"max_attempts": "1"},
+                }
+            ),
+            "judgment repair max_attempts must be an integer",
+        ),
+        (
+            "negative_judgment_repair_attempts.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "judgment_repair_policy": {"max_attempts": -1},
+                }
+            ),
+            "judgment repair max_attempts must be non-negative",
+        ),
+        (
+            "empty_judgment_repair_task.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "judgment_repair_policy": {"repair_task": ""},
+                }
+            ),
+            "judgment repair task must not be empty",
         ),
     ],
 )

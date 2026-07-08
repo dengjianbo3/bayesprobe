@@ -100,6 +100,46 @@ def test_run_benchmark_experiment_uses_model_gateway_config(tmp_path: Path):
     assert evidence_payloads[0]["reliability"] == 0.62
 
 
+def test_run_benchmark_experiment_uses_judgment_repair_policy_config(tmp_path: Path):
+    report_path = tmp_path / "toy-report.json"
+    ledger_path = tmp_path / "toy-ledger.jsonl"
+
+    result = run_benchmark_experiment(
+        ExperimentRunConfig(
+            dataset_path=FIXTURE_PATH,
+            report_path=report_path,
+            ledger_path=ledger_path,
+            model_gateway={
+                "kind": "scripted",
+                "responses": {
+                    "judge_evidence": {
+                        "evidence_type": "not_a_type",
+                        "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                        "interpretation": "Invalid evidence type.",
+                    },
+                    "repair_evidence_judgment": {
+                        "evidence_type": "supporting",
+                        "likelihoods": {
+                            "H1": "moderately_confirming",
+                            "H2": "moderately_disconfirming",
+                        },
+                        "interpretation": "Experiment repaired judgment.",
+                    },
+                },
+            },
+            judgment_repair_policy={"max_attempts": 1},
+        )
+    )
+
+    evidence_payloads = [
+        record["payload"]
+        for record in JsonlLedgerStore(ledger_path).read_all("evidence_event")
+    ]
+    assert result.ledger_path == ledger_path
+    assert evidence_payloads[0]["evidence_type"] == "supporting"
+    assert evidence_payloads[0]["discard_reason"] is None
+
+
 @pytest.mark.parametrize(
     "config_kwargs",
     [

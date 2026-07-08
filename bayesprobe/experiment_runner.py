@@ -12,7 +12,11 @@ from bayesprobe.benchmark_io import (
     write_benchmark_report,
 )
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.model_gateway import ModelGatewayConfig, build_model_gateway
+from bayesprobe.model_gateway import (
+    EvidenceJudgmentRepairPolicy,
+    ModelGatewayConfig,
+    build_model_gateway,
+)
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,7 @@ class ExperimentRunConfig:
     max_cycles: int = 1
     max_probes_per_cycle: int = 1
     model_gateway: ModelGatewayConfig | Mapping[str, Any] | None = None
+    judgment_repair_policy: EvidenceJudgmentRepairPolicy | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.max_cycles < 1:
@@ -44,9 +49,13 @@ def run_benchmark_experiment(config: ExperimentRunConfig) -> ExperimentRunResult
     ledger_path = Path(config.ledger_path) if config.ledger_path is not None else None
     ledger = JsonlLedgerStore(ledger_path) if ledger_path is not None else None
     model_gateway = build_model_gateway(config.model_gateway)
+    judgment_repair_policy = EvidenceJudgmentRepairPolicy.from_config(
+        config.judgment_repair_policy
+    )
     harness = BenchmarkHarness(
         ledger=ledger,
         model_gateway=model_gateway,
+        judgment_repair_policy=judgment_repair_policy,
         max_cycles=config.max_cycles,
         max_probes_per_cycle=config.max_probes_per_cycle,
     )

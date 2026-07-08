@@ -9,7 +9,7 @@ from bayesprobe.benchmark import (
     BenchmarkSignalShape,
 )
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.model_gateway import ScriptedModelGateway
+from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ScriptedModelGateway
 
 
 def passive_refutation_signal(signal_id: str = "S_passive_refute") -> BenchmarkSignal:
@@ -211,6 +211,61 @@ def test_benchmark_harness_passes_model_gateway_to_created_core(tmp_path: Path):
     assert evidence_payloads[0]["evidence_type"] == "boundary_condition"
     assert evidence_payloads[0]["reliability"] == 0.62
     assert gateway.requests[0].input["signal_id"] == "S_gateway_passive"
+
+
+def test_benchmark_harness_passes_judgment_repair_policy_to_created_core(tmp_path: Path):
+    ledger = JsonlLedgerStore(tmp_path / "repair-ledger.jsonl")
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Invalid evidence type.",
+            },
+            "repair_evidence_judgment": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "Harness repaired judgment.",
+            },
+        }
+    )
+    harness = BenchmarkHarness(
+        ledger=ledger,
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
+    )
+    sample = BenchmarkSample(
+        sample_id="repair_passive",
+        question_or_claim="Can benchmark configure repair policy?",
+        signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
+        gold_best_hypothesis="H1",
+        passive_signals=[
+            BenchmarkSignal(
+                signal_id="S_repair_passive",
+                source_type="user_feedback",
+                source="user",
+                raw_content="Malformed judgment fixture.",
+                target_hypotheses=["H1", "H2"],
+            )
+        ],
+    )
+
+    result = harness.run_sample(sample)
+
+    evidence_payloads = [
+        record["payload"]
+        for record in ledger.read_all("evidence_event")
+    ]
+    assert result.belief_update_count == 2
+    assert evidence_payloads[0]["evidence_type"] == "supporting"
+    assert evidence_payloads[0]["discard_reason"] is None
+    assert [request.task for request in gateway.requests] == [
+        "judge_evidence",
+        "repair_evidence_judgment",
+    ]
 
 
 def test_benchmark_harness_records_schema_violation_without_belief_update(tmp_path: Path):

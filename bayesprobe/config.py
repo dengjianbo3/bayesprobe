@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from bayesprobe.experiment_runner import ExperimentRunConfig
-from bayesprobe.model_gateway import ModelGatewayConfig
+from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGatewayConfig
 
 
 def load_experiment_config(path: str | Path) -> ExperimentRunConfig:
@@ -35,6 +35,7 @@ def experiment_config_from_mapping(
         max_cycles=_optional_int(data, "max_cycles", default=1),
         max_probes_per_cycle=_optional_int(data, "max_probes_per_cycle", default=1),
         model_gateway=_optional_model_gateway_config(data),
+        judgment_repair_policy=_optional_judgment_repair_policy(data),
     )
 
 
@@ -98,6 +99,17 @@ def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfi
         kind=kind,
         responses=dict(responses) if responses is not None else None,
     )
+
+
+def _optional_judgment_repair_policy(
+    data: Mapping[str, Any],
+) -> EvidenceJudgmentRepairPolicy | None:
+    if "judgment_repair_policy" not in data or data["judgment_repair_policy"] is None:
+        return None
+    value = data["judgment_repair_policy"]
+    if not isinstance(value, Mapping):
+        raise ValueError("experiment config field judgment_repair_policy must be an object")
+    return EvidenceJudgmentRepairPolicy.from_config(value)
 
 
 __all__ = [
