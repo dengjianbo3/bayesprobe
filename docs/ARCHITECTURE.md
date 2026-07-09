@@ -355,6 +355,7 @@ Current adapters:
 
 - `DeterministicModelGateway`;
 - `ScriptedModelGateway`;
+- `OpenAIResponsesModelGateway`;
 - `build_model_gateway(...)` from `ModelGatewayConfig`.
 
 Current validation:
@@ -368,9 +369,8 @@ Current repair support:
 
 Future extension:
 
-- provider adapters for real models;
-- provider adapter prompt-registry metadata and request assembly;
-- response schema repair and retry policy;
+- broader provider registry and provider observability;
+- further response schema repair hardening;
 - recorded fixture adapter for reproducible experiments.
 
 ### 4.10 Projections
@@ -502,7 +502,7 @@ core's private internals.
 | Ledger/audit | Good MVP | JSONL audit path exists. |
 | Benchmark harness | Good MVP | Toy dataset and suite/report flow exist. |
 | Config/CLI/SDK | Good MVP | JSON experiment config, CLI, package exports exist. |
-| Model gateway | Partial | Structured seam and scripted/deterministic adapters exist; no real provider. |
+| Model gateway | Good MVP | Structured seam plus deterministic, scripted, and OpenAI Responses adapters exist. Provider observability remains future work. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
 | Multi-agent protocol | Partial | Projection-as-signal semantics exist; transport/protocol schema not complete. |
@@ -527,8 +527,8 @@ the current implementation is approximately **82%-86% complete**.
 The remaining work is mostly depth and robustness rather than direction:
 
 - stronger structured model output handling;
-- real provider adapters;
-- provider adapter prompt-registry metadata and request assembly;
+- broader provider registry and provider observability;
+- provider adapter prompt-registry metadata;
 - richer benchmark datasets and metrics;
 - stronger synchronized/multi-agent protocol objects;
 - production-grade persistence and experiment trace packaging.
@@ -547,6 +547,8 @@ Use for model-shaped structured decisions:
 - future projection writing or compression;
 - future prompt-versioned provider calls.
 - `ModelInvocationTrace` persists prompt/schema adapter metadata on evidence events.
+- `OpenAIResponsesModelGateway` provides the first real provider-backed adapter
+  while preserving the same structured output validation path.
 
 Do not let callers pass arbitrary model outputs into belief update. Model output
 must be parsed, validated, and converted into BayesProbe domain objects.
@@ -640,7 +642,8 @@ Why this is next:
 
 ### Phase 2: Provider Adapter and Prompt Registry Metadata
 
-Status: prompt/response metadata contract implemented as MVP; provider adapter remains future work.
+Status: OpenAI Responses adapter implemented as v0.1; broader provider registry
+and provider observability remain future work.
 
 Goal:
 
