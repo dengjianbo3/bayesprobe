@@ -213,6 +213,51 @@ def test_benchmark_harness_passes_model_gateway_to_created_core(tmp_path: Path):
     assert gateway.requests[0].input["signal_id"] == "S_gateway_passive"
 
 
+def test_benchmark_harness_records_model_trace_in_evidence_ledger(tmp_path: Path):
+    ledger = JsonlLedgerStore(tmp_path / "model-trace-ledger.jsonl")
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "Harness trace judgment.",
+            }
+        }
+    )
+    harness = BenchmarkHarness(ledger=ledger, model_gateway=gateway)
+    sample = BenchmarkSample(
+        sample_id="model_trace_passive",
+        question_or_claim="Can benchmark ledger preserve model trace?",
+        signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
+        gold_best_hypothesis="H1",
+        passive_signals=[
+            BenchmarkSignal(
+                signal_id="S_model_trace_passive",
+                source_type="user_feedback",
+                source="user",
+                raw_content="Model trace fixture.",
+                target_hypotheses=["H1", "H2"],
+            )
+        ],
+    )
+
+    harness.run_sample(sample)
+
+    evidence_payload = ledger.read_all("evidence_event")[0]["payload"]
+    assert evidence_payload["model_trace"] == {
+        "task": "judge_evidence",
+        "adapter_kind": "scripted",
+        "prompt_id": "evidence_judgment",
+        "prompt_version": "v0.1",
+        "schema_name": "EvidenceJudgment",
+        "schema_version": "v0.1",
+        "metadata": {},
+    }
+
+
 def test_benchmark_harness_passes_judgment_repair_policy_to_created_core(tmp_path: Path):
     ledger = JsonlLedgerStore(tmp_path / "repair-ledger.jsonl")
     gateway = ScriptedModelGateway(
