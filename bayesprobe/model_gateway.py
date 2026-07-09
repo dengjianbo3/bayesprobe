@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from bayesprobe.schemas import EvidenceType, LikelihoodBand
@@ -77,6 +78,7 @@ class ModelGatewayConfig:
     timeout_seconds: float = 30.0
     max_output_tokens: int | None = None
     base_url: str | None = None
+    fixture_path: str | Path | None = None
 
 
 @dataclass(frozen=True)
@@ -361,6 +363,12 @@ def build_model_gateway(
                 base_url=gateway_config.base_url,
             )
         )
+    if gateway_config.kind == "recorded":
+        if gateway_config.fixture_path is None:
+            raise ValueError("recorded model gateway requires fixture_path")
+        from bayesprobe.recorded_gateway import RecordedModelGateway
+
+        return RecordedModelGateway.from_json(gateway_config.fixture_path)
     raise ValueError(f"unsupported model gateway kind: {gateway_config.kind}")
 
 
@@ -394,6 +402,9 @@ def _model_gateway_config_from_input(
     base_url = config.get("base_url")
     if base_url is not None and not isinstance(base_url, str):
         raise ValueError("openai model gateway base_url must be a string")
+    fixture_path = config.get("fixture_path")
+    if fixture_path is not None and not isinstance(fixture_path, (str, Path)):
+        raise ValueError("recorded model gateway fixture_path must be a path")
 
     return ModelGatewayConfig(
         kind=kind,
@@ -403,6 +414,7 @@ def _model_gateway_config_from_input(
         timeout_seconds=timeout_seconds,
         max_output_tokens=max_output_tokens,
         base_url=base_url,
+        fixture_path=fixture_path,
     )
 
 

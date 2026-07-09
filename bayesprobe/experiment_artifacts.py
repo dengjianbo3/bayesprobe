@@ -243,6 +243,9 @@ def _model_gateway_snapshot(config: Any) -> dict[str, Any]:
             "timeout_seconds": config.timeout_seconds,
             "max_output_tokens": config.max_output_tokens,
             "base_url": config.base_url,
+            "fixture_path": str(Path(config.fixture_path))
+            if config.fixture_path is not None
+            else None,
         }
         if config.responses is not None:
             payload["scripted_response_tasks"] = sorted(config.responses)
@@ -255,6 +258,7 @@ def _model_gateway_snapshot(config: Any) -> dict[str, Any]:
             "timeout_seconds": config.get("timeout_seconds"),
             "max_output_tokens": config.get("max_output_tokens"),
             "base_url": config.get("base_url"),
+            "fixture_path": config.get("fixture_path"),
         }
         responses = config.get("responses")
         if isinstance(responses, Mapping):

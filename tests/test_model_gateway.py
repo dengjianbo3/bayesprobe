@@ -1,4 +1,6 @@
+import json
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 
@@ -6,6 +8,7 @@ from bayesprobe.openai_gateway import (
     OpenAIChatCompletionsModelGateway,
     OpenAIResponsesModelGateway,
 )
+from bayesprobe.recorded_gateway import RecordedModelGateway
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     EvidenceJudgmentRepairPolicy,
@@ -384,6 +387,36 @@ def test_build_model_gateway_creates_openai_chat_completions_gateway():
     assert gateway.config.model == "provider-model"
     assert gateway.config.api_key_env == "PROVIDER_API_KEY"
     assert gateway.config.base_url == "https://provider.example/v1"
+
+
+def test_build_model_gateway_creates_recorded_gateway(tmp_path: Path):
+    fixture_path = tmp_path / "recorded.json"
+    fixture_path.write_text(
+        json.dumps(
+            {
+                "fixture_name": "recorded_factory",
+                "responses": [
+                    {
+                        "match": {"task": "judge_evidence", "signal_id": "S1"},
+                        "response": {
+                            "evidence_type": "supporting",
+                            "likelihoods": {"H1": "moderately_confirming"},
+                            "interpretation": "Recorded factory response.",
+                            "quality_overrides": {},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gateway = build_model_gateway(
+        {"kind": "recorded", "fixture_path": str(fixture_path)}
+    )
+
+    assert isinstance(gateway, RecordedModelGateway)
+    assert gateway.fixture_name == "recorded_factory"
 
 
 def test_build_model_gateway_rejects_unknown_kind():

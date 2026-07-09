@@ -26,6 +26,7 @@ from bayesprobe import (
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
+    RecordedModelGateway,
     ScriptedModelGateway,
     StructuredModelRequest,
     build_model_gateway,
@@ -69,6 +70,7 @@ def test_public_sdk_exports_supported_names():
         "OpenAIChatCompletionsModelGateway",
         "OpenAIModelGatewayConfig",
         "OpenAIResponsesModelGateway",
+        "RecordedModelGateway",
         "ScriptedModelGateway",
         "StructuredModelRequest",
         "build_model_gateway",
@@ -102,6 +104,7 @@ def test_public_sdk_exports_supported_names():
     assert OpenAIChatCompletionsModelGateway is not None
     assert OpenAIModelGatewayConfig is not None
     assert OpenAIResponsesModelGateway is not None
+    assert RecordedModelGateway.adapter_kind == "recorded"
     assert ScriptedModelGateway is not None
     assert StructuredModelRequest is not None
     assert build_model_gateway is not None
@@ -284,6 +287,30 @@ def test_experiment_config_from_mapping_parses_openai_chat_completions(tmp_path:
     assert config.model_gateway.model == "provider-model"
     assert config.model_gateway.api_key_env == "PROVIDER_API_KEY"
     assert config.model_gateway.base_url == "https://provider.example/v1"
+
+
+def test_experiment_config_from_mapping_parses_recorded_gateway(tmp_path: Path):
+    dataset_path = tmp_path / "dataset.json"
+    report_path = tmp_path / "report.json"
+    fixture_path = tmp_path / "recorded.json"
+    dataset_path.write_text('{"dataset_name":"empty","samples":[]}', encoding="utf-8")
+    fixture_path.write_text('{"fixture_name":"recorded","responses":[]}', encoding="utf-8")
+
+    config = experiment_config_from_mapping(
+        {
+            "dataset_path": "dataset.json",
+            "report_path": "report.json",
+            "model_gateway": {
+                "kind": "recorded",
+                "fixture_path": "recorded.json",
+            },
+        },
+        base_dir=tmp_path,
+    )
+
+    assert config.model_gateway is not None
+    assert config.model_gateway.kind == "recorded"
+    assert config.model_gateway.fixture_path == tmp_path / "recorded.json"
 
 
 def test_experiment_config_from_mapping_parses_judgment_repair_policy(tmp_path: Path):

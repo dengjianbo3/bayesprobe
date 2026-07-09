@@ -40,6 +40,7 @@ from bayesprobe.openai_gateway import (
     build_openai_request_payload,
     parse_openai_structured_response,
 )
+from bayesprobe.recorded_gateway import RecordedModelGateway
 
 __all__ = [
     "BenchmarkDataset",
@@ -62,6 +63,7 @@ __all__ = [
     "OpenAIChatCompletionsModelGateway",
     "OpenAIModelGatewayConfig",
     "OpenAIResponsesModelGateway",
+    "RecordedModelGateway",
     "ScriptedModelGateway",
     "StructuredModelRequest",
     "build_model_gateway",

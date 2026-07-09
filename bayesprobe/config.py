@@ -38,7 +38,7 @@ def experiment_config_from_mapping(
         metadata=_optional_mapping(data, "metadata"),
         max_cycles=_optional_int(data, "max_cycles", default=1),
         max_probes_per_cycle=_optional_int(data, "max_probes_per_cycle", default=1),
-        model_gateway=_optional_model_gateway_config(data),
+        model_gateway=_optional_model_gateway_config(data, base_dir=base_dir),
         judgment_repair_policy=_optional_judgment_repair_policy(data),
     )
 
@@ -107,7 +107,11 @@ def _optional_mapping(data: Mapping[str, Any], field_name: str) -> dict[str, Any
     return dict(value)
 
 
-def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfig | None:
+def _optional_model_gateway_config(
+    data: Mapping[str, Any],
+    *,
+    base_dir: str | Path | None,
+) -> ModelGatewayConfig | None:
     if "model_gateway" not in data or data["model_gateway"] is None:
         return None
     value = data["model_gateway"]
@@ -128,6 +132,7 @@ def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfi
     timeout_seconds = value.get("timeout_seconds", 30.0)
     max_output_tokens = value.get("max_output_tokens")
     base_url = value.get("base_url")
+    fixture_path = value.get("fixture_path")
     if openai_kind:
         validated_openai_config = OpenAIModelGatewayConfig(
             model=model,
@@ -141,6 +146,12 @@ def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfi
         timeout_seconds = validated_openai_config.timeout_seconds
         max_output_tokens = validated_openai_config.max_output_tokens
         base_url = validated_openai_config.base_url
+    if kind == "recorded":
+        if fixture_path is None:
+            raise ValueError("recorded model gateway requires fixture_path")
+        if not isinstance(fixture_path, str):
+            raise ValueError("recorded model gateway fixture_path must be a string")
+        fixture_path = _resolve_path(fixture_path, base_dir=base_dir)
 
     return ModelGatewayConfig(
         kind=kind,
@@ -150,6 +161,7 @@ def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfi
         timeout_seconds=timeout_seconds,
         max_output_tokens=max_output_tokens,
         base_url=base_url,
+        fixture_path=fixture_path,
     )
 
 

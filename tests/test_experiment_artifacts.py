@@ -232,3 +232,43 @@ def test_artifact_snapshot_includes_chat_completions_provider_without_raw_api_ke
     assert manifest["model_gateway"] == snapshot["model_gateway"]
     assert "provider-secret-123" not in manifest_text
     assert "provider-secret-123" not in snapshot_text
+
+
+def test_artifact_snapshot_includes_recorded_gateway_fixture_path(tmp_path: Path):
+    report_path = tmp_path / "report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "dataset_name": "toy",
+                "metadata": {},
+                "sample_count": 0,
+                "final_accuracy": 0.0,
+                "update_direction_accuracy": None,
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = ExperimentRunConfig(
+        dataset_path=FIXTURE_PATH,
+        report_path=report_path,
+        model_gateway={
+            "kind": "recorded",
+            "fixture_path": "fixtures/providers/deepseek_chat_evidence_v0_1.json",
+        },
+    )
+
+    bundle = write_experiment_artifact_bundle(
+        artifact_dir=tmp_path / "artifacts",
+        config=config,
+        dataset=BenchmarkDataset(dataset_name="toy", samples=[]),
+        report_path=report_path,
+        ledger_path=None,
+        sample_count=0,
+    )
+
+    config_snapshot = json.loads(bundle.config_snapshot_path.read_text(encoding="utf-8"))
+    assert config_snapshot["model_gateway"] == {
+        "kind": "recorded",
+        "fixture_path": "fixtures/providers/deepseek_chat_evidence_v0_1.json",
+    }
