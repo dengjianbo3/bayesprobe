@@ -3,9 +3,12 @@ from bayesprobe.schemas import (
     ChangeMyMindCondition,
     CycleRecord,
     CycleSignalShape,
+    EvidenceEvent,
+    EvidenceType,
     ExternalSignal,
     Hypothesis,
     HypothesisStatus,
+    LikelihoodBand,
     ProbeCandidate,
     ProbeDesign,
     ProbeSet,
@@ -88,3 +91,48 @@ def test_external_signal_kinds_and_change_my_mind_candidates():
 
     assert condition.structured_probe_candidates[0].candidate_probe.method == "source_tracing"
     assert signal.signal_kind == SignalKind.PASSIVE
+
+
+def test_evidence_event_model_trace_defaults_to_empty_dict():
+    event = EvidenceEvent(
+        id="E1",
+        derived_from_signal="S1",
+        target_hypotheses=["H1"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content="SUPPORTS: evidence.",
+        likelihoods={"H1": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+
+    assert event.model_trace == {}
+
+
+def test_evidence_event_model_trace_round_trips_through_json():
+    event = EvidenceEvent(
+        id="E1",
+        derived_from_signal="S1",
+        target_hypotheses=["H1"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content="SUPPORTS: evidence.",
+        likelihoods={"H1": LikelihoodBand.MODERATELY_CONFIRMING},
+        model_trace={
+            "task": "judge_evidence",
+            "adapter_kind": "scripted",
+            "prompt_id": "evidence_judgment",
+            "prompt_version": "v0.1",
+            "schema_name": "EvidenceJudgment",
+            "schema_version": "v0.1",
+            "metadata": {},
+        },
+    )
+
+    loaded = EvidenceEvent.model_validate_json(event.model_dump_json())
+
+    assert loaded.model_trace == {
+        "task": "judge_evidence",
+        "adapter_kind": "scripted",
+        "prompt_id": "evidence_judgment",
+        "prompt_version": "v0.1",
+        "schema_name": "EvidenceJudgment",
+        "schema_version": "v0.1",
+        "metadata": {},
+    }

@@ -234,6 +234,7 @@ class EvidenceEvent(BaseModel):
     likelihoods: dict[str, LikelihoodBand] = Field(default_factory=dict)
     interpretation: str = ""
     discard_reason: str | None = None
+    model_trace: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("reliability", "independence", "relevance", "novelty", "specificity", "verifiability")
     @classmethod
