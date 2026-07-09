@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 .superpowers/
+.worktrees/
 .mypy_cache/
 .ruff_cache/
 .coverage
