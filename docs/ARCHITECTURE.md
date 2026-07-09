@@ -642,8 +642,9 @@ Why this is next:
 
 ### Phase 2: Provider Adapter and Prompt Registry Metadata
 
-Status: OpenAI Responses adapter implemented as v0.1; broader provider registry
-and provider observability remain future work.
+Status: OpenAI Responses adapter implemented as v0.1, and prompt/model
+invocation artifact summaries implemented as v0.1; broader provider registry,
+prompt registry snapshots, and provider observability remain future work.
 
 Goal:
 
@@ -686,8 +687,9 @@ Shape:
 
 ### Phase 5: Persistence and Experiment Packaging
 
-Status: stable artifact directory implemented as v0.1; SQLite persistence,
-dataset split filters, and prompt registry snapshots remain future work.
+Status: stable artifact directory and model invocation provenance summaries
+implemented as v0.1; SQLite persistence, dataset split filters, and full prompt
+registry snapshots remain future work.
 
 Goal:
 
@@ -701,6 +703,10 @@ Shape:
 
 Artifact v0.1 writes a manifest, report, ledger, config snapshot, and dataset
 snapshot without changing BayesProbe core control flow.
+
+Model invocation provenance v0.1 summarizes existing ledger `model_trace`
+records into `model_invocations.json` and the manifest without changing
+BayesProbe core control flow.
 
 ## 9. Testing Strategy
 
