@@ -125,6 +125,29 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     assert '"api_key"' not in artifact_text
 
 
+def test_run_benchmark_experiment_uses_artifact_ledger_when_ledger_path_is_omitted(
+    tmp_path: Path,
+):
+    report_path = tmp_path / "reports" / "toy-report.json"
+    artifact_dir = tmp_path / "artifacts" / "toy-run"
+    artifact_ledger_path = artifact_dir / "ledger.jsonl"
+
+    result = run_benchmark_experiment(
+        ExperimentRunConfig(
+            dataset_path=FIXTURE_PATH,
+            report_path=report_path,
+            artifact_dir=artifact_dir,
+        )
+    )
+
+    record_types = [
+        record["record_type"] for record in JsonlLedgerStore(artifact_ledger_path).read_all()
+    ]
+    assert result.ledger_path == artifact_ledger_path
+    assert artifact_ledger_path.exists()
+    assert "benchmark_sample_result" in record_types
+
+
 def test_run_benchmark_experiment_writes_optional_ledger(tmp_path: Path):
     report_path = tmp_path / "toy-report.json"
     ledger_path = tmp_path / "ledgers" / "toy-ledger.jsonl"

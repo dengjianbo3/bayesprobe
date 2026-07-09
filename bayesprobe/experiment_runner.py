@@ -65,7 +65,10 @@ class ExperimentRunResult:
 
 def run_benchmark_experiment(config: ExperimentRunConfig) -> ExperimentRunResult:
     dataset = load_benchmark_dataset(config.dataset_path)
+    artifact_dir = Path(config.artifact_dir) if config.artifact_dir is not None else None
     ledger_path = Path(config.ledger_path) if config.ledger_path is not None else None
+    if ledger_path is None and artifact_dir is not None:
+        ledger_path = artifact_dir / "ledger.jsonl"
     ledger = JsonlLedgerStore(ledger_path) if ledger_path is not None else None
     model_gateway = build_model_gateway(config.model_gateway)
     judgment_repair_policy = EvidenceJudgmentRepairPolicy.from_config(
@@ -86,7 +89,6 @@ def run_benchmark_experiment(config: ExperimentRunConfig) -> ExperimentRunResult
         dataset_name=dataset.dataset_name,
         metadata=dataset.metadata,
     )
-    artifact_dir = Path(config.artifact_dir) if config.artifact_dir is not None else None
     artifact_manifest_path = None
     if artifact_dir is not None:
         artifact_bundle = write_experiment_artifact_bundle(
