@@ -27,8 +27,10 @@
             <select id="provider-kind">
               <option value="deterministic">Deterministic</option>
               <option value="openai_responses">OpenAI Responses</option>
+              <option value="openai_chat_completions">Chat Completions (unsupported)</option>
             </select>
           </label>
+          <div id="provider-note" class="provider-note" aria-live="polite"></div>
           <div id="provider-auth" class="provider-stack">
             <label>
               API key
