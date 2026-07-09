@@ -324,7 +324,10 @@ class EvidenceIntegrationGate:
         request: StructuredModelRequest,
     ) -> tuple[EvidenceJudgment, ModelInvocationTrace]:
         model_trace = self._model_trace_for_request(request)
-        payload = self._model_gateway.complete_structured(request)
+        try:
+            payload = self._model_gateway.complete_structured(request)
+        except ModelGatewayValidationError as error:
+            raise _EvidenceJudgmentFailure(error=error, model_trace=model_trace) from error
         try:
             return evidence_judgment_from_mapping(payload), model_trace
         except ModelGatewayValidationError as error:
@@ -374,7 +377,12 @@ class EvidenceIntegrationGate:
                 metadata={"repair_attempt_index": attempt_index},
             )
             repair_trace = self._model_trace_for_request(repair_request)
-            repair_payload = self._model_gateway.complete_structured(repair_request)
+            try:
+                repair_payload = self._model_gateway.complete_structured(repair_request)
+            except ModelGatewayValidationError as error:
+                latest_error = error
+                latest_trace = repair_trace
+                continue
             try:
                 return evidence_judgment_from_mapping(repair_payload), repair_trace
             except ModelGatewayValidationError as error:

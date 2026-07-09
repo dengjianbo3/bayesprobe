@@ -11,6 +11,20 @@ class ModelGatewayValidationError(ValueError):
     pass
 
 
+def _validate_optional_string(
+    value: str | None,
+    *,
+    owner: str,
+    field_name: str,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"{owner} {field_name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{owner} {field_name} must not be empty")
+
+
 @dataclass(frozen=True)
 class StructuredModelRequest:
     task: str
@@ -28,23 +42,26 @@ class StructuredModelRequest:
             raise ValueError("structured model request task must not be empty")
         if not isinstance(self.input, Mapping):
             raise ValueError("structured model request input must be an object")
-        if self.prompt_id is not None:
-            if not isinstance(self.prompt_id, str):
-                raise ValueError("structured model request prompt_id must be a string")
-            if not self.prompt_id.strip():
-                raise ValueError("structured model request prompt_id must not be empty")
-        if self.prompt_version is not None:
-            if not isinstance(self.prompt_version, str):
-                raise ValueError("structured model request prompt_version must be a string")
-            if not self.prompt_version.strip():
-                raise ValueError("structured model request prompt_version must not be empty")
-        if self.schema_name is not None and not isinstance(self.schema_name, str):
-            raise ValueError("structured model request schema_name must be a string")
-        if self.schema_version is not None:
-            if not isinstance(self.schema_version, str):
-                raise ValueError("structured model request schema_version must be a string")
-            if not self.schema_version.strip():
-                raise ValueError("structured model request schema_version must not be empty")
+        _validate_optional_string(
+            self.prompt_id,
+            owner="structured model request",
+            field_name="prompt_id",
+        )
+        _validate_optional_string(
+            self.prompt_version,
+            owner="structured model request",
+            field_name="prompt_version",
+        )
+        _validate_optional_string(
+            self.schema_name,
+            owner="structured model request",
+            field_name="schema_name",
+        )
+        _validate_optional_string(
+            self.schema_version,
+            owner="structured model request",
+            field_name="schema_version",
+        )
         if not isinstance(self.metadata, Mapping):
             raise ValueError("structured model request metadata must be an object")
         object.__setattr__(self, "input", dict(self.input))
@@ -77,20 +94,26 @@ class ModelInvocationTrace:
             raise ValueError("model invocation adapter_kind must be a string")
         if not self.adapter_kind.strip():
             raise ValueError("model invocation adapter_kind must not be empty")
-        if self.prompt_id is not None:
-            if not isinstance(self.prompt_id, str):
-                raise ValueError("model invocation prompt_id must be a string")
-            if not self.prompt_id.strip():
-                raise ValueError("model invocation prompt_id must not be empty")
-        if self.prompt_version is not None and not isinstance(self.prompt_version, str):
-            raise ValueError("model invocation prompt_version must be a string")
-        if self.schema_name is not None and not isinstance(self.schema_name, str):
-            raise ValueError("model invocation schema_name must be a string")
-        if self.schema_version is not None:
-            if not isinstance(self.schema_version, str):
-                raise ValueError("model invocation schema_version must be a string")
-            if not self.schema_version.strip():
-                raise ValueError("model invocation schema_version must not be empty")
+        _validate_optional_string(
+            self.prompt_id,
+            owner="model invocation",
+            field_name="prompt_id",
+        )
+        _validate_optional_string(
+            self.prompt_version,
+            owner="model invocation",
+            field_name="prompt_version",
+        )
+        _validate_optional_string(
+            self.schema_name,
+            owner="model invocation",
+            field_name="schema_name",
+        )
+        _validate_optional_string(
+            self.schema_version,
+            owner="model invocation",
+            field_name="schema_version",
+        )
         if self.repair_attempt_index is not None and (
             type(self.repair_attempt_index) is not int or self.repair_attempt_index < 1
         ):

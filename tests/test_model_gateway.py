@@ -173,6 +173,10 @@ def test_structured_model_request_stores_metadata_and_is_frozen():
             "structured model request prompt_version must not be empty",
         ),
         (
+            {"task": "judge_evidence", "input": {}, "schema_name": "   "},
+            "structured model request schema_name must not be empty",
+        ),
+        (
             {"task": "judge_evidence", "input": {}, "schema_name": 1},
             "structured model request schema_name must be a string",
         ),
@@ -253,6 +257,18 @@ def test_model_invocation_trace_rejects_invalid_repair_attempt_index(repair_atte
         (
             {"task": "judge_evidence", "adapter_kind": "scripted", "prompt_id": ""},
             "model invocation prompt_id must not be empty",
+        ),
+        (
+            {"task": "judge_evidence", "adapter_kind": "scripted", "prompt_version": " "},
+            "model invocation prompt_version must not be empty",
+        ),
+        (
+            {"task": "judge_evidence", "adapter_kind": "scripted", "schema_name": ""},
+            "model invocation schema_name must not be empty",
+        ),
+        (
+            {"task": "judge_evidence", "adapter_kind": "scripted", "schema_version": "   "},
+            "model invocation schema_version must not be empty",
         ),
         (
             {"task": "judge_evidence", "adapter_kind": "scripted", "metadata": []},

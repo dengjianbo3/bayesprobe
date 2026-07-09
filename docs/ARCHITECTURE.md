@@ -369,7 +369,7 @@ Current repair support:
 Future extension:
 
 - provider adapters for real models;
-- prompt/version metadata;
+- provider adapter prompt-registry metadata and request assembly;
 - response schema repair and retry policy;
 - recorded fixture adapter for reproducible experiments.
 
@@ -528,7 +528,7 @@ The remaining work is mostly depth and robustness rather than direction:
 
 - stronger structured model output handling;
 - real provider adapters;
-- prompt/version metadata;
+- provider adapter prompt-registry metadata and request assembly;
 - richer benchmark datasets and metrics;
 - stronger synchronized/multi-agent protocol objects;
 - production-grade persistence and experiment trace packaging.
@@ -638,7 +638,7 @@ Why this is next:
 - it protects belief state quality;
 - it keeps schema failure visible in the ledger.
 
-### Phase 2: Provider Adapter and Prompt Metadata
+### Phase 2: Provider Adapter and Prompt Registry Metadata
 
 Status: prompt/response metadata contract implemented as MVP; provider adapter remains future work.
 
@@ -650,7 +650,7 @@ Goal:
 Shape:
 
 - provider-backed `ModelGateway` adapter;
-- prompt templates keyed by task and version;
+- provider-side prompt registry metadata and request assembly;
 - structured output parser/validator;
 - recorded fixtures for reproducible tests.
 

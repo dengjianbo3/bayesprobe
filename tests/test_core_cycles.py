@@ -5,7 +5,11 @@ import pytest
 from bayesprobe.core import BayesProbeCore, EvidenceIntegrationGate
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ScriptedModelGateway
+from bayesprobe.model_gateway import (
+    EvidenceJudgmentRepairPolicy,
+    ModelGatewayValidationError,
+    ScriptedModelGateway,
+)
 from bayesprobe.schemas import (
     BeliefState,
     CycleRecord,
@@ -139,6 +143,30 @@ def make_active_signal(cycle_id: str = "pending") -> ExternalSignal:
         raw_content="Malformed judgment fixture.",
         initial_target_hypotheses=["H1", "H2"],
     )
+
+
+class GatewayValidationErrorOnJudgeGateway:
+    adapter_kind = "gateway_validation"
+
+    def complete_structured(self, request):
+        raise ModelGatewayValidationError("gateway rejected evidence judgment payload")
+
+
+class GatewayValidationErrorOnRepairGateway:
+    adapter_kind = "gateway_validation"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    def complete_structured(self, request):
+        self.requests.append(request)
+        if request.task == "judge_evidence":
+            return {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Initial payload is invalid.",
+            }
+        raise ModelGatewayValidationError("gateway rejected repair payload")
 
 
 def test_active_only_signal_updates_belief_through_evidence_gate():
@@ -513,6 +541,30 @@ def test_direct_signal_schema_violation_records_judge_model_trace():
     assert event.model_trace["schema_name"] == "EvidenceJudgment"
 
 
+def test_direct_signal_gateway_validation_error_becomes_schema_violation():
+    gate = EvidenceIntegrationGate(model_gateway=GatewayValidationErrorOnJudgeGateway())
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_gateway_validation"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_gateway_validation"),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    assert event.evidence_type == EvidenceType.NEUTRAL
+    assert event.discard_reason == "schema_violation: gateway rejected evidence judgment payload"
+    assert event.model_trace == {
+        "task": "judge_evidence",
+        "adapter_kind": "gateway_validation",
+        "prompt_id": "evidence_judgment",
+        "prompt_version": "v0.1",
+        "schema_name": "EvidenceJudgment",
+        "schema_version": "v0.1",
+        "metadata": {},
+    }
+
+
 def test_direct_signal_repaired_judgment_records_repair_model_trace():
     gateway = ScriptedModelGateway(
         responses={
@@ -559,6 +611,41 @@ def test_direct_signal_repaired_judgment_records_repair_model_trace():
         "schema_name": "EvidenceJudgment",
         "schema_version": "v0.1",
         "repair_attempt_index": 1,
+        "metadata": {},
+    }
+
+
+def test_direct_signal_repair_exhaustion_records_latest_repair_trace():
+    gateway = GatewayValidationErrorOnRepairGateway()
+    gate = EvidenceIntegrationGate(
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=2),
+    )
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_model_trace_repair_exhausted"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_model_trace_repair_exhausted"),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    assert [request.task for request in gateway.requests] == [
+        "judge_evidence",
+        "repair_evidence_judgment",
+        "repair_evidence_judgment",
+    ]
+    assert event.discard_reason == (
+        "schema_violation: repair failed after 2 attempt(s): gateway rejected repair payload"
+    )
+    assert event.model_trace == {
+        "task": "repair_evidence_judgment",
+        "adapter_kind": "gateway_validation",
+        "prompt_id": "evidence_judgment_repair",
+        "prompt_version": "v0.1",
+        "schema_name": "EvidenceJudgment",
+        "schema_version": "v0.1",
+        "repair_attempt_index": 2,
         "metadata": {},
     }
 
