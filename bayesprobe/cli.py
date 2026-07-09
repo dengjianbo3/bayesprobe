@@ -45,15 +45,18 @@ def _run_command(args: argparse.Namespace) -> int:
 
 def _format_summary(result: ExperimentRunResult) -> str:
     suite = result.suite_result
-    return (
-        "BayesProbe experiment complete: "
-        f"dataset={result.dataset.dataset_name} "
-        f"samples={suite.sample_count} "
-        f"final_accuracy={suite.final_accuracy} "
-        f"update_direction_accuracy={suite.update_direction_accuracy} "
-        f"report={result.report_path} "
-        f"ledger={result.ledger_path}"
-    )
+    parts = [
+        "BayesProbe experiment complete:",
+        f"dataset={result.dataset.dataset_name}",
+        f"samples={suite.sample_count}",
+        f"final_accuracy={suite.final_accuracy}",
+        f"update_direction_accuracy={suite.update_direction_accuracy}",
+        f"report={result.report_path}",
+        f"ledger={result.ledger_path}",
+    ]
+    if result.artifact_dir is not None:
+        parts.append(f"artifact={result.artifact_dir}")
+    return " ".join(parts)
 
 
 if __name__ == "__main__":

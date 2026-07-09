@@ -49,6 +49,30 @@ def test_cli_run_writes_report_ledger_and_prints_summary(tmp_path: Path, capsys)
     assert ledger_path.exists()
 
 
+def test_cli_run_prints_artifact_summary_when_enabled(tmp_path: Path, capsys):
+    config_path = tmp_path / "experiment.json"
+    report_path = config_path.parent / "outputs" / "report.json"
+    artifact_dir = config_path.parent / "artifacts" / "toy-run"
+    write_json(
+        config_path,
+        {
+            "dataset_path": str(FIXTURE_PATH.resolve()),
+            "report_path": "outputs/report.json",
+            "artifact_dir": "artifacts/toy-run",
+        },
+    )
+
+    exit_code = main(["run", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert f"report={report_path}" in captured.out
+    assert f"ledger={artifact_dir / 'ledger.jsonl'}" in captured.out
+    assert f"artifact={artifact_dir}" in captured.out
+    assert (artifact_dir / "manifest.json").exists()
+
+
 def test_cli_run_returns_one_for_invalid_config(tmp_path: Path, capsys):
     config_path = tmp_path / "experiment.json"
     write_json(config_path, {"report_path": "outputs/report.json"})

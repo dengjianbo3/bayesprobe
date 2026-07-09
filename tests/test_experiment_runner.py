@@ -48,6 +48,29 @@ def test_run_benchmark_experiment_writes_report(tmp_path: Path):
     ]
 
 
+def test_run_benchmark_experiment_uses_artifact_ledger_when_ledger_path_is_omitted(
+    tmp_path: Path,
+):
+    report_path = tmp_path / "reports" / "toy-report.json"
+    artifact_dir = tmp_path / "artifacts" / "toy-run"
+
+    result = run_benchmark_experiment(
+        ExperimentRunConfig(
+            dataset_path=FIXTURE_PATH,
+            report_path=report_path,
+            artifact_dir=artifact_dir,
+        )
+    )
+
+    assert result.ledger_path == artifact_dir / "ledger.jsonl"
+    assert (artifact_dir / "ledger.jsonl").exists()
+    record_types = [
+        record["record_type"]
+        for record in JsonlLedgerStore(artifact_dir / "ledger.jsonl").read_all()
+    ]
+    assert "benchmark_sample_result" in record_types
+
+
 def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     report_path = tmp_path / "reports" / "toy-report.json"
     ledger_path = tmp_path / "ledgers" / "toy-ledger.jsonl"
