@@ -11,8 +11,10 @@ from bayesprobe.model_gateway import (
     EvidenceJudgmentRepairPolicy,
     ModelGateway,
     ModelGatewayValidationError,
+    ModelInvocationTrace,
     StructuredModelRequest,
     evidence_judgment_from_mapping,
+    model_gateway_adapter_kind,
 )
 from bayesprobe.schemas import (
     BeliefState,
@@ -42,6 +44,18 @@ class SignalQuality:
     novelty: float
     specificity: float
     verifiability: float
+
+
+class _EvidenceJudgmentFailure(Exception):
+    def __init__(
+        self,
+        *,
+        error: ModelGatewayValidationError,
+        model_trace: ModelInvocationTrace,
+    ) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.model_trace = model_trace
 
 
 class SignalQualityAssessor:
@@ -176,6 +190,12 @@ class EvidenceIntegrationGate:
         if not hasattr(self, "_judgment_repair_policy"):
             self._judgment_repair_policy = EvidenceJudgmentRepairPolicy()
 
+    def _model_trace_for_request(self, request: StructuredModelRequest) -> ModelInvocationTrace:
+        return ModelInvocationTrace.from_request(
+            request,
+            adapter_kind=model_gateway_adapter_kind(self._model_gateway),
+        )
+
     def _build_signal_events(
         self,
         *,
@@ -249,15 +269,16 @@ class EvidenceIntegrationGate:
             probe_set=probe_set,
         )
         try:
-            judgment = self._evidence_judgment_with_repair(request=request)
-        except ModelGatewayValidationError as error:
+            judgment, model_trace = self._evidence_judgment_with_repair(request=request)
+        except _EvidenceJudgmentFailure as failure:
             return self._schema_violation_event(
                 index=index,
                 signal=signal,
                 cycle=cycle,
                 hypothesis_ids=hypothesis_ids,
                 is_duplicate=is_duplicate,
-                error=error,
+                error=failure.error,
+                model_trace=failure.model_trace,
             )
 
         return self._event(
@@ -269,6 +290,7 @@ class EvidenceIntegrationGate:
             interpretation=judgment.interpretation,
             is_duplicate=is_duplicate,
             quality_overrides=judgment.quality_overrides,
+            model_trace=model_trace,
         )
 
     def _build_judge_evidence_request(
@@ -290,19 +312,24 @@ class EvidenceIntegrationGate:
                 "cycle_id": cycle.cycle_id,
                 "probe_ids": [probe.id for probe in probe_set.probes],
             },
+            prompt_id="evidence_judgment",
+            prompt_version="v0.1",
+            schema_name="EvidenceJudgment",
+            schema_version="v0.1",
         )
 
     def _evidence_judgment_with_repair(
         self,
         *,
         request: StructuredModelRequest,
-    ) -> EvidenceJudgment:
+    ) -> tuple[EvidenceJudgment, ModelInvocationTrace]:
+        model_trace = self._model_trace_for_request(request)
         payload = self._model_gateway.complete_structured(request)
         try:
-            return evidence_judgment_from_mapping(payload)
+            return evidence_judgment_from_mapping(payload), model_trace
         except ModelGatewayValidationError as error:
             if self._judgment_repair_policy.max_attempts == 0:
-                raise
+                raise _EvidenceJudgmentFailure(error=error, model_trace=model_trace) from error
             return self._repair_evidence_judgment(
                 original_request=request,
                 invalid_payload=payload,
@@ -315,42 +342,50 @@ class EvidenceIntegrationGate:
         original_request: StructuredModelRequest,
         invalid_payload: Any,
         validation_error: ModelGatewayValidationError,
-    ) -> EvidenceJudgment:
+    ) -> tuple[EvidenceJudgment, ModelInvocationTrace]:
         latest_invalid_payload = _repair_payload_from(invalid_payload)
         latest_error = validation_error
+        latest_trace = self._model_trace_for_request(original_request)
         max_attempts = self._judgment_repair_policy.max_attempts
 
         for attempt_index in range(1, max_attempts + 1):
-            repair_payload = self._model_gateway.complete_structured(
-                StructuredModelRequest(
-                    task=self._judgment_repair_policy.repair_task,
-                    input={
-                        "original_request": {
-                            "task": original_request.task,
-                            "input": dict(original_request.input),
-                        },
-                        "invalid_payload": latest_invalid_payload,
-                        "validation_error": str(latest_error),
-                        "attempt_index": attempt_index,
-                        "allowed_evidence_types": [evidence_type.value for evidence_type in EvidenceType],
-                        "allowed_likelihood_bands": [band.value for band in LikelihoodBand],
-                        "required_fields": [
-                            "evidence_type",
-                            "likelihoods",
-                            "interpretation",
-                        ],
+            repair_request = StructuredModelRequest(
+                task=self._judgment_repair_policy.repair_task,
+                input={
+                    "original_request": {
+                        "task": original_request.task,
+                        "input": dict(original_request.input),
                     },
-                )
+                    "invalid_payload": latest_invalid_payload,
+                    "validation_error": str(latest_error),
+                    "attempt_index": attempt_index,
+                    "allowed_evidence_types": [evidence_type.value for evidence_type in EvidenceType],
+                    "allowed_likelihood_bands": [band.value for band in LikelihoodBand],
+                    "required_fields": [
+                        "evidence_type",
+                        "likelihoods",
+                        "interpretation",
+                    ],
+                },
+                prompt_id="evidence_judgment_repair",
+                prompt_version="v0.1",
+                schema_name="EvidenceJudgment",
+                schema_version="v0.1",
+                metadata={"repair_attempt_index": attempt_index},
             )
+            repair_trace = self._model_trace_for_request(repair_request)
+            repair_payload = self._model_gateway.complete_structured(repair_request)
             try:
-                return evidence_judgment_from_mapping(repair_payload)
+                return evidence_judgment_from_mapping(repair_payload), repair_trace
             except ModelGatewayValidationError as error:
                 latest_invalid_payload = _repair_payload_from(repair_payload)
                 latest_error = error
+                latest_trace = repair_trace
 
-        raise ModelGatewayValidationError(
+        failure = ModelGatewayValidationError(
             f"repair failed after {max_attempts} attempt(s): {latest_error}"
         )
+        raise _EvidenceJudgmentFailure(error=failure, model_trace=latest_trace) from latest_error
 
     def _schema_violation_event(
         self,
@@ -361,6 +396,7 @@ class EvidenceIntegrationGate:
         hypothesis_ids: list[str],
         is_duplicate: bool,
         error: ModelGatewayValidationError,
+        model_trace: ModelInvocationTrace | None = None,
     ) -> EvidenceEvent:
         return self._event(
             event_id=f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}",
@@ -372,6 +408,7 @@ class EvidenceIntegrationGate:
             is_duplicate=is_duplicate,
             quality_overrides=_ZERO_QUALITY_OVERRIDES,
             discard_reason=f"schema_violation: {error}",
+            model_trace=model_trace,
         )
 
     def _build_projection_sender_event(
@@ -441,6 +478,7 @@ class EvidenceIntegrationGate:
         is_duplicate: bool,
         quality_overrides: dict[str, float] | None = None,
         discard_reason: str | None = None,
+        model_trace: ModelInvocationTrace | None = None,
     ) -> EvidenceEvent:
         quality = self._quality_assessor.assess(
             signal=signal,
@@ -464,6 +502,7 @@ class EvidenceIntegrationGate:
             likelihoods=likelihoods,
             interpretation=interpretation,
             discard_reason=discard_reason,
+            model_trace=model_trace.to_dict() if model_trace is not None else {},
         )
 
     def _resolve_target_hypotheses(

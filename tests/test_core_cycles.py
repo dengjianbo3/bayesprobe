@@ -446,6 +446,148 @@ def test_direct_signal_missing_repair_task_raises_when_repair_enabled():
         )
 
 
+def test_direct_signal_valid_judgment_records_model_trace():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "Scripted supporting judgment.",
+            }
+        }
+    )
+    gate = EvidenceIntegrationGate(model_gateway=gateway)
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_model_trace_valid"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_model_trace_valid"),
+        signals=[make_active_signal()],
+    )
+
+    request = gateway.requests[0]
+    event = result.evidence_events[0]
+    assert request.prompt_id == "evidence_judgment"
+    assert request.prompt_version == "v0.1"
+    assert request.schema_name == "EvidenceJudgment"
+    assert request.schema_version == "v0.1"
+    assert request.metadata == {}
+    assert event.model_trace == {
+        "task": "judge_evidence",
+        "adapter_kind": "scripted",
+        "prompt_id": "evidence_judgment",
+        "prompt_version": "v0.1",
+        "schema_name": "EvidenceJudgment",
+        "schema_version": "v0.1",
+        "metadata": {},
+    }
+
+
+def test_direct_signal_schema_violation_records_judge_model_trace():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Invalid evidence type.",
+            }
+        }
+    )
+    gate = EvidenceIntegrationGate(model_gateway=gateway)
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_model_trace_violation"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_model_trace_violation"),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    assert event.discard_reason.startswith("schema_violation:")
+    assert event.model_trace["task"] == "judge_evidence"
+    assert event.model_trace["adapter_kind"] == "scripted"
+    assert event.model_trace["prompt_id"] == "evidence_judgment"
+    assert event.model_trace["schema_name"] == "EvidenceJudgment"
+
+
+def test_direct_signal_repaired_judgment_records_repair_model_trace():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "not_a_type",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "Invalid evidence type.",
+            },
+            "repair_evidence_judgment": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "Repaired supporting judgment.",
+            },
+        }
+    )
+    gate = EvidenceIntegrationGate(
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
+    )
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_model_trace_repair"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_model_trace_repair"),
+        signals=[make_active_signal()],
+    )
+
+    repair_request = gateway.requests[1]
+    event = result.evidence_events[0]
+    assert repair_request.prompt_id == "evidence_judgment_repair"
+    assert repair_request.prompt_version == "v0.1"
+    assert repair_request.schema_name == "EvidenceJudgment"
+    assert repair_request.schema_version == "v0.1"
+    assert repair_request.metadata == {"repair_attempt_index": 1}
+    assert event.discard_reason is None
+    assert event.model_trace == {
+        "task": "repair_evidence_judgment",
+        "adapter_kind": "scripted",
+        "prompt_id": "evidence_judgment_repair",
+        "prompt_version": "v0.1",
+        "schema_name": "EvidenceJudgment",
+        "schema_version": "v0.1",
+        "repair_attempt_index": 1,
+        "metadata": {},
+    }
+
+
+def test_projection_decomposition_events_keep_empty_model_trace():
+    gate = EvidenceIntegrationGate()
+    signal = ExternalSignal(
+        id="S_projection_trace",
+        cycle_id="pending",
+        signal_kind=SignalKind.PASSIVE,
+        source_type="external_agent_projection",
+        source="agent_a",
+        raw_content="Agent A believes H2 because Source A refutes the claim.",
+    )
+
+    result = gate.integrate(
+        cycle=make_cycle("cycle_projection_trace"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_projection_trace"),
+        signals=[signal],
+    )
+
+    assert [event.evidence_type for event in result.evidence_events] == [
+        EvidenceType.SENDER_JUDGMENT,
+        EvidenceType.SOURCE_CLAIM,
+    ]
+    assert [event.model_trace for event in result.evidence_events] == [{}, {}]
+
+
 def test_core_passes_judgment_repair_policy_to_evidence_gate():
     gateway = ScriptedModelGateway(
         responses={
