@@ -636,7 +636,7 @@ Shape:
 
 Why this is next:
 
-- it strengthens the model seam before adding real providers;
+- it strengthens the model seam before expanding to additional providers and provider observability;
 - it protects belief state quality;
 - it keeps schema failure visible in the ledger.
 
