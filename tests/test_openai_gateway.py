@@ -74,6 +74,18 @@ def test_openai_model_gateway_config_requires_explicit_model():
             "openai model gateway timeout_seconds must be a number",
         ),
         (
+            {"model": "gpt-5.5", "timeout_seconds": float("nan")},
+            "openai model gateway timeout_seconds must be finite and positive",
+        ),
+        (
+            {"model": "gpt-5.5", "timeout_seconds": float("inf")},
+            "openai model gateway timeout_seconds must be finite and positive",
+        ),
+        (
+            {"model": "gpt-5.5", "timeout_seconds": float("-inf")},
+            "openai model gateway timeout_seconds must be finite and positive",
+        ),
+        (
             {"model": "gpt-5.5", "max_output_tokens": 0},
             "openai model gateway max_output_tokens must be positive",
         ),
@@ -207,6 +219,21 @@ def test_parse_openai_structured_response_accepts_mapping_output_content_text():
     }
 
     assert parse_openai_structured_response(response) == valid_payload()
+
+
+def test_parse_openai_structured_response_rejects_provider_envelope_without_text():
+    response = {
+        "id": "resp_123",
+        "status": "completed",
+        "output": [],
+        "usage": {"input_tokens": 10, "output_tokens": 20},
+    }
+
+    with pytest.raises(
+        ModelGatewayValidationError,
+        match="openai structured response text was missing",
+    ):
+        parse_openai_structured_response(response)
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -41,6 +42,9 @@ EVIDENCE_JUDGMENT_JSON_SCHEMA: dict[str, Any] = {
 }
 
 ENVIRONMENT_VARIABLE_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+EVIDENCE_JUDGMENT_SCHEMA_KEYS = frozenset(
+    {"evidence_type", "likelihoods", "interpretation", "quality_overrides"}
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,10 @@ class OpenAIModelGatewayConfig:
             )
         if type(self.timeout_seconds) not in (int, float):
             raise ValueError("openai model gateway timeout_seconds must be a number")
+        if not math.isfinite(self.timeout_seconds):
+            raise ValueError(
+                "openai model gateway timeout_seconds must be finite and positive"
+            )
         if self.timeout_seconds <= 0:
             raise ValueError("openai model gateway timeout_seconds must be positive")
         if self.max_output_tokens is not None:
@@ -152,7 +160,9 @@ def parse_openai_structured_response(response: Any) -> dict[str, Any]:
         text = _extract_text_from_output(response)
         if text is not None:
             return _parse_json_object(text)
-        return dict(response)
+        if _looks_like_evidence_judgment_payload(response):
+            return dict(response)
+        raise ModelGatewayValidationError("openai structured response text was missing")
     if isinstance(response, str):
         return _parse_json_object(response)
     if isinstance(response, list):
@@ -243,6 +253,10 @@ def _extract_text_from_output(response: Any) -> str | None:
             if isinstance(text, str):
                 return text
     return None
+
+
+def _looks_like_evidence_judgment_payload(response: Mapping[str, Any]) -> bool:
+    return any(key in response for key in EVIDENCE_JUDGMENT_SCHEMA_KEYS)
 
 
 def _build_default_openai_client(config: OpenAIModelGatewayConfig) -> Any:
