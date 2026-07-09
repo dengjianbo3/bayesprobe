@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import json
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from threading import Thread
 
 import pytest
@@ -11,6 +12,9 @@ from bayesprobe.webui import (
     create_handler_class,
     handle_autonomous_run_request,
 )
+
+
+STATIC_DIR = Path("bayesprobe/webui_static")
 
 
 @contextmanager
@@ -124,11 +128,29 @@ def test_webui_http_server_serves_static_index():
     assert "BayesProbe" in body
 
 
+def test_webui_static_assets_define_operational_workbench():
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "BayesProbe" in index
+    assert "provider-kind" in index
+    assert "api-key" in index
+    assert "base-url" in index
+    assert "model-name" in index
+    assert "max-cycles" in index
+    assert "trace-pane" in index
+    assert "localStorage" not in script
+    assert "fetch('/api/runs/autonomous'" in script
+    assert ".trace-item" in styles
+    assert "@media" in styles
+
+
 @pytest.mark.parametrize(
     ("path", "content_type", "expected_body"),
     [
-        ("/styles.css", "text/css; charset=utf-8", "font-family: system-ui, sans-serif;"),
-        ("/app.js", "text/javascript; charset=utf-8", "Ready for local autonomous runs."),
+        ("/styles.css", "text/css; charset=utf-8", ".trace-item"),
+        ("/app.js", "text/javascript; charset=utf-8", "fetch('/api/runs/autonomous'"),
     ],
 )
 def test_webui_http_server_serves_static_assets(path, content_type, expected_body):

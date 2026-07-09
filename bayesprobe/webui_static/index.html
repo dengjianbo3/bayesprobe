@@ -3,14 +3,169 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>BayesProbe WebUI</title>
+    <title>BayesProbe Autonomous Workbench</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
-      <h1>BayesProbe</h1>
-      <p>Local-only autonomous run workbench placeholder for v0.1.</p>
-      <div id="app-status">Ready.</div>
+      <aside class="control-rail" aria-label="Run configuration">
+        <div class="brand-block">
+          <span class="mark" aria-hidden="true">BP</span>
+          <div class="brand-copy">
+            <h1>BayesProbe</h1>
+            <p>Autonomous workbench</p>
+          </div>
+        </div>
+
+        <section class="panel" aria-labelledby="provider-heading">
+          <div class="panel-head">
+            <h2 id="provider-heading">Provider</h2>
+            <span class="eyebrow">Local-only</span>
+          </div>
+          <label>
+            Protocol
+            <select id="provider-kind">
+              <option value="deterministic">Deterministic</option>
+              <option value="openai_responses">OpenAI Responses</option>
+            </select>
+          </label>
+          <div id="provider-auth" class="provider-stack">
+            <label>
+              API key
+              <input
+                id="api-key"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="sk-..."
+              />
+            </label>
+            <label>
+              Base URL
+              <input
+                id="base-url"
+                type="url"
+                placeholder="https://api.openai.com/v1"
+                spellcheck="false"
+              />
+            </label>
+            <label>
+              Model
+              <input
+                id="model-name"
+                type="text"
+                placeholder="gpt-5.5"
+                spellcheck="false"
+              />
+            </label>
+            <div class="split-grid">
+              <label>
+                Timeout seconds
+                <input id="timeout-seconds" type="number" min="1" value="30" />
+              </label>
+              <label>
+                Max output tokens
+                <input id="max-output-tokens" type="number" min="1" value="512" />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="autonomy-heading">
+          <div class="panel-head">
+            <h2 id="autonomy-heading">Autonomy</h2>
+            <span class="eyebrow">Runner</span>
+          </div>
+          <div class="split-grid">
+            <label>
+              Max cycles
+              <input id="max-cycles" type="number" min="1" value="2" />
+            </label>
+            <label>
+              Max probes per cycle
+              <input id="max-probes" type="number" min="1" value="2" />
+            </label>
+          </div>
+          <div class="split-grid">
+            <label>
+              Confidence threshold
+              <input
+                id="confidence-threshold"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                placeholder="optional"
+              />
+            </label>
+            <label>
+              Posterior stability
+              <input
+                id="posterior-delta-threshold"
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="optional"
+              />
+            </label>
+          </div>
+          <label class="toggle-row">
+            <input id="stop-on-no-probes" type="checkbox" checked />
+            <span>Stop when no probes remain</span>
+          </label>
+        </section>
+      </aside>
+
+      <section class="workspace" aria-label="Autonomous workbench">
+        <form id="run-form" class="question-panel">
+          <div class="section-head">
+            <h2>Question Frame</h2>
+            <span id="run-id" class="run-id">No run yet</span>
+          </div>
+          <label>
+            Question
+            <textarea id="question" required>Does the current evidence support H1 or H2?</textarea>
+          </label>
+          <label>
+            Context
+            <textarea id="context">SUPPORTS: The local deterministic signal supports H1.</textarea>
+          </label>
+          <div class="toolbar">
+            <button id="run-button" type="submit">Run autonomous loop</button>
+          </div>
+        </form>
+
+        <section id="status-banner" class="status-banner" aria-live="polite">
+          Ready for a local run.
+        </section>
+
+        <section class="result-grid" aria-label="Run outputs">
+          <article class="result-panel">
+            <div class="section-head">
+              <h2>Answer Projection</h2>
+              <span class="eyebrow">Final</span>
+            </div>
+            <div id="answer-panel" class="empty-state">No run yet.</div>
+          </article>
+          <article class="result-panel">
+            <div class="section-head">
+              <h2>Belief State</h2>
+              <span class="eyebrow">Posterior</span>
+            </div>
+            <div id="belief-panel" class="empty-state">No belief state yet.</div>
+          </article>
+        </section>
+
+        <section class="trace-section" aria-labelledby="trace-heading">
+          <div class="section-head">
+            <h2 id="trace-heading">Cycle Trace</h2>
+            <span class="eyebrow">Evidence trail</span>
+          </div>
+          <div id="trace-pane" class="trace-pane">
+            <div class="empty-state">Cycle details appear here after a run.</div>
+          </div>
+        </section>
+      </section>
     </main>
     <script src="/app.js"></script>
   </body>
