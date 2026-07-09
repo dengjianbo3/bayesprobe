@@ -169,6 +169,30 @@ def test_experiment_config_from_mapping_parses_model_gateway_object(tmp_path: Pa
     assert config.model_gateway.responses["judge_evidence"]["evidence_type"] == "boundary_condition"
 
 
+def test_experiment_config_from_mapping_parses_openai_model_gateway(tmp_path: Path):
+    config = experiment_config_from_mapping(
+        {
+            "dataset_path": "datasets/toy.json",
+            "report_path": "outputs/toy-report.json",
+            "model_gateway": {
+                "kind": "openai",
+                "model": "gpt-5.5",
+                "api_key_env": "BAYESPROBE_TEST_OPENAI_KEY",
+                "timeout_seconds": 12.5,
+                "max_output_tokens": 256,
+            },
+        },
+        base_dir=tmp_path,
+    )
+
+    assert isinstance(config.model_gateway, ModelGatewayConfig)
+    assert config.model_gateway.kind == "openai"
+    assert config.model_gateway.model == "gpt-5.5"
+    assert config.model_gateway.api_key_env == "BAYESPROBE_TEST_OPENAI_KEY"
+    assert config.model_gateway.timeout_seconds == 12.5
+    assert config.model_gateway.max_output_tokens == 256
+
+
 def test_experiment_config_from_mapping_parses_judgment_repair_policy(tmp_path: Path):
     config = experiment_config_from_mapping(
         {
@@ -253,6 +277,17 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
                 }
             ),
             "experiment config field model_gateway must be an object",
+        ),
+        (
+            "openai_missing_model.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {"kind": "openai"},
+                }
+            ),
+            "openai model gateway requires model",
         ),
         (
             "non_object_judgment_repair_policy.json",

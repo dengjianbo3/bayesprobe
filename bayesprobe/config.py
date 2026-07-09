@@ -94,10 +94,20 @@ def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfi
     responses = value.get("responses")
     if responses is not None and not isinstance(responses, Mapping):
         raise ValueError("model gateway responses must be an object")
+    model = value.get("model")
+    if kind == "openai" and model is None:
+        raise ValueError("openai model gateway requires model")
+    api_key_env = value.get("api_key_env", "OPENAI_API_KEY")
+    timeout_seconds = value.get("timeout_seconds", 30.0)
+    max_output_tokens = value.get("max_output_tokens")
 
     return ModelGatewayConfig(
         kind=kind,
         responses=dict(responses) if responses is not None else None,
+        model=model,
+        api_key_env=api_key_env,
+        timeout_seconds=timeout_seconds,
+        max_output_tokens=max_output_tokens,
     )
 
 

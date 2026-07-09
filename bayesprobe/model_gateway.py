@@ -72,6 +72,10 @@ class StructuredModelRequest:
 class ModelGatewayConfig:
     kind: str = "deterministic"
     responses: dict[str, dict[str, Any]] | None = None
+    model: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+    timeout_seconds: float = 30.0
+    max_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -322,6 +326,22 @@ def build_model_gateway(
         if gateway_config.responses is None:
             raise ValueError("scripted model gateway requires responses")
         return ScriptedModelGateway(responses=gateway_config.responses)
+    if gateway_config.kind == "openai":
+        if gateway_config.model is None:
+            raise ValueError("openai model gateway requires model")
+        from bayesprobe.openai_gateway import (
+            OpenAIModelGatewayConfig,
+            OpenAIResponsesModelGateway,
+        )
+
+        return OpenAIResponsesModelGateway(
+            config=OpenAIModelGatewayConfig(
+                model=gateway_config.model,
+                api_key_env=gateway_config.api_key_env,
+                timeout_seconds=gateway_config.timeout_seconds,
+                max_output_tokens=gateway_config.max_output_tokens,
+            )
+        )
     raise ValueError(f"unsupported model gateway kind: {gateway_config.kind}")
 
 
@@ -346,10 +366,20 @@ def _model_gateway_config_from_input(
     responses = config.get("responses")
     if responses is not None and not isinstance(responses, Mapping):
         raise ValueError("model gateway responses must be an object")
+    model = config.get("model")
+    if model is not None and not isinstance(model, str):
+        raise ValueError("openai model gateway model must be a string")
+    api_key_env = config.get("api_key_env", "OPENAI_API_KEY")
+    timeout_seconds = config.get("timeout_seconds", 30.0)
+    max_output_tokens = config.get("max_output_tokens")
 
     return ModelGatewayConfig(
         kind=kind,
         responses=dict(responses) if responses is not None else None,
+        model=model,
+        api_key_env=api_key_env,
+        timeout_seconds=timeout_seconds,
+        max_output_tokens=max_output_tokens,
     )
 
 

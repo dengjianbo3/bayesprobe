@@ -2,6 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from bayesprobe.openai_gateway import OpenAIResponsesModelGateway
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     EvidenceJudgmentRepairPolicy,
@@ -348,6 +349,24 @@ def test_build_model_gateway_accepts_scripted_config_and_records_requests():
     assert judgment.quality_overrides == {"reliability": 0.62}
 
 
+def test_build_model_gateway_accepts_openai_mapping_without_network():
+    gateway = build_model_gateway(
+        {
+            "kind": "openai",
+            "model": "gpt-5.5",
+            "api_key_env": "BAYESPROBE_TEST_OPENAI_KEY",
+            "timeout_seconds": 12.5,
+            "max_output_tokens": 256,
+        }
+    )
+
+    assert isinstance(gateway, OpenAIResponsesModelGateway)
+    assert gateway.config.model == "gpt-5.5"
+    assert gateway.config.api_key_env == "BAYESPROBE_TEST_OPENAI_KEY"
+    assert gateway.config.timeout_seconds == 12.5
+    assert gateway.config.max_output_tokens == 256
+
+
 def test_build_model_gateway_rejects_unknown_kind():
     with pytest.raises(ValueError, match="unsupported model gateway kind"):
         build_model_gateway({"kind": "unknown"})
@@ -361,6 +380,18 @@ def test_build_model_gateway_rejects_scripted_without_responses():
 def test_build_model_gateway_rejects_non_object_responses():
     with pytest.raises(ValueError, match="model gateway responses must be an object"):
         build_model_gateway({"kind": "scripted", "responses": []})
+
+
+def test_build_model_gateway_rejects_openai_without_model():
+    with pytest.raises(ValueError, match="openai model gateway requires model"):
+        build_model_gateway({"kind": "openai"})
+
+
+def test_build_model_gateway_rejects_invalid_openai_timeout():
+    with pytest.raises(
+        ValueError, match="openai model gateway timeout_seconds must be positive"
+    ):
+        build_model_gateway({"kind": "openai", "model": "gpt-5.5", "timeout_seconds": 0})
 
 
 def test_evidence_judgment_repair_policy_defaults_to_disabled():
