@@ -146,6 +146,13 @@ def test_webui_static_assets_define_operational_workbench():
     assert "@media" in styles
 
 
+def test_webui_static_index_declares_inline_favicon_to_avoid_browser_404():
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    assert 'rel="icon"' in index
+    assert 'href="data:,"' in index
+
+
 def test_webui_static_script_clears_stale_run_output_on_submit_and_failure():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
