@@ -351,3 +351,45 @@ def test_benchmark_harness_records_schema_violation_without_belief_update(tmp_pa
     assert evidence_payloads[0]["discard_reason"].startswith("schema_violation:")
     assert evidence_payloads[0]["evidence_type"] == "neutral"
     assert ledger.read_all("belief_update") == []
+
+
+def test_benchmark_harness_reports_belief_quality_metrics():
+    sample = BenchmarkSample(
+        sample_id="quality_active",
+        question_or_claim="Does active-only quality metric work?",
+        signal_shape=BenchmarkSignalShape.ACTIVE_ONLY,
+        gold_best_hypothesis="H1",
+        gold_update_directions={"H1": "strengthened"},
+    )
+
+    result = BenchmarkHarness().run_sample(sample)
+
+    assert result.discarded_evidence_count == 0
+    assert result.schema_violation_count == 0
+    assert result.dominant_hypothesis_margin > 0
+    assert result.belief_revision_efficiency == 1.0
+
+
+def test_benchmark_harness_counts_schema_violations_as_discarded_evidence():
+    gateway = ScriptedModelGateway(responses={"judge_evidence": {"likelihoods": {}}})
+    sample = BenchmarkSample(
+        sample_id="quality_schema_violation",
+        question_or_claim="Does schema violation quality metric work?",
+        signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
+        gold_best_hypothesis="H1",
+        passive_signals=[
+            BenchmarkSignal(
+                signal_id="S_quality_schema",
+                source_type="benchmark_stream",
+                source="fixture",
+                raw_content="No valid schema payload.",
+                target_hypotheses=["H1", "H2"],
+            )
+        ],
+    )
+
+    result = BenchmarkHarness(model_gateway=gateway).run_sample(sample)
+
+    assert result.discarded_evidence_count == 1
+    assert result.schema_violation_count == 1
+    assert result.belief_revision_efficiency == 0.0

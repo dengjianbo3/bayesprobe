@@ -25,6 +25,7 @@ from bayesprobe.schemas import (
     BeliefUpdate,
     CycleRecord,
     CycleSignalShape,
+    EvidenceEvent,
     ExternalSignal,
     SignalKind,
 )
@@ -105,6 +106,10 @@ class BenchmarkSampleResult:
     passive_signal_count: int
     evidence_event_count: int
     belief_update_count: int
+    discarded_evidence_count: int
+    schema_violation_count: int
+    dominant_hypothesis_margin: float
+    belief_revision_efficiency: float
     projection_kind: str
 
 
@@ -292,18 +297,20 @@ def _sample_result_from_question_run(
     projection_kind: str,
 ) -> BenchmarkSampleResult:
     active_signal_count = sum(len(cycle_result.signals) for cycle_result in run_result.cycle_results)
-    evidence_event_count = sum(
-        len(cycle_result.evidence_events) for cycle_result in run_result.cycle_results
-    )
+    evidence_events = [
+        event
+        for cycle_result in run_result.cycle_results
+        for event in cycle_result.evidence_events
+    ]
     return _build_sample_result(
         sample=sample,
         run_id=run_result.run.run_id,
         final_belief_state=run_result.final_belief_state,
         belief_updates=belief_updates,
+        evidence_events=evidence_events,
         cycle_count=len(run_result.cycle_results),
         active_signal_count=active_signal_count,
         passive_signal_count=0,
-        evidence_event_count=evidence_event_count,
         projection_kind=projection_kind,
     )
 
@@ -322,10 +329,10 @@ def _sample_result_from_controller_result(
         run_id=run_id,
         final_belief_state=controller_result.belief_state,
         belief_updates=controller_result.belief_updates,
+        evidence_events=controller_result.evidence_events,
         cycle_count=1,
         active_signal_count=active_signal_count,
         passive_signal_count=passive_signal_count,
-        evidence_event_count=len(controller_result.evidence_events),
         projection_kind=projection_kind,
     )
 
@@ -344,10 +351,10 @@ def _sample_result_from_cycle_result(
         run_id=run_id,
         final_belief_state=cycle_result.belief_state,
         belief_updates=cycle_result.belief_updates,
+        evidence_events=cycle_result.evidence_events,
         cycle_count=1,
         active_signal_count=active_signal_count,
         passive_signal_count=passive_signal_count,
-        evidence_event_count=len(cycle_result.evidence_events),
         projection_kind=projection_kind,
     )
 
@@ -358,10 +365,10 @@ def _build_sample_result(
     run_id: str,
     final_belief_state: BeliefState,
     belief_updates: list[BeliefUpdate],
+    evidence_events: list[EvidenceEvent],
     cycle_count: int,
     active_signal_count: int,
     passive_signal_count: int,
-    evidence_event_count: int,
     projection_kind: str,
 ) -> BenchmarkSampleResult:
     final_best_hypothesis = _top_hypothesis_id(final_belief_state)
@@ -380,8 +387,15 @@ def _build_sample_result(
         signal_count=active_signal_count + passive_signal_count,
         active_signal_count=active_signal_count,
         passive_signal_count=passive_signal_count,
-        evidence_event_count=evidence_event_count,
+        evidence_event_count=len(evidence_events),
         belief_update_count=len(belief_updates),
+        discarded_evidence_count=_discarded_evidence_count(evidence_events),
+        schema_violation_count=_schema_violation_count(evidence_events),
+        dominant_hypothesis_margin=_dominant_hypothesis_margin(final_belief_state),
+        belief_revision_efficiency=_belief_revision_efficiency(
+            belief_updates=belief_updates,
+            evidence_events=evidence_events,
+        ),
         projection_kind=projection_kind,
     )
 
@@ -407,6 +421,41 @@ def _update_direction_accuracy(
 
 def _top_hypothesis_id(belief_state: BeliefState) -> str:
     return max(belief_state.hypotheses, key=lambda hypothesis: hypothesis.posterior).id
+
+
+def _discarded_evidence_count(evidence_events: list[EvidenceEvent]) -> int:
+    return sum(1 for event in evidence_events if event.discard_reason is not None)
+
+
+def _schema_violation_count(evidence_events: list[EvidenceEvent]) -> int:
+    return sum(
+        1
+        for event in evidence_events
+        if isinstance(event.discard_reason, str)
+        and event.discard_reason.startswith("schema_violation:")
+    )
+
+
+def _dominant_hypothesis_margin(belief_state: BeliefState) -> float:
+    posteriors = sorted(
+        (hypothesis.posterior for hypothesis in belief_state.hypotheses),
+        reverse=True,
+    )
+    if not posteriors:
+        return 0.0
+    if len(posteriors) == 1:
+        return round(posteriors[0], 6)
+    return round(posteriors[0] - posteriors[1], 6)
+
+
+def _belief_revision_efficiency(
+    *,
+    belief_updates: list[BeliefUpdate],
+    evidence_events: list[EvidenceEvent],
+) -> float:
+    if not evidence_events:
+        return 0.0
+    return round(len(belief_updates) / len(evidence_events), 6)
 
 
 def _mean(values) -> float:

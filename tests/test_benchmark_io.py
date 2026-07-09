@@ -183,6 +183,23 @@ def test_write_benchmark_report_round_trips_suite_result(tmp_path: Path):
     assert payload["results"][1]["projection_kind"] == "belief_state_projection"
 
 
+def test_write_benchmark_report_includes_belief_quality_metrics(tmp_path: Path):
+    dataset_path = tmp_path / "quality-report-suite.json"
+    write_json(dataset_path, [active_sample_payload("quality_report_active")])
+    dataset = load_benchmark_dataset(dataset_path)
+    suite_result = BenchmarkHarness().run_suite(dataset.samples)
+    report_path = tmp_path / "report.json"
+
+    write_benchmark_report(report_path, suite_result, dataset_name="quality_report")
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    result = payload["results"][0]
+    assert result["discarded_evidence_count"] == 0
+    assert result["schema_violation_count"] == 0
+    assert result["dominant_hypothesis_margin"] > 0
+    assert result["belief_revision_efficiency"] == 1.0
+
+
 def test_loaded_dataset_runs_through_benchmark_harness(tmp_path: Path):
     path = tmp_path / "suite.json"
     write_json(
