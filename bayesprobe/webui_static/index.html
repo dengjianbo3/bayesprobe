@@ -28,7 +28,7 @@
             <select id="provider-kind">
               <option value="deterministic">Deterministic</option>
               <option value="openai_responses">OpenAI Responses</option>
-              <option value="openai_chat_completions">Chat Completions</option>
+              <option value="openai_chat_completions" selected>Chat Completions</option>
             </select>
           </label>
           <div id="provider-note" class="provider-note" aria-live="polite"></div>
@@ -49,6 +49,7 @@
                 id="base-url"
                 type="url"
                 placeholder="https://api.openai.com/v1"
+                value="https://api.deepseek.com"
                 spellcheck="false"
               />
             </label>
@@ -58,6 +59,7 @@
                 id="model-name"
                 type="text"
                 placeholder="gpt-5.5"
+                value="deepseek-v4-flash"
                 spellcheck="false"
               />
             </label>

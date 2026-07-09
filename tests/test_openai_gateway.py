@@ -205,8 +205,18 @@ def test_build_openai_chat_completions_payload_uses_common_json_object_shape():
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["messages"][0]["role"] == "system"
     assert "evidence judgment component" in payload["messages"][0]["content"]
+    assert "Return only one JSON object" in payload["messages"][0]["content"]
+    assert "Do not copy input fields" in payload["messages"][0]["content"]
     assert payload["messages"][1]["role"] == "user"
-    assert json.loads(payload["messages"][1]["content"])["task"] == "judge_evidence"
+    user_payload = json.loads(payload["messages"][1]["content"])
+    assert user_payload["task"] == "judge_evidence"
+    assert user_payload["required_output"]["json_schema"] == EVIDENCE_JUDGMENT_JSON_SCHEMA
+    assert user_payload["required_output"]["required_keys"] == [
+        "evidence_type",
+        "likelihoods",
+        "interpretation",
+        "quality_overrides",
+    ]
 
 
 def valid_payload() -> dict[str, object]:
@@ -405,6 +415,54 @@ def test_openai_chat_completions_model_gateway_calls_fake_client_and_returns_dic
     assert result == valid_payload()
     assert client.chat.completions.calls[0]["model"] == "provider-model"
     assert client.chat.completions.calls[0]["max_tokens"] == 128
+
+
+def test_openai_chat_completions_model_gateway_uses_stdlib_fallback_without_openai(
+    monkeypatch,
+):
+    import bayesprobe.openai_gateway as openai_gateway
+
+    monkeypatch.setattr(openai_gateway, "OpenAI", None, raising=False)
+    calls = []
+
+    def fake_post_json(url, payload, *, api_key, timeout_seconds):
+        calls.append(
+            {
+                "url": url,
+                "payload": payload,
+                "api_key": api_key,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(valid_payload()),
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(openai_gateway, "_post_json", fake_post_json)
+    gateway = OpenAIChatCompletionsModelGateway(
+        config=OpenAIModelGatewayConfig(
+            model="provider-model",
+            base_url="https://provider.example/v1/",
+            timeout_seconds=7.5,
+            max_output_tokens=64,
+        ),
+        api_key="provider-secret-123",
+    )
+
+    result = gateway.complete_structured(make_judge_request())
+
+    assert result == valid_payload()
+    assert calls[0]["url"] == "https://provider.example/v1/chat/completions"
+    assert calls[0]["api_key"] == "provider-secret-123"
+    assert calls[0]["timeout_seconds"] == 7.5
+    assert calls[0]["payload"]["model"] == "provider-model"
+    assert calls[0]["payload"]["max_tokens"] == 64
 
 
 def test_openai_responses_model_gateway_propagates_provider_exceptions():

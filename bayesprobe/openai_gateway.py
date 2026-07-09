@@ -4,8 +4,11 @@ import json
 import math
 import os
 import re
+import urllib.error
+import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from bayesprobe.model_gateway import ModelGatewayValidationError, StructuredModelRequest
@@ -157,7 +160,7 @@ class OpenAIChatCompletionsModelGateway:
 
     def _client_for_request(self) -> Any:
         if self._client is None:
-            self._client = _build_default_openai_client(
+            self._client = _build_default_openai_chat_client(
                 self.config,
                 api_key=self._api_key,
             )
@@ -211,12 +214,16 @@ def build_openai_chat_completions_payload(
         "messages": [
             {
                 "role": "system",
-                "content": _instruction_for_task(request.task),
+                "content": _chat_instruction_for_task(request.task),
             },
             {
                 "role": "user",
                 "content": json.dumps(
-                    {"task": request.task, "input": request.input},
+                    {
+                        "task": request.task,
+                        "input": request.input,
+                        "required_output": _required_output_for_task(request.task),
+                    },
                     sort_keys=True,
                 ),
             },
@@ -277,6 +284,44 @@ def _instruction_for_task(task: str) -> str:
             "Return exactly one valid EvidenceJudgment JSON object. "
             "Preserve the intended evidence meaning when it can be inferred."
         )
+    raise ValueError(f"unsupported openai model task: {task}")
+
+
+def _chat_instruction_for_task(task: str) -> str:
+    base_instruction = _instruction_for_task(task)
+    if task == "judge_evidence":
+        return (
+            f"{base_instruction} Return only one JSON object with exactly these "
+            "top-level keys: evidence_type, likelihoods, interpretation, "
+            "quality_overrides. Do not copy input fields such as signal_id, "
+            "source, source_type, target_hypotheses, likelihood_bands, or "
+            "evidence into the output. Do not include markdown."
+        )
+    if task == "repair_evidence_judgment":
+        return (
+            f"{base_instruction} Return only one JSON object with exactly these "
+            "top-level keys: evidence_type, likelihoods, interpretation, "
+            "quality_overrides. Do not include markdown."
+        )
+    raise ValueError(f"unsupported openai model task: {task}")
+
+
+def _required_output_for_task(task: str) -> dict[str, Any]:
+    if task in {"judge_evidence", "repair_evidence_judgment"}:
+        return {
+            "type": "EvidenceJudgment",
+            "required_keys": [
+                "evidence_type",
+                "likelihoods",
+                "interpretation",
+                "quality_overrides",
+            ],
+            "json_schema": EVIDENCE_JUDGMENT_JSON_SCHEMA,
+            "notes": [
+                "likelihoods must be an object keyed only by supplied hypothesis ids",
+                "quality_overrides may be an empty object",
+            ],
+        }
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -394,6 +439,99 @@ def _build_default_openai_client(
     if config.base_url is not None:
         kwargs["base_url"] = config.base_url
     return OpenAI(**kwargs)
+
+
+def _build_default_openai_chat_client(
+    config: OpenAIModelGatewayConfig, *, api_key: str | None = None
+) -> Any:
+    if OpenAI is not None:
+        return _build_default_openai_client(config, api_key=api_key)
+    resolved_api_key = api_key or os.environ.get(config.api_key_env)
+    if not resolved_api_key:
+        raise RuntimeError(
+            f"OpenAI API key environment variable {config.api_key_env} is not set"
+        )
+    return _StdlibOpenAIChatClient(
+        api_key=resolved_api_key,
+        base_url=config.base_url or "https://api.openai.com/v1",
+        timeout_seconds=config.timeout_seconds,
+    )
+
+
+class _StdlibOpenAIChatClient:
+    def __init__(self, *, api_key: str, base_url: str, timeout_seconds: float) -> None:
+        self.chat = SimpleNamespace(
+            completions=_StdlibOpenAIChatCompletions(
+                api_key=api_key,
+                base_url=base_url,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+
+
+class _StdlibOpenAIChatCompletions:
+    def __init__(self, *, api_key: str, base_url: str, timeout_seconds: float) -> None:
+        self._api_key = api_key
+        self._base_url = base_url
+        self._timeout_seconds = timeout_seconds
+
+    def create(self, **payload: Any) -> dict[str, Any]:
+        return _post_json(
+            _chat_completions_url(self._base_url),
+            payload,
+            api_key=self._api_key,
+            timeout_seconds=self._timeout_seconds,
+        )
+
+
+def _chat_completions_url(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/chat/completions"
+
+
+def _post_json(
+    url: str,
+    payload: Mapping[str, Any],
+    *,
+    api_key: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"OpenAI-compatible chat completion request failed with HTTP {error.code}: "
+            f"{_sanitize_provider_error(body, api_key)}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"OpenAI-compatible chat completion request failed: {error.reason}"
+        ) from error
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise ModelGatewayValidationError(
+            "openai chat completion response was not valid JSON"
+        ) from error
+    if not isinstance(parsed, Mapping):
+        raise ModelGatewayValidationError(
+            "openai chat completion response must be an object"
+        )
+    return dict(parsed)
+
+
+def _sanitize_provider_error(message: str, api_key: str) -> str:
+    return message.replace(api_key, "sk-redacted")
 
 
 __all__ = [

@@ -141,10 +141,12 @@ def test_webui_static_assets_define_operational_workbench():
     assert "BayesProbe" in index
     assert "provider-kind" in index
     assert "Chat Completions (unsupported)" not in index
-    assert '<option value="openai_chat_completions">Chat Completions</option>' in index
+    assert '<option value="openai_chat_completions" selected>Chat Completions</option>' in index
     assert "api-key" in index
     assert "base-url" in index
+    assert 'value="https://api.deepseek.com"' in index
     assert "model-name" in index
+    assert 'value="deepseek-v4-flash"' in index
     assert "max-cycles" in index
     assert "trace-pane" in index
     assert "localStorage" not in script
