@@ -11,6 +11,9 @@ dependencies = [
 dev = [
   "pytest>=8,<9",
 ]
+openai = [
+  "openai>=1.0,<3",
+]
 
 [project.scripts]
 bayesprobe = "bayesprobe.cli:main"

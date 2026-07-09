@@ -1,4 +1,5 @@
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -21,12 +22,16 @@ from bayesprobe import (
     ModelGatewayConfig,
     ModelGatewayValidationError,
     ModelInvocationTrace,
+    OpenAIModelGatewayConfig,
+    OpenAIResponsesModelGateway,
     ScriptedModelGateway,
     StructuredModelRequest,
     build_model_gateway,
+    build_openai_request_payload,
     evidence_judgment_from_mapping,
     load_benchmark_dataset,
     load_experiment_config,
+    parse_openai_structured_response,
     run_benchmark_experiment,
     write_benchmark_report,
 )
@@ -58,12 +63,16 @@ def test_public_sdk_exports_supported_names():
         "ModelGatewayConfig",
         "ModelGatewayValidationError",
         "ModelInvocationTrace",
+        "OpenAIModelGatewayConfig",
+        "OpenAIResponsesModelGateway",
         "ScriptedModelGateway",
         "StructuredModelRequest",
         "build_model_gateway",
+        "build_openai_request_payload",
         "evidence_judgment_from_mapping",
         "load_benchmark_dataset",
         "load_experiment_config",
+        "parse_openai_structured_response",
         "run_benchmark_experiment",
         "write_benchmark_report",
     }
@@ -85,14 +94,28 @@ def test_public_sdk_exports_supported_names():
     assert ModelGatewayConfig is not None
     assert ModelGatewayValidationError is not None
     assert ModelInvocationTrace is not None
+    assert OpenAIModelGatewayConfig is not None
+    assert OpenAIResponsesModelGateway is not None
     assert ScriptedModelGateway is not None
     assert StructuredModelRequest is not None
     assert build_model_gateway is not None
+    assert build_openai_request_payload is not None
     assert evidence_judgment_from_mapping is not None
     assert load_benchmark_dataset is not None
     assert load_experiment_config is not None
+    assert parse_openai_structured_response is not None
     assert run_benchmark_experiment is not None
     assert write_benchmark_report is not None
+
+
+def test_pyproject_declares_optional_openai_extra_without_required_dependency():
+    metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    dependencies = metadata["project"]["dependencies"]
+    optional_dependencies = metadata["project"]["optional-dependencies"]
+
+    assert "openai>=1.0,<3" not in dependencies
+    assert optional_dependencies["openai"] == ["openai>=1.0,<3"]
 
 
 def test_load_experiment_config_resolves_paths_relative_to_config_file(tmp_path: Path):

@@ -32,6 +32,12 @@ from bayesprobe.model_gateway import (
     build_model_gateway,
     evidence_judgment_from_mapping,
 )
+from bayesprobe.openai_gateway import (
+    OpenAIModelGatewayConfig,
+    OpenAIResponsesModelGateway,
+    build_openai_request_payload,
+    parse_openai_structured_response,
+)
 
 __all__ = [
     "BenchmarkDataset",
@@ -50,12 +56,16 @@ __all__ = [
     "ModelGatewayConfig",
     "ModelGatewayValidationError",
     "ModelInvocationTrace",
+    "OpenAIModelGatewayConfig",
+    "OpenAIResponsesModelGateway",
     "ScriptedModelGateway",
     "StructuredModelRequest",
     "build_model_gateway",
+    "build_openai_request_payload",
     "evidence_judgment_from_mapping",
     "load_benchmark_dataset",
     "load_experiment_config",
+    "parse_openai_structured_response",
     "run_benchmark_experiment",
     "write_benchmark_report",
 ]
