@@ -355,6 +355,7 @@ Current adapters:
 
 - `DeterministicModelGateway`;
 - `ScriptedModelGateway`;
+- `RecordedModelGateway`;
 - `OpenAIResponsesModelGateway`;
 - `OpenAIChatCompletionsModelGateway`;
 - `build_model_gateway(...)` from `ModelGatewayConfig`.
@@ -372,7 +373,7 @@ Future extension:
 
 - broader provider registry and provider observability;
 - further response schema repair hardening;
-- recorded fixture adapter for reproducible experiments.
+- live-provider fixture capture tooling.
 
 ### 4.10 Projections
 
@@ -457,14 +458,16 @@ Responsibilities:
 - load datasets from JSON/JSONL;
 - run active-only, passive-only, and active-plus-passive samples;
 - score final best hypothesis and update direction accuracy;
+- report belief-state quality metrics such as discarded evidence, schema
+  violations, posterior margin, and belief revision efficiency;
 - write reports;
 - parse JSON experiment config;
 - expose a thin CLI over config-driven experiment runs.
 
 Current limitation:
 
-- dataset is toy-scale;
-- metrics are useful MVP checks, not a full benchmark suite;
+- datasets are still small methodology fixtures, not a full benchmark suite;
+- metrics are useful MVP checks, not a full comparative evaluation suite;
 - no external provider cost/latency accounting yet.
 
 ### 4.14 Public SDK
@@ -527,15 +530,15 @@ Current limitations:
 | Autonomous question loop | Good MVP | End-to-end question runner exists with stop conditions. |
 | Synchronized round loop | Good MVP | Fixed-round runner supports passive-only, active-only, and mixed rounds. |
 | Ledger/audit | Good MVP | JSONL audit path exists. |
-| Benchmark harness | Good MVP | Toy dataset and suite/report flow exist. |
+| Benchmark harness | Good MVP | Toy and v0.2 methodology fixtures, suite/report flow, and belief-quality metrics exist. |
 | Config/CLI/SDK | Good MVP | JSON experiment config, CLI, package exports exist. |
 | Autonomous WebUI | MVP | Local deterministic/OpenAI Responses/OpenAI-compatible Chat Completions workbench for autonomous runs and trace inspection. |
-| Model gateway | Good MVP | Structured seam plus deterministic, scripted, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Provider observability remains future work. |
+| Model gateway | Good MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Provider observability remains future work. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
 | Multi-agent protocol | Partial | Projection-as-signal semantics exist; transport/protocol schema not complete. |
 | Production persistence | Missing | JSONL only. |
-| Large benchmark suite | Missing | Current fixture is a tracer bullet. |
+| Large benchmark suite | Partial | v0.2 methodology fixture exists; HLE-scale and comparative benchmark suites remain future work. |
 
 ## 6. Progress Estimate
 
@@ -544,21 +547,21 @@ Using the final target as:
 > configurable, experiment-ready, provider-backed, tool-backed, multi-agent-ready
 > BayesProbe agent engineering kernel
 
-the current implementation is approximately **68%-72% complete**.
+the current implementation is approximately **72%-75% complete**.
 
 Using the narrower provider-backed MVP target as:
 
 > deterministic/scripted/provider-backed BayesProbe loop with benchmark,
 > config, SDK, and local WebUI support
 
-the current implementation is approximately **90%-93% complete**.
+the current implementation is approximately **94%-96% complete**.
 
 The remaining work is mostly depth and robustness rather than direction:
 
 - stronger structured model output handling;
 - broader provider registry and provider observability;
 - provider adapter prompt-registry snapshots;
-- richer benchmark datasets and metrics;
+- larger benchmark datasets and comparative baselines;
 - stronger synchronized/multi-agent protocol objects;
 - production-grade persistence and experiment trace packaging.
 
@@ -579,6 +582,8 @@ Use for model-shaped structured decisions:
 - `OpenAIResponsesModelGateway` and `OpenAIChatCompletionsModelGateway` provide
   real provider-backed adapters while preserving the same structured output
   validation path.
+- `RecordedModelGateway` replays provider-shaped structured judgments for
+  deterministic benchmark and artifact tests without network access.
 
 Do not let callers pass arbitrary model outputs into belief update. Model output
 must be parsed, validated, and converted into BayesProbe domain objects.
@@ -672,10 +677,10 @@ Why this is next:
 
 ### Phase 2: Provider Adapter and Prompt Registry Metadata
 
-Status: OpenAI Responses and OpenAI-compatible Chat Completions adapters are
-implemented as v0.1, and prompt/model invocation artifact summaries are
-implemented as v0.1; broader provider registry, prompt registry snapshots, and
-provider observability remain future work.
+Status: OpenAI Responses, OpenAI-compatible Chat Completions, and recorded
+fixture adapters are implemented as MVPs, and prompt/model invocation artifact
+summaries are implemented as v0.1; broader provider registry, prompt registry
+snapshots, live fixture capture, and provider observability remain future work.
 
 Goal:
 
@@ -691,8 +696,9 @@ Shape:
 
 ### Phase 3: Benchmark Expansion
 
-Status: Autonomous WebUI is implemented as the current tracer bullet; the
-methodology benchmark expansion remains the next slice.
+Status: v0.2 methodology fixture, recorded provider replay, and belief-quality
+metrics are implemented as the current experimental slice; larger datasets and
+comparative baselines remain future work.
 
 Goal:
 
@@ -771,6 +777,7 @@ Benchmark tests should assert:
 - active-only/passive-only/mixed execution;
 - final answer utility;
 - update direction accuracy;
+- belief-state quality metrics;
 - ledger visibility for evidence, updates, and schema failures.
 
 ## 10. Architectural Non-Goals
