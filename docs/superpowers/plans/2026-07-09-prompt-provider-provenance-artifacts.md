@@ -62,7 +62,7 @@ assert model_invocations_path.exists()
 model_invocations = json.loads(model_invocations_path.read_text(encoding="utf-8"))
 
 assert manifest["model_invocations_path"] == str(model_invocations_path)
-assert manifest["model_invocation_count"] == 3
+assert manifest["model_invocation_count"] == 4
 assert manifest["model_invocation_summary"] == [
     {
         "task": "judge_evidence",
@@ -73,12 +73,12 @@ assert manifest["model_invocation_summary"] == [
         "schema_version": "v0.1",
         "repair_attempt_index": None,
         "metadata": {},
-        "occurrence_count": 3,
+        "occurrence_count": 4,
     }
 ]
 assert model_invocations == {
     "artifact_version": "0.1",
-    "invocation_count": 3,
+    "invocation_count": 4,
     "invocations": manifest["model_invocation_summary"],
 }
 ```
