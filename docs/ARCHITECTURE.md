@@ -484,6 +484,32 @@ Public exports should stay narrow. Internal modules can evolve, but external
 users should configure runs through supported seams instead of reaching into the
 core's private internals.
 
+### 4.15 Autonomous WebUI
+
+Current file: `bayesprobe/webui.py`
+
+Responsibilities:
+
+- serve the local autonomous workbench;
+- validate local WebUI requests;
+- build request-scoped provider gateways;
+- run `AutonomousQuestionRunner`;
+- serialize final answer, belief state, cycle, signal, evidence, update, and
+  evolution traces.
+
+Architectural rule:
+
+The WebUI is an observation and execution surface. It must not convert signals
+to evidence, update posterior values, evolve hypotheses, or bypass
+`BayesProbeCore`.
+
+Current limitations:
+
+- local-only;
+- no streaming UI;
+- no multi-user auth;
+- `openai_chat_completions` protocol is reserved but not implemented.
+
 ## 5. Implemented Capability Matrix
 
 | Area | Status | Notes |
@@ -502,6 +528,7 @@ core's private internals.
 | Ledger/audit | Good MVP | JSONL audit path exists. |
 | Benchmark harness | Good MVP | Toy dataset and suite/report flow exist. |
 | Config/CLI/SDK | Good MVP | JSON experiment config, CLI, package exports exist. |
+| Autonomous WebUI | MVP | Local deterministic/OpenAI Responses workbench for autonomous runs and trace inspection. |
 | Model gateway | Good MVP | Structured seam plus deterministic, scripted, and OpenAI Responses adapters exist. Provider observability remains future work. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
@@ -659,6 +686,9 @@ Shape:
 - recorded fixtures for reproducible tests.
 
 ### Phase 3: Benchmark Expansion
+
+Status: Autonomous WebUI is implemented as the current tracer bullet; the
+methodology benchmark expansion remains the next slice.
 
 Goal:
 
