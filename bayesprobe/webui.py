@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import mimetypes
 import re
-import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass
@@ -19,6 +17,10 @@ from pydantic import BaseModel
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import InitializeRunInput
 from bayesprobe.model_gateway import DeterministicModelGateway, ModelGateway
+from bayesprobe.openai_gateway import (
+    OpenAIModelGatewayConfig,
+    OpenAIResponsesModelGateway,
+)
 from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunResult,
@@ -60,22 +62,30 @@ def handle_autonomous_run_request(
 ) -> tuple[int, dict[str, Any]]:
     try:
         request = _parse_autonomous_request(payload)
-        gateway = _build_webui_model_gateway(
-            request["provider"], client_factory=client_factory
+        provider_kind = _optional_string(
+            request["provider"].get("kind"),
+            "provider.kind",
+            default="deterministic",
         )
+        gateway = _build_webui_model_gateway(request["provider"], client_factory=client_factory)
         core = BayesProbeCore(model_gateway=gateway)
         runner = AutonomousQuestionRunner(
             core=core,
             config=request["runner_config"],
         )
         run_id = _webui_run_id()
-        result = runner.run_question(
-            InitializeRunInput(
-                run_id=run_id,
-                problem=request["question"],
-                context=request["context"],
+        try:
+            result = runner.run_question(
+                InitializeRunInput(
+                    run_id=run_id,
+                    problem=request["question"],
+                    context=request["context"],
+                )
             )
-        )
+        except Exception as error:
+            if provider_kind == "openai_responses":
+                raise ProviderError(str(error)) from error
+            raise
         return HTTPStatus.OK, serialize_autonomous_run_result(result)
     except WebUIError as error:
         return int(error.status_code), _error_payload(error.error_type, error.message)
@@ -112,56 +122,56 @@ def serialize_autonomous_run_result(
 
 
 def create_handler_class() -> type[BaseHTTPRequestHandler]:
-    class WebUIHandler(BaseHTTPRequestHandler):
+    class BayesProbeWebUIHandler(BaseHTTPRequestHandler):
         server_version = "BayesProbeWebUI/0.1"
 
-        def do_GET(self) -> None:  # noqa: N802
-            try:
-                if self.path == "/":
-                    self._serve_static_file("index.html")
-                    return
-                if self.path in {"/styles.css", "/app.js"}:
-                    self._serve_static_file(self.path.lstrip("/"))
-                    return
-                self._write_json(
-                    HTTPStatus.NOT_FOUND,
-                    _error_payload("not_found", f"unknown path: {self.path}"),
-                )
-            except WebUIError as error:
-                self._write_json(
-                    error.status_code,
-                    _error_payload(error.error_type, error.message),
-                )
-            except Exception:
-                self._write_json(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    _error_payload("server_error", _generic_server_error_message()),
-                )
+        def log_message(self, format: str, *args: Any) -> None:
+            return
 
         def do_POST(self) -> None:  # noqa: N802
             try:
                 if self.path != "/api/runs/autonomous":
-                    self._write_json(
+                    self._send_json(
                         HTTPStatus.NOT_FOUND,
-                        _error_payload("not_found", f"unknown path: {self.path}"),
+                        _error_payload("not_found", "not found"),
                     )
                     return
                 payload = self._read_json_body()
                 status, response = handle_autonomous_run_request(payload)
-                self._write_json(status, response)
+                self._send_json(status, response)
             except WebUIError as error:
-                self._write_json(
+                self._send_json(
                     error.status_code,
                     _error_payload(error.error_type, error.message),
                 )
             except Exception:
-                self._write_json(
+                self._send_json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     _error_payload("server_error", _generic_server_error_message()),
                 )
 
-        def log_message(self, format: str, *args: Any) -> None:
-            return
+        def do_GET(self) -> None:  # noqa: N802
+            try:
+                if self.path in {"/", "/index.html"}:
+                    self._send_static("index.html", "text/html; charset=utf-8")
+                    return
+                if self.path == "/styles.css":
+                    self._send_static("styles.css", "text/css; charset=utf-8")
+                    return
+                if self.path == "/app.js":
+                    self._send_static("app.js", "text/javascript; charset=utf-8")
+                    return
+                self._send_json(HTTPStatus.NOT_FOUND, _error_payload("not_found", "not found"))
+            except WebUIError as error:
+                self._send_json(
+                    error.status_code,
+                    _error_payload(error.error_type, error.message),
+                )
+            except Exception:
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    _error_payload("server_error", _generic_server_error_message()),
+                )
 
         def _read_json_body(self) -> Mapping[str, Any]:
             content_length = self.headers.get("Content-Length")
@@ -182,55 +192,51 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
                 raise WebUIError("request payload must be an object")
             return payload
 
-        def _serve_static_file(self, relative_path: str) -> None:
-            file_path = STATIC_DIR / relative_path
-            if not file_path.is_file():
-                self._write_json(
+        def _send_static(self, filename: str, content_type: str) -> None:
+            path = STATIC_DIR / filename
+            if not path.exists():
+                self._send_json(
                     HTTPStatus.NOT_FOUND,
-                    _error_payload("not_found", f"unknown path: {self.path}"),
+                    _error_payload("not_found", "static asset not found"),
                 )
                 return
             try:
-                body = file_path.read_bytes()
+                body = path.read_bytes()
             except OSError:
-                self._write_json(
+                self._send_json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     _error_payload("server_error", _generic_server_error_message()),
                 )
                 return
-            content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-        def _write_json(self, status: int | HTTPStatus, payload: Mapping[str, Any]) -> None:
-            body = json.dumps(payload, sort_keys=True).encode("utf-8")
+        def _send_json(self, status: int | HTTPStatus, payload: Mapping[str, Any]) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(int(status))
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-    return WebUIHandler
+    return BayesProbeWebUIHandler
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="bayesprobe-webui")
+    parser = argparse.ArgumentParser(description="Run the BayesProbe local WebUI.")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
-    try:
-        args = parser.parse_args(list(argv) if argv is not None else None)
-    except SystemExit as error:
-        return int(error.code)
-
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args(list(argv) if argv is not None else None)
     server = ThreadingHTTPServer((args.host, args.port), create_handler_class())
-    print(f"BayesProbe WebUI listening on http://{args.host}:{args.port}", file=sys.stderr)
+    host, port = server.server_address
+    print(f"BayesProbe WebUI running at http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        return 0
     finally:
         server.server_close()
     return 0
@@ -279,17 +285,41 @@ def _build_webui_model_gateway(
     *,
     client_factory: Callable[..., Any] | None,
 ) -> ModelGateway:
-    del client_factory
     kind = _optional_string(provider.get("kind"), "provider.kind", default="deterministic")
     if kind in RESERVED_PROVIDER_KINDS:
         raise UnsupportedProviderError(f"provider kind {kind} is not supported in v0.1")
     if kind == "deterministic":
         return DeterministicModelGateway()
     if kind == "openai_responses":
-        raise UnsupportedProviderError("provider kind openai_responses is not wired yet")
+        model = _required_nonempty_string(provider.get("model"), "provider.model")
+        api_key = _required_nonempty_string(provider.get("api_key"), "provider.api_key")
+        config = OpenAIModelGatewayConfig(
+            model=model,
+            base_url=_optional_string(provider.get("base_url"), "provider.base_url"),
+            timeout_seconds=_optional_number_from_mapping(
+                provider, "timeout_seconds", default=30.0
+            ),
+            max_output_tokens=_optional_int_or_none(provider, "max_output_tokens"),
+        )
+        return OpenAIResponsesModelGateway(
+            config=config,
+            api_key=api_key,
+            client=client_factory(**_openai_client_kwargs(config, api_key))
+            if client_factory is not None
+            else None,
+        )
     if kind in SUPPORTED_PROVIDER_KINDS:
         raise UnsupportedProviderError(f"provider kind {kind} is not supported in v0.1")
     raise UnsupportedProviderError(f"unsupported provider kind: {kind}")
+
+
+def _openai_client_kwargs(
+    config: OpenAIModelGatewayConfig, api_key: str
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"api_key": api_key, "timeout": config.timeout_seconds}
+    if config.base_url is not None:
+        kwargs["base_url"] = config.base_url
+    return kwargs
 
 
 def _dump_domain(value: Any) -> Any:
@@ -347,6 +377,17 @@ def _optional_int(
     return value
 
 
+def _optional_int_or_none(payload: Mapping[str, Any], field_name: str) -> int | None:
+    if field_name not in payload or payload[field_name] is None:
+        return None
+    value = payload[field_name]
+    if type(value) is not int:
+        raise WebUIError(f"{field_name} must be an integer")
+    if value < 1:
+        raise WebUIError(f"{field_name} must be positive")
+    return value
+
+
 def _optional_bool(
     payload: Mapping[str, Any],
     field_name: str,
@@ -365,6 +406,19 @@ def _optional_float(payload: Mapping[str, Any], field_name: str) -> float | None
         return None
     if type(value) not in (int, float):
         raise WebUIError(f"{field_name} must be a number")
+    return float(value)
+
+
+def _optional_number_from_mapping(
+    payload: Mapping[str, Any], field_name: str, *, default: float
+) -> float:
+    if field_name not in payload or payload[field_name] is None:
+        return default
+    value = payload[field_name]
+    if type(value) not in (int, float):
+        raise WebUIError(f"{field_name} must be a number")
+    if value <= 0:
+        raise WebUIError(f"{field_name} must be positive")
     return float(value)
 
 

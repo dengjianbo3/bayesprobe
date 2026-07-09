@@ -26,7 +26,7 @@ def serve_webui():
         server.server_close()
 
 
-def request_json(method, path, body=None, headers=None):
+def request_http(method, path, body=None, headers=None):
     with serve_webui() as address:
         connection = HTTPConnection(*address)
         try:
@@ -36,6 +36,27 @@ def request_json(method, path, body=None, headers=None):
         finally:
             connection.close()
     return response.status, response.getheader("Content-Type"), payload
+
+
+def serve_test_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler_class())
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def request_json(server, payload):
+    conn = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    conn.request(
+        "POST",
+        "/api/runs/autonomous",
+        body=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+    )
+    response = conn.getresponse()
+    data = json.loads(response.read().decode("utf-8"))
+    conn.close()
+    return response.status, data
 
 
 def test_webui_deterministic_autonomous_run_returns_trace():
@@ -86,22 +107,25 @@ def test_webui_autonomous_run_rejects_invalid_payloads(payload, expected_message
     assert response["error"]["message"] == expected_message
 
 
-def test_webui_autonomous_run_rejects_openai_responses_until_wired():
-    status, response = handle_autonomous_run_request(
-        {"question": "Q", "provider": {"kind": "openai_responses"}}
-    )
+def test_webui_http_server_serves_static_index():
+    server, thread = serve_test_server()
+    try:
+        conn = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        body = response.read().decode("utf-8")
+        conn.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
-    assert status == 400
-    assert response == {
-        "error": {
-            "type": "unsupported_provider",
-            "message": "provider kind openai_responses is not wired yet",
-        }
-    }
+    assert response.status == 200
+    assert "BayesProbe" in body
 
 
 def test_webui_handler_returns_invalid_json_for_malformed_request_body():
-    status, content_type, payload = request_json(
+    status, content_type, payload = request_http(
         "POST",
         "/api/runs/autonomous",
         body=b"{",
@@ -125,7 +149,7 @@ def test_webui_handler_returns_server_error_for_unexpected_post_failure(monkeypa
 
     monkeypatch.setattr(webui, "handle_autonomous_run_request", boom)
 
-    status, content_type, payload = request_json(
+    status, content_type, payload = request_http(
         "POST",
         "/api/runs/autonomous",
         body=json.dumps({"question": "Q"}).encode("utf-8"),
@@ -161,7 +185,7 @@ def test_webui_handler_sanitizes_static_file_read_failures(monkeypatch):
     monkeypatch.setattr(webui.Path, "is_file", fake_is_file)
     monkeypatch.setattr(webui.Path, "read_bytes", failing_read_bytes)
 
-    status, content_type, payload = request_json("GET", "/")
+    status, content_type, payload = request_http("GET", "/")
 
     assert status == 500
     assert content_type == "application/json; charset=utf-8"
@@ -171,3 +195,87 @@ def test_webui_handler_sanitizes_static_file_read_failures(monkeypatch):
             "message": "internal server error",
         }
     }
+
+
+class FakeWebUIResponses:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **payload):
+        self.calls.append(payload)
+        return json.dumps(
+            {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "WebUI fake OpenAI response.",
+                "quality_overrides": {},
+            }
+        )
+
+
+class FakeWebUIOpenAI:
+    created_with = []
+
+    def __init__(self, **kwargs):
+        self.__class__.created_with.append(kwargs)
+        self.responses = FakeWebUIResponses()
+
+
+def test_webui_openai_responses_provider_uses_request_key_and_redacts_response():
+    FakeWebUIOpenAI.created_with = []
+
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Can the WebUI use a provider-backed evidence judgment?",
+            "provider": {
+                "kind": "openai_responses",
+                "api_key": "sk-webui-secret",
+                "base_url": "https://provider.example/v1",
+                "model": "gpt-5.5",
+                "timeout_seconds": 11,
+                "max_output_tokens": 128,
+            },
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        client_factory=FakeWebUIOpenAI,
+    )
+
+    assert status == 200
+    assert FakeWebUIOpenAI.created_with == [
+        {
+            "api_key": "sk-webui-secret",
+            "timeout": 11.0,
+            "base_url": "https://provider.example/v1",
+        }
+    ]
+    assert "sk-webui-secret" not in json.dumps(payload)
+    assert payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"] == "openai"
+
+
+class FailingWebUIOpenAI:
+    def __init__(self, **kwargs):
+        self.responses = self
+
+    def create(self, **payload):
+        raise RuntimeError("provider rejected key sk-webui-secret")
+
+
+def test_webui_provider_errors_are_sanitized():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Will provider errors leak secrets?",
+            "provider": {
+                "kind": "openai_responses",
+                "api_key": "sk-webui-secret",
+                "model": "gpt-5.5",
+            },
+        },
+        client_factory=FailingWebUIOpenAI,
+    )
+
+    assert status == 502
+    assert payload["error"]["type"] == "provider_error"
+    assert "sk-webui-secret" not in json.dumps(payload)
