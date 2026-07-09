@@ -67,16 +67,9 @@ def handle_autonomous_run_request(
             "provider.kind",
             default="deterministic",
         )
-        try:
-            gateway = _build_webui_model_gateway(
-                request["provider"], client_factory=client_factory
-            )
-        except WebUIError:
-            raise
-        except Exception as error:
-            if provider_kind == "openai_responses":
-                raise ProviderError(str(error)) from error
-            raise
+        gateway = _build_webui_model_gateway(
+            request["provider"], client_factory=client_factory
+        )
         core = BayesProbeCore(model_gateway=gateway)
         runner = AutonomousQuestionRunner(
             core=core,
@@ -302,20 +295,27 @@ def _build_webui_model_gateway(
     if kind == "openai_responses":
         model = _required_nonempty_string(provider.get("model"), "provider.model")
         api_key = _required_nonempty_string(provider.get("api_key"), "provider.api_key")
-        config = OpenAIModelGatewayConfig(
-            model=model,
-            base_url=_optional_string(provider.get("base_url"), "provider.base_url"),
-            timeout_seconds=_optional_number_from_mapping(
-                provider, "timeout_seconds", default=30.0
-            ),
-            max_output_tokens=_optional_int_or_none(provider, "max_output_tokens"),
-        )
+        try:
+            config = OpenAIModelGatewayConfig(
+                model=model,
+                base_url=_optional_string(provider.get("base_url"), "provider.base_url"),
+                timeout_seconds=_optional_number_from_mapping(
+                    provider, "timeout_seconds", default=30.0
+                ),
+                max_output_tokens=_optional_int_or_none(provider, "max_output_tokens"),
+            )
+        except ValueError as error:
+            raise WebUIError(str(error)) from error
+        client = None
+        if client_factory is not None:
+            try:
+                client = client_factory(**_openai_client_kwargs(config, api_key))
+            except Exception as error:
+                raise ProviderError(str(error)) from error
         return OpenAIResponsesModelGateway(
             config=config,
             api_key=api_key,
-            client=client_factory(**_openai_client_kwargs(config, api_key))
-            if client_factory is not None
-            else None,
+            client=client,
         )
     if kind in SUPPORTED_PROVIDER_KINDS:
         raise UnsupportedProviderError(f"provider kind {kind} is not supported in v0.1")

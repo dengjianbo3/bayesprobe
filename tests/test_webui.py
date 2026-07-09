@@ -325,6 +325,30 @@ def test_webui_provider_errors_are_sanitized():
     assert "sk-webui-secret" not in json.dumps(payload)
 
 
+def test_webui_openai_responses_invalid_timeout_is_validation_error():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Does invalid provider config stay a validation error?",
+            "provider": {
+                "kind": "openai_responses",
+                "api_key": "sk-webui-secret",
+                "model": "gpt-5.5",
+                "timeout_seconds": float("nan"),
+            },
+        },
+        client_factory=FakeWebUIOpenAI,
+    )
+
+    assert status == 400
+    assert payload == {
+        "error": {
+            "type": "validation_error",
+            "message": "openai model gateway timeout_seconds must be finite and positive",
+        }
+    }
+    assert "sk-webui-secret" not in json.dumps(payload)
+
+
 def test_webui_provider_initialization_errors_are_sanitized():
     status, payload = handle_autonomous_run_request(
         {
