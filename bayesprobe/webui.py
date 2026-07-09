@@ -67,7 +67,16 @@ def handle_autonomous_run_request(
             "provider.kind",
             default="deterministic",
         )
-        gateway = _build_webui_model_gateway(request["provider"], client_factory=client_factory)
+        try:
+            gateway = _build_webui_model_gateway(
+                request["provider"], client_factory=client_factory
+            )
+        except WebUIError:
+            raise
+        except Exception as error:
+            if provider_kind == "openai_responses":
+                raise ProviderError(str(error)) from error
+            raise
         core = BayesProbeCore(model_gateway=gateway)
         runner = AutonomousQuestionRunner(
             core=core,

@@ -124,6 +124,45 @@ def test_webui_http_server_serves_static_index():
     assert "BayesProbe" in body
 
 
+@pytest.mark.parametrize(
+    ("path", "content_type", "expected_body"),
+    [
+        ("/styles.css", "text/css; charset=utf-8", "font-family: system-ui, sans-serif;"),
+        ("/app.js", "text/javascript; charset=utf-8", "Ready for local autonomous runs."),
+    ],
+)
+def test_webui_http_server_serves_static_assets(path, content_type, expected_body):
+    status, response_content_type, payload = request_http("GET", path)
+
+    assert status == 200
+    assert response_content_type == content_type
+    assert expected_body in payload.decode("utf-8")
+
+
+def test_webui_http_server_handles_autonomous_run_post():
+    status, content_type, payload = request_http(
+        "POST",
+        "/api/runs/autonomous",
+        body=json.dumps(
+            {
+                "question": "Does the HTTP handler complete a deterministic run?",
+                "context": "SUPPORTS: local deterministic run should favor H1.",
+                "provider": {"kind": "deterministic"},
+                "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+
+    response = json.loads(payload)
+
+    assert status == 200
+    assert content_type == "application/json; charset=utf-8"
+    assert response["run_id"].startswith("webui_")
+    assert response["stop_reason"] == "max_cycles"
+    assert response["cycles"][0]["evidence_events"]
+
+
 def test_webui_handler_returns_invalid_json_for_malformed_request_body():
     status, content_type, payload = request_http(
         "POST",
@@ -263,6 +302,11 @@ class FailingWebUIOpenAI:
         raise RuntimeError("provider rejected key sk-webui-secret")
 
 
+class FailingInitWebUIOpenAI:
+    def __init__(self, **kwargs):
+        raise RuntimeError("provider rejected key sk-webui-secret during init")
+
+
 def test_webui_provider_errors_are_sanitized():
     status, payload = handle_autonomous_run_request(
         {
@@ -274,6 +318,24 @@ def test_webui_provider_errors_are_sanitized():
             },
         },
         client_factory=FailingWebUIOpenAI,
+    )
+
+    assert status == 502
+    assert payload["error"]["type"] == "provider_error"
+    assert "sk-webui-secret" not in json.dumps(payload)
+
+
+def test_webui_provider_initialization_errors_are_sanitized():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Will provider init errors leak secrets?",
+            "provider": {
+                "kind": "openai_responses",
+                "api_key": "sk-webui-secret",
+                "model": "gpt-5.5",
+            },
+        },
+        client_factory=FailingInitWebUIOpenAI,
     )
 
     assert status == 502
