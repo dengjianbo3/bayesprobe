@@ -14,6 +14,9 @@ from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGatewayC
 
 
 _SECRET_METADATA_KEYS = {"api_key", "openai_api_key", "token", "secret"}
+_COLLAPSED_SECRET_METADATA_KEYS = {
+    secret_key.replace("_", "") for secret_key in _SECRET_METADATA_KEYS
+}
 
 
 @dataclass(frozen=True)
@@ -223,11 +226,15 @@ def _is_secret_metadata_key(key: str) -> bool:
     normalized = normalized.replace("-", "_")
     normalized = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", normalized)
     normalized = normalized.lower()
+    collapsed = normalized.replace("_", "")
     return any(
         normalized == secret_key
         or normalized.endswith(f"_{secret_key}")
         or normalized.endswith(secret_key)
         for secret_key in _SECRET_METADATA_KEYS
+    ) or any(
+        collapsed == secret_key or collapsed.endswith(secret_key)
+        for secret_key in _COLLAPSED_SECRET_METADATA_KEYS
     )
 
 

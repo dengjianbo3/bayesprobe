@@ -67,6 +67,8 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
                 "api_key": "sk-proj-secret-value",
                 "apiKey": "camel-secret-value",
                 "openaiApiKey": "openai-camel-secret-value",
+                "APIKEY": "uppercase-secret-value",
+                "OPENAIAPIKEY": "uppercase-openai-secret-value",
                 "nested": {
                     "token": "hidden-token-value",
                     "safe": "kept",
@@ -139,9 +141,13 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     assert "sk-proj-secret-value" not in artifact_text
     assert "camel-secret-value" not in artifact_text
     assert "openai-camel-secret-value" not in artifact_text
+    assert "uppercase-secret-value" not in artifact_text
+    assert "uppercase-openai-secret-value" not in artifact_text
     assert '"api_key"' not in artifact_text
     assert '"apiKey"' not in artifact_text
     assert '"openaiApiKey"' not in artifact_text
+    assert '"APIKEY"' not in artifact_text
+    assert '"OPENAIAPIKEY"' not in artifact_text
     assert '"token"' not in artifact_text
     assert "hidden-token-value" not in artifact_text
     assert "kept" in artifact_text
