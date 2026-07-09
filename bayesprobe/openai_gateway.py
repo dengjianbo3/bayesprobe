@@ -132,6 +132,38 @@ class OpenAIResponsesModelGateway:
         return self._client
 
 
+class OpenAIChatCompletionsModelGateway:
+    adapter_kind = "openai_chat_completions"
+
+    def __init__(
+        self,
+        *,
+        config: OpenAIModelGatewayConfig,
+        client: Any | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        self.config = config
+        self._client = client
+        self._api_key = _optional_request_api_key(api_key)
+
+    def complete_structured(self, request: StructuredModelRequest) -> dict[str, Any]:
+        payload = build_openai_chat_completions_payload(
+            request,
+            model=self.config.model,
+            max_output_tokens=self.config.max_output_tokens,
+        )
+        response = self._client_for_request().chat.completions.create(**payload)
+        return parse_openai_chat_completions_response(response)
+
+    def _client_for_request(self) -> Any:
+        if self._client is None:
+            self._client = _build_default_openai_client(
+                self.config,
+                api_key=self._api_key,
+            )
+        return self._client
+
+
 def build_openai_request_payload(
     request: StructuredModelRequest,
     *,
@@ -168,6 +200,35 @@ def build_openai_request_payload(
     return payload
 
 
+def build_openai_chat_completions_payload(
+    request: StructuredModelRequest,
+    *,
+    model: str,
+    max_output_tokens: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": _instruction_for_task(request.task),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"task": request.task, "input": request.input},
+                    sort_keys=True,
+                ),
+            },
+        ],
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+    if max_output_tokens is not None:
+        payload["max_tokens"] = max_output_tokens
+    return payload
+
+
 def parse_openai_structured_response(response: Any) -> dict[str, Any]:
     if isinstance(response, Mapping):
         if "output_text" in response:
@@ -194,6 +255,13 @@ def parse_openai_structured_response(response: Any) -> dict[str, Any]:
         return _parse_json_object(text)
 
     raise ModelGatewayValidationError("openai structured response text was missing")
+
+
+def parse_openai_chat_completions_response(response: Any) -> dict[str, Any]:
+    content = _chat_message_content(response)
+    if content is None:
+        raise ModelGatewayValidationError("openai chat completion content was missing")
+    return _parse_json_object(content)
 
 
 def _instruction_for_task(task: str) -> str:
@@ -272,6 +340,26 @@ def _extract_text_from_output(response: Any) -> str | None:
     return None
 
 
+def _chat_message_content(response: Any) -> str | None:
+    choices = getattr(response, "choices", None)
+    if choices is None and isinstance(response, Mapping):
+        choices = response.get("choices")
+    if not isinstance(choices, list | tuple) or not choices:
+        return None
+    choice = choices[0]
+    message = getattr(choice, "message", None)
+    if message is None and isinstance(choice, Mapping):
+        message = choice.get("message")
+    if message is None:
+        return None
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, Mapping):
+        content = message.get("content")
+    if isinstance(content, str):
+        return content
+    return None
+
+
 def _looks_like_evidence_judgment_payload(response: Mapping[str, Any]) -> bool:
     return any(key in response for key in EVIDENCE_JUDGMENT_SCHEMA_KEYS)
 
@@ -310,8 +398,11 @@ def _build_default_openai_client(
 
 __all__ = [
     "EVIDENCE_JUDGMENT_JSON_SCHEMA",
+    "OpenAIChatCompletionsModelGateway",
     "OpenAIModelGatewayConfig",
     "OpenAIResponsesModelGateway",
+    "build_openai_chat_completions_payload",
     "build_openai_request_payload",
+    "parse_openai_chat_completions_response",
     "parse_openai_structured_response",
 ]

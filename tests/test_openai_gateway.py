@@ -7,9 +7,12 @@ import pytest
 from bayesprobe.model_gateway import ModelGatewayValidationError, StructuredModelRequest
 from bayesprobe.openai_gateway import (
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
+    OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
+    build_openai_chat_completions_payload,
     build_openai_request_payload,
+    parse_openai_chat_completions_response,
     parse_openai_structured_response,
 )
 
@@ -189,6 +192,23 @@ def test_build_openai_request_payload_rejects_unknown_task():
         build_openai_request_payload(request, model="gpt-5.5")
 
 
+def test_build_openai_chat_completions_payload_uses_common_json_object_shape():
+    payload = build_openai_chat_completions_payload(
+        make_judge_request(),
+        model="provider-model",
+        max_output_tokens=256,
+    )
+
+    assert payload["model"] == "provider-model"
+    assert payload["stream"] is False
+    assert payload["max_tokens"] == 256
+    assert payload["response_format"] == {"type": "json_object"}
+    assert payload["messages"][0]["role"] == "system"
+    assert "evidence judgment component" in payload["messages"][0]["content"]
+    assert payload["messages"][1]["role"] == "user"
+    assert json.loads(payload["messages"][1]["content"])["task"] == "judge_evidence"
+
+
 def valid_payload() -> dict[str, object]:
     return {
         "evidence_type": "supporting",
@@ -244,6 +264,36 @@ def test_parse_openai_structured_response_accepts_mapping_output_content_text():
     }
 
     assert parse_openai_structured_response(response) == valid_payload()
+
+
+def test_parse_openai_chat_completions_response_extracts_mapping_message_content():
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(valid_payload()),
+                }
+            }
+        ]
+    }
+
+    assert parse_openai_chat_completions_response(response) == valid_payload()
+
+
+class FakeChatMessage:
+    content = json.dumps(valid_payload())
+
+
+class FakeChatChoice:
+    message = FakeChatMessage()
+
+
+class FakeChatResponse:
+    choices = [FakeChatChoice()]
+
+
+def test_parse_openai_chat_completions_response_extracts_object_message_content():
+    assert parse_openai_chat_completions_response(FakeChatResponse()) == valid_payload()
 
 
 def test_parse_openai_structured_response_rejects_provider_envelope_without_text():
@@ -316,6 +366,45 @@ def test_openai_responses_model_gateway_calls_fake_client_and_returns_dict():
     assert len(client.responses.calls) == 1
     assert client.responses.calls[0]["model"] == "gpt-5.5"
     assert client.responses.calls[0]["max_output_tokens"] == 128
+
+
+class FakeChatCompletions:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **payload):
+        self.calls.append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(valid_payload()),
+                    }
+                }
+            ]
+        }
+
+
+class FakeChatClient:
+    def __init__(self):
+        self.chat = SimpleNamespace(completions=FakeChatCompletions())
+
+
+def test_openai_chat_completions_model_gateway_calls_fake_client_and_returns_dict():
+    client = FakeChatClient()
+    gateway = OpenAIChatCompletionsModelGateway(
+        config=OpenAIModelGatewayConfig(
+            model="provider-model",
+            max_output_tokens=128,
+        ),
+        client=client,
+    )
+
+    result = gateway.complete_structured(make_judge_request())
+
+    assert result == valid_payload()
+    assert client.chat.completions.calls[0]["model"] == "provider-model"
+    assert client.chat.completions.calls[0]["max_tokens"] == 128
 
 
 def test_openai_responses_model_gateway_propagates_provider_exceptions():
