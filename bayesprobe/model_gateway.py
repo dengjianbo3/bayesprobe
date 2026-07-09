@@ -15,12 +15,126 @@ class ModelGatewayValidationError(ValueError):
 class StructuredModelRequest:
     task: str
     input: dict[str, Any]
+    prompt_id: str | None = None
+    prompt_version: str | None = None
+    schema_name: str | None = None
+    schema_version: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, str):
+            raise ValueError("structured model request task must be a string")
+        if not self.task.strip():
+            raise ValueError("structured model request task must not be empty")
+        if not isinstance(self.input, Mapping):
+            raise ValueError("structured model request input must be an object")
+        if self.prompt_id is not None:
+            if not isinstance(self.prompt_id, str):
+                raise ValueError("structured model request prompt_id must be a string")
+            if not self.prompt_id.strip():
+                raise ValueError("structured model request prompt_id must not be empty")
+        if self.prompt_version is not None:
+            if not isinstance(self.prompt_version, str):
+                raise ValueError("structured model request prompt_version must be a string")
+            if not self.prompt_version.strip():
+                raise ValueError("structured model request prompt_version must not be empty")
+        if self.schema_name is not None and not isinstance(self.schema_name, str):
+            raise ValueError("structured model request schema_name must be a string")
+        if self.schema_version is not None:
+            if not isinstance(self.schema_version, str):
+                raise ValueError("structured model request schema_version must be a string")
+            if not self.schema_version.strip():
+                raise ValueError("structured model request schema_version must not be empty")
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("structured model request metadata must be an object")
+        object.__setattr__(self, "input", dict(self.input))
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
 
 @dataclass(frozen=True)
 class ModelGatewayConfig:
     kind: str = "deterministic"
     responses: dict[str, dict[str, Any]] | None = None
+
+
+@dataclass(frozen=True)
+class ModelInvocationTrace:
+    task: str
+    adapter_kind: str
+    prompt_id: str | None = None
+    prompt_version: str | None = None
+    schema_name: str | None = None
+    schema_version: str | None = None
+    repair_attempt_index: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, str):
+            raise ValueError("model invocation task must be a string")
+        if not self.task.strip():
+            raise ValueError("model invocation task must not be empty")
+        if not isinstance(self.adapter_kind, str):
+            raise ValueError("model invocation adapter_kind must be a string")
+        if not self.adapter_kind.strip():
+            raise ValueError("model invocation adapter_kind must not be empty")
+        if self.prompt_id is not None:
+            if not isinstance(self.prompt_id, str):
+                raise ValueError("model invocation prompt_id must be a string")
+            if not self.prompt_id.strip():
+                raise ValueError("model invocation prompt_id must not be empty")
+        if self.prompt_version is not None and not isinstance(self.prompt_version, str):
+            raise ValueError("model invocation prompt_version must be a string")
+        if self.schema_name is not None and not isinstance(self.schema_name, str):
+            raise ValueError("model invocation schema_name must be a string")
+        if self.schema_version is not None:
+            if not isinstance(self.schema_version, str):
+                raise ValueError("model invocation schema_version must be a string")
+            if not self.schema_version.strip():
+                raise ValueError("model invocation schema_version must not be empty")
+        if self.repair_attempt_index is not None and (
+            type(self.repair_attempt_index) is not int or self.repair_attempt_index < 1
+        ):
+            raise ValueError(
+                "model invocation repair_attempt_index must be a positive integer"
+            )
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("model invocation metadata must be an object")
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @classmethod
+    def from_request(
+        cls, request: StructuredModelRequest, *, adapter_kind: str
+    ) -> "ModelInvocationTrace":
+        metadata = dict(request.metadata)
+        repair_attempt_index = metadata.pop("repair_attempt_index", None)
+        return cls(
+            task=request.task,
+            adapter_kind=adapter_kind,
+            prompt_id=request.prompt_id,
+            prompt_version=request.prompt_version,
+            schema_name=request.schema_name,
+            schema_version=request.schema_version,
+            repair_attempt_index=repair_attempt_index,
+            metadata=metadata,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "task": self.task,
+            "adapter_kind": self.adapter_kind,
+            "metadata": dict(self.metadata),
+        }
+        if self.prompt_id is not None:
+            payload["prompt_id"] = self.prompt_id
+        if self.prompt_version is not None:
+            payload["prompt_version"] = self.prompt_version
+        if self.schema_name is not None:
+            payload["schema_name"] = self.schema_name
+        if self.schema_version is not None:
+            payload["schema_version"] = self.schema_version
+        if self.repair_attempt_index is not None:
+            payload["repair_attempt_index"] = self.repair_attempt_index
+        return payload
 
 
 @dataclass(frozen=True)
@@ -116,6 +230,8 @@ def evidence_judgment_from_mapping(payload: dict[str, Any]) -> EvidenceJudgment:
 
 
 class DeterministicModelGateway:
+    adapter_kind = "deterministic"
+
     def complete_structured(self, request: StructuredModelRequest) -> dict[str, Any]:
         if request.task != "judge_evidence":
             raise ValueError(f"unsupported deterministic model task: {request.task}")
@@ -160,6 +276,8 @@ class DeterministicModelGateway:
 
 
 class ScriptedModelGateway:
+    adapter_kind = "scripted"
+
     def __init__(self, responses: dict[str, dict[str, Any]]) -> None:
         self.responses = responses
         self.requests: list[StructuredModelRequest] = []
@@ -182,6 +300,13 @@ def build_model_gateway(
             raise ValueError("scripted model gateway requires responses")
         return ScriptedModelGateway(responses=gateway_config.responses)
     raise ValueError(f"unsupported model gateway kind: {gateway_config.kind}")
+
+
+def model_gateway_adapter_kind(gateway: object) -> str:
+    adapter_kind = getattr(gateway, "adapter_kind", None)
+    if isinstance(adapter_kind, str) and adapter_kind.strip():
+        return adapter_kind
+    return gateway.__class__.__name__
 
 
 def _model_gateway_config_from_input(
@@ -212,8 +337,10 @@ __all__ = [
     "ModelGateway",
     "ModelGatewayConfig",
     "ModelGatewayValidationError",
+    "ModelInvocationTrace",
     "ScriptedModelGateway",
     "StructuredModelRequest",
     "build_model_gateway",
     "evidence_judgment_from_mapping",
+    "model_gateway_adapter_kind",
 ]

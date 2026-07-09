@@ -20,6 +20,7 @@ from bayesprobe import (
     ModelGateway,
     ModelGatewayConfig,
     ModelGatewayValidationError,
+    ModelInvocationTrace,
     ScriptedModelGateway,
     StructuredModelRequest,
     build_model_gateway,
@@ -56,6 +57,7 @@ def test_public_sdk_exports_supported_names():
         "ModelGateway",
         "ModelGatewayConfig",
         "ModelGatewayValidationError",
+        "ModelInvocationTrace",
         "ScriptedModelGateway",
         "StructuredModelRequest",
         "build_model_gateway",
@@ -82,6 +84,7 @@ def test_public_sdk_exports_supported_names():
     assert ModelGateway is not None
     assert ModelGatewayConfig is not None
     assert ModelGatewayValidationError is not None
+    assert ModelInvocationTrace is not None
     assert ScriptedModelGateway is not None
     assert StructuredModelRequest is not None
     assert build_model_gateway is not None
