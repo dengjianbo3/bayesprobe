@@ -168,6 +168,25 @@ def test_experiment_config_from_mapping_keeps_relative_paths_without_base_dir():
     assert config.report_path == Path("outputs/toy-report.json")
 
 
+def test_experiment_config_from_mapping_parses_artifact_metadata(tmp_path: Path):
+    config = experiment_config_from_mapping(
+        {
+            "dataset_path": "datasets/toy.json",
+            "report_path": "outputs/toy-report.json",
+            "artifact_dir": "runs/toy",
+            "run_name": "toy-offline-smoke",
+            "metadata": {"suite": "offline", "prompt_registry": "none"},
+        },
+        base_dir=tmp_path,
+    )
+
+    assert config.dataset_path == tmp_path / "datasets" / "toy.json"
+    assert config.report_path == tmp_path / "outputs" / "toy-report.json"
+    assert config.artifact_dir == tmp_path / "runs" / "toy"
+    assert config.run_name == "toy-offline-smoke"
+    assert config.metadata == {"suite": "offline", "prompt_registry": "none"}
+
+
 def test_experiment_config_from_mapping_parses_model_gateway_object(tmp_path: Path):
     config = experiment_config_from_mapping(
         {
@@ -278,6 +297,50 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
             "non_string_path.json",
             json.dumps({"dataset_path": 1, "report_path": "report.json"}),
             "experiment config field dataset_path must be a string",
+        ),
+        (
+            "non_string_artifact_dir.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "artifact_dir": 1,
+                }
+            ),
+            "experiment config field artifact_dir must be a string",
+        ),
+        (
+            "non_string_run_name.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "run_name": 1,
+                }
+            ),
+            "experiment config field run_name must be a string",
+        ),
+        (
+            "empty_run_name.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "run_name": "   ",
+                }
+            ),
+            "experiment config field run_name must not be empty",
+        ),
+        (
+            "non_object_metadata.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "metadata": [],
+                }
+            ),
+            "experiment config field metadata must be an object",
         ),
         (
             "non_integer_cycles.json",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,9 @@ class ExperimentRunConfig:
     dataset_path: str | Path
     report_path: str | Path
     ledger_path: str | Path | None = None
+    artifact_dir: str | Path | None = None
+    run_name: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     max_cycles: int = 1
     max_probes_per_cycle: int = 1
     model_gateway: ModelGatewayConfig | Mapping[str, Any] | None = None
@@ -34,6 +37,19 @@ class ExperimentRunConfig:
             raise ValueError("max_cycles must be at least 1")
         if self.max_probes_per_cycle < 1:
             raise ValueError("max_probes_per_cycle must be at least 1")
+        if self.artifact_dir is not None and not isinstance(
+            self.artifact_dir, (str, Path)
+        ):
+            raise ValueError("artifact_dir must be a path")
+        if self.run_name is not None:
+            if not isinstance(self.run_name, str):
+                raise ValueError("run_name must be a string")
+            if not self.run_name.strip():
+                raise ValueError("run_name must not be empty")
+            object.__setattr__(self, "run_name", self.run_name.strip())
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("metadata must be an object")
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
 
 @dataclass(frozen=True)

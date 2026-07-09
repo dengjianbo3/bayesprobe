@@ -33,6 +33,9 @@ def experiment_config_from_mapping(
         dataset_path=_required_path(data, "dataset_path", base_dir=base_dir),
         report_path=_required_path(data, "report_path", base_dir=base_dir),
         ledger_path=_optional_path(data, "ledger_path", base_dir=base_dir),
+        artifact_dir=_optional_path(data, "artifact_dir", base_dir=base_dir),
+        run_name=_optional_string(data, "run_name"),
+        metadata=_optional_mapping(data, "metadata"),
         max_cycles=_optional_int(data, "max_cycles", default=1),
         max_probes_per_cycle=_optional_int(data, "max_probes_per_cycle", default=1),
         model_gateway=_optional_model_gateway_config(data),
@@ -82,6 +85,26 @@ def _optional_int(data: Mapping[str, Any], field_name: str, *, default: int) -> 
     if type(value) is not int:
         raise ValueError(f"experiment config field {field_name} must be an integer")
     return value
+
+
+def _optional_string(data: Mapping[str, Any], field_name: str) -> str | None:
+    if field_name not in data or data[field_name] is None:
+        return None
+    value = data[field_name]
+    if not isinstance(value, str):
+        raise ValueError(f"experiment config field {field_name} must be a string")
+    if not value.strip():
+        raise ValueError(f"experiment config field {field_name} must not be empty")
+    return value.strip()
+
+
+def _optional_mapping(data: Mapping[str, Any], field_name: str) -> dict[str, Any]:
+    if field_name not in data or data[field_name] is None:
+        return {}
+    value = data[field_name]
+    if not isinstance(value, Mapping):
+        raise ValueError(f"experiment config field {field_name} must be an object")
+    return dict(value)
 
 
 def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfig | None:
