@@ -76,6 +76,7 @@ class ModelGatewayConfig:
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: float = 30.0
     max_output_tokens: int | None = None
+    base_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -340,6 +341,7 @@ def build_model_gateway(
                 api_key_env=gateway_config.api_key_env,
                 timeout_seconds=gateway_config.timeout_seconds,
                 max_output_tokens=gateway_config.max_output_tokens,
+                base_url=gateway_config.base_url,
             )
         )
     raise ValueError(f"unsupported model gateway kind: {gateway_config.kind}")
@@ -372,6 +374,9 @@ def _model_gateway_config_from_input(
     api_key_env = config.get("api_key_env", "OPENAI_API_KEY")
     timeout_seconds = config.get("timeout_seconds", 30.0)
     max_output_tokens = config.get("max_output_tokens")
+    base_url = config.get("base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        raise ValueError("openai model gateway base_url must be a string")
 
     return ModelGatewayConfig(
         kind=kind,
@@ -380,6 +385,7 @@ def _model_gateway_config_from_input(
         api_key_env=api_key_env,
         timeout_seconds=timeout_seconds,
         max_output_tokens=max_output_tokens,
+        base_url=base_url,
     )
 
 

@@ -144,3 +144,43 @@ def test_model_invocation_artifact_is_empty_for_missing_or_empty_ledger(
     assert payload == {"artifact_version": "0.1", "invocation_count": 0, "invocations": []}
     assert manifest["model_invocation_count"] == 0
     assert manifest["model_invocation_summary"] == []
+
+
+def test_artifact_snapshot_includes_openai_base_url_without_raw_api_key(tmp_path: Path):
+    from bayesprobe import load_benchmark_dataset
+
+    dataset = load_benchmark_dataset(FIXTURE_PATH)
+    report_path = tmp_path / "report.json"
+    report_path.write_text(
+        json.dumps({"results": [], "sample_count": 0}),
+        encoding="utf-8",
+    )
+    config = ExperimentRunConfig(
+        dataset_path=FIXTURE_PATH,
+        report_path=report_path,
+        artifact_dir=tmp_path / "artifact",
+        model_gateway={
+            "kind": "openai",
+            "model": "gpt-5.5",
+            "api_key_env": "OPENAI_API_KEY",
+            "base_url": "https://provider.example/v1",
+        },
+        metadata={"api_key": "sk-secret"},
+    )
+
+    bundle = write_experiment_artifact_bundle(
+        artifact_dir=tmp_path / "artifact",
+        config=config,
+        dataset=dataset,
+        report_path=report_path,
+        ledger_path=None,
+        sample_count=0,
+    )
+
+    manifest_text = bundle.manifest_path.read_text(encoding="utf-8")
+    snapshot = json.loads(bundle.config_snapshot_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_text)
+    assert snapshot["model_gateway"]["base_url"] == "https://provider.example/v1"
+    assert manifest["model_gateway"]["base_url"] == "https://provider.example/v1"
+    assert "sk-secret" not in manifest_text
+    assert "sk-secret" not in bundle.config_snapshot_path.read_text(encoding="utf-8")

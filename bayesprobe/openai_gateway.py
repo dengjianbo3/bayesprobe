@@ -11,6 +11,11 @@ from typing import Any
 from bayesprobe.model_gateway import ModelGatewayValidationError, StructuredModelRequest
 from bayesprobe.schemas import EvidenceType, LikelihoodBand
 
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
 
 EVIDENCE_JUDGMENT_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -53,6 +58,7 @@ class OpenAIModelGatewayConfig:
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: float = 30.0
     max_output_tokens: int | None = None
+    base_url: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str):
@@ -84,6 +90,12 @@ class OpenAIModelGatewayConfig:
                 raise ValueError(
                     "openai model gateway max_output_tokens must be positive"
                 )
+        if self.base_url is not None:
+            if not isinstance(self.base_url, str):
+                raise ValueError("openai model gateway base_url must be a string")
+            if not self.base_url.strip():
+                raise ValueError("openai model gateway base_url must not be empty")
+            object.__setattr__(self, "base_url", self.base_url.strip())
         object.__setattr__(self, "model", self.model.strip())
         object.__setattr__(self, "api_key_env", self.api_key_env.strip())
 
@@ -96,9 +108,11 @@ class OpenAIResponsesModelGateway:
         *,
         config: OpenAIModelGatewayConfig,
         client: Any | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.config = config
         self._client = client
+        self._api_key = _optional_request_api_key(api_key)
 
     def complete_structured(self, request: StructuredModelRequest) -> dict[str, Any]:
         payload = build_openai_request_payload(
@@ -111,7 +125,10 @@ class OpenAIResponsesModelGateway:
 
     def _client_for_request(self) -> Any:
         if self._client is None:
-            self._client = _build_default_openai_client(self.config)
+            self._client = _build_default_openai_client(
+                self.config,
+                api_key=self._api_key,
+            )
         return self._client
 
 
@@ -259,20 +276,36 @@ def _looks_like_evidence_judgment_payload(response: Mapping[str, Any]) -> bool:
     return any(key in response for key in EVIDENCE_JUDGMENT_SCHEMA_KEYS)
 
 
-def _build_default_openai_client(config: OpenAIModelGatewayConfig) -> Any:
-    api_key = os.environ.get(config.api_key_env)
-    if not api_key:
+def _optional_request_api_key(api_key: str | None) -> str | None:
+    if api_key is None:
+        return None
+    if not isinstance(api_key, str):
+        raise ValueError("openai request api_key must be a string")
+    if not api_key.strip():
+        raise ValueError("openai request api_key must not be empty")
+    return api_key.strip()
+
+
+def _build_default_openai_client(
+    config: OpenAIModelGatewayConfig, *, api_key: str | None = None
+) -> Any:
+    resolved_api_key = api_key or os.environ.get(config.api_key_env)
+    if not resolved_api_key:
         raise RuntimeError(
             f"OpenAI API key environment variable {config.api_key_env} is not set"
         )
-    try:
-        from openai import OpenAI
-    except ImportError as error:
+    if OpenAI is None:
         raise RuntimeError(
             "OpenAI Python package is required for OpenAIResponsesModelGateway. "
             "Install bayesprobe[openai] or install openai."
-        ) from error
-    return OpenAI(api_key=api_key, timeout=config.timeout_seconds)
+        )
+    kwargs: dict[str, Any] = {
+        "api_key": resolved_api_key,
+        "timeout": config.timeout_seconds,
+    }
+    if config.base_url is not None:
+        kwargs["base_url"] = config.base_url
+    return OpenAI(**kwargs)
 
 
 __all__ = [

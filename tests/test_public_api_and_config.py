@@ -238,6 +238,27 @@ def test_experiment_config_from_mapping_parses_openai_model_gateway(tmp_path: Pa
     assert config.model_gateway.max_output_tokens == 256
 
 
+def test_experiment_config_from_mapping_parses_openai_base_url(tmp_path: Path):
+    dataset_path = tmp_path / "dataset.json"
+    report_path = tmp_path / "report.json"
+
+    config = experiment_config_from_mapping(
+        {
+            "dataset_path": str(dataset_path),
+            "report_path": str(report_path),
+            "model_gateway": {
+                "kind": "openai",
+                "model": "gpt-5.5",
+                "api_key_env": "BAYESPROBE_TEST_OPENAI_KEY",
+                "base_url": "https://provider.example/v1",
+            },
+        }
+    )
+
+    assert config.model_gateway is not None
+    assert config.model_gateway.base_url == "https://provider.example/v1"
+
+
 def test_experiment_config_from_mapping_parses_judgment_repair_policy(tmp_path: Path):
     config = experiment_config_from_mapping(
         {
@@ -414,6 +435,36 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
                 }
             ),
             "openai model gateway api_key_env must be an environment variable name",
+        ),
+        (
+            "openai_raw_api_key_rejected.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {
+                        "kind": "openai",
+                        "model": "gpt-5.5",
+                        "api_key": "sk-not-allowed",
+                    },
+                }
+            ),
+            "openai model gateway api_key is not allowed in experiment config",
+        ),
+        (
+            "openai_invalid_base_url.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {
+                        "kind": "openai",
+                        "model": "gpt-5.5",
+                        "base_url": "",
+                    },
+                }
+            ),
+            "openai model gateway base_url must not be empty",
         ),
         (
             "openai_invalid_timeout.json",

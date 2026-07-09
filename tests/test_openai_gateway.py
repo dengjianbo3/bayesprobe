@@ -43,6 +43,31 @@ def test_openai_model_gateway_config_requires_explicit_model():
         config.model = "other"
 
 
+def test_openai_model_gateway_config_accepts_base_url():
+    config = OpenAIModelGatewayConfig(
+        model="gpt-5.5",
+        base_url="https://provider.example/v1",
+    )
+
+    assert config.base_url == "https://provider.example/v1"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected_message"),
+    [
+        ("", "openai model gateway base_url must not be empty"),
+        ("   ", "openai model gateway base_url must not be empty"),
+        (1, "openai model gateway base_url must be a string"),
+    ],
+)
+def test_openai_model_gateway_config_rejects_invalid_base_url(
+    base_url,
+    expected_message,
+):
+    with pytest.raises(ValueError, match=expected_message):
+        OpenAIModelGatewayConfig(model="gpt-5.5", base_url=base_url)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "expected_message"),
     [
@@ -270,6 +295,14 @@ class FakeOpenAIClient:
         self.responses = FakeResponses(response)
 
 
+class RecordingOpenAI:
+    created_with = []
+
+    def __init__(self, **kwargs):
+        self.__class__.created_with.append(kwargs)
+        self.responses = FakeResponses(response=json.dumps(valid_payload()))
+
+
 def test_openai_responses_model_gateway_calls_fake_client_and_returns_dict():
     client = FakeOpenAIClient(response=json.dumps(valid_payload()))
     gateway = OpenAIResponsesModelGateway(
@@ -294,6 +327,34 @@ def test_openai_responses_model_gateway_propagates_provider_exceptions():
 
     with pytest.raises(RuntimeError, match="provider outage"):
         gateway.complete_structured(make_judge_request())
+
+
+def test_openai_responses_model_gateway_uses_request_scoped_key_and_base_url(
+    monkeypatch,
+):
+    import bayesprobe.openai_gateway as openai_gateway
+
+    RecordingOpenAI.created_with = []
+    monkeypatch.setattr(openai_gateway, "OpenAI", RecordingOpenAI, raising=False)
+    gateway = OpenAIResponsesModelGateway(
+        config=OpenAIModelGatewayConfig(
+            model="gpt-5.5",
+            base_url="https://provider.example/v1",
+            timeout_seconds=12.5,
+        ),
+        api_key="sk-request-scoped",
+    )
+
+    result = gateway.complete_structured(make_judge_request())
+
+    assert result == valid_payload()
+    assert RecordingOpenAI.created_with == [
+        {
+            "api_key": "sk-request-scoped",
+            "timeout": 12.5,
+            "base_url": "https://provider.example/v1",
+        }
+    ]
 
 
 def test_openai_responses_model_gateway_raises_clear_error_without_api_key(monkeypatch):
