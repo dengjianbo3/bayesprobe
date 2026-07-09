@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import time
@@ -86,7 +87,7 @@ def handle_autonomous_run_request(
             )
         except Exception as error:
             if provider_kind == "openai_responses":
-                raise ProviderError(str(error)) from error
+                raise ProviderError(_generic_provider_error_message()) from error
             raise
         return HTTPStatus.OK, serialize_autonomous_run_result(result)
     except WebUIError as error:
@@ -232,7 +233,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(list(argv) if argv is not None else None)
-    server = ThreadingHTTPServer((args.host, args.port), create_handler_class())
+    try:
+        host = _require_loopback_host(args.host)
+    except ValueError as error:
+        parser.error(str(error))
+    server = ThreadingHTTPServer((host, args.port), create_handler_class())
     host, port = server.server_address
     print(f"BayesProbe WebUI running at http://{host}:{port}")
     try:
@@ -311,7 +316,7 @@ def _build_webui_model_gateway(
             try:
                 client = client_factory(**_openai_client_kwargs(config, api_key))
             except Exception as error:
-                raise ProviderError(str(error)) from error
+                raise ProviderError(_generic_provider_error_message()) from error
         return OpenAIResponsesModelGateway(
             config=config,
             api_key=api_key,
@@ -435,6 +440,22 @@ def _webui_run_id() -> str:
     return f"webui_{int(time.time() * 1000)}"
 
 
+def _require_loopback_host(host: str) -> str:
+    if host == "localhost":
+        return host
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError as error:
+        raise ValueError(
+            "--host must be a loopback address (localhost, 127.0.0.1, or ::1)"
+        ) from error
+    if not parsed.is_loopback:
+        raise ValueError(
+            "--host must be a loopback address (localhost, 127.0.0.1, or ::1)"
+        )
+    return host
+
+
 def _error_payload(error_type: str, message: str) -> dict[str, Any]:
     return {"error": {"type": error_type, "message": _sanitize_error_message(message)}}
 
@@ -445,6 +466,10 @@ def _sanitize_error_message(message: str) -> str:
 
 def _generic_server_error_message() -> str:
     return "internal server error"
+
+
+def _generic_provider_error_message() -> str:
+    return "provider request failed"
 
 
 if __name__ == "__main__":

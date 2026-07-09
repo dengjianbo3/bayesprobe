@@ -354,6 +354,19 @@ class FailingInitWebUIOpenAI:
         raise RuntimeError("provider rejected key sk-webui-secret during init")
 
 
+class FailingNonOpenAIShapedSecretWebUIOpenAI:
+    def __init__(self, **kwargs):
+        self.responses = self
+
+    def create(self, **payload):
+        raise RuntimeError("provider rejected key provider-secret-123")
+
+
+class FailingNonOpenAIShapedSecretInitWebUIOpenAI:
+    def __init__(self, **kwargs):
+        raise RuntimeError("provider rejected key provider-secret-123 during init")
+
+
 def test_webui_provider_errors_are_sanitized():
     status, payload = handle_autonomous_run_request(
         {
@@ -370,6 +383,29 @@ def test_webui_provider_errors_are_sanitized():
     assert status == 502
     assert payload["error"]["type"] == "provider_error"
     assert "sk-webui-secret" not in json.dumps(payload)
+
+
+def test_webui_provider_request_failures_return_generic_error_message_for_non_sk_keys():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Will provider request failures leak non-sk API keys?",
+            "provider": {
+                "kind": "openai_responses",
+                "api_key": "provider-secret-123",
+                "model": "gpt-5.5",
+            },
+        },
+        client_factory=FailingNonOpenAIShapedSecretWebUIOpenAI,
+    )
+
+    assert status == 502
+    assert payload == {
+        "error": {
+            "type": "provider_error",
+            "message": "provider request failed",
+        }
+    }
+    assert "provider-secret-123" not in json.dumps(payload)
 
 
 def test_webui_openai_responses_invalid_timeout_is_validation_error():
@@ -412,3 +448,43 @@ def test_webui_provider_initialization_errors_are_sanitized():
     assert status == 502
     assert payload["error"]["type"] == "provider_error"
     assert "sk-webui-secret" not in json.dumps(payload)
+
+
+def test_webui_provider_initialization_failures_return_generic_error_message_for_non_sk_keys():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Will provider init failures leak non-sk API keys?",
+            "provider": {
+                "kind": "openai_responses",
+                "api_key": "provider-secret-123",
+                "model": "gpt-5.5",
+            },
+        },
+        client_factory=FailingNonOpenAIShapedSecretInitWebUIOpenAI,
+    )
+
+    assert status == 502
+    assert payload == {
+        "error": {
+            "type": "provider_error",
+            "message": "provider request failed",
+        }
+    }
+    assert "provider-secret-123" not in json.dumps(payload)
+
+
+def test_webui_main_rejects_non_loopback_host_before_binding(monkeypatch):
+    server_started = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal server_started
+        server_started = True
+        raise AssertionError("server should not bind for non-loopback hosts")
+
+    monkeypatch.setattr(webui, "ThreadingHTTPServer", fail_if_called)
+
+    with pytest.raises(SystemExit) as excinfo:
+        webui.main(["--host", "0.0.0.0"])
+
+    assert excinfo.value.code == 2
+    assert server_started is False
