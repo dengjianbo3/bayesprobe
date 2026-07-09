@@ -48,6 +48,83 @@ def test_run_benchmark_experiment_writes_report(tmp_path: Path):
     ]
 
 
+def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
+    report_path = tmp_path / "reports" / "toy-report.json"
+    ledger_path = tmp_path / "ledgers" / "toy-ledger.jsonl"
+    artifact_dir = tmp_path / "artifacts" / "toy-run"
+
+    result = run_benchmark_experiment(
+        ExperimentRunConfig(
+            dataset_path=FIXTURE_PATH,
+            report_path=report_path,
+            ledger_path=ledger_path,
+            artifact_dir=artifact_dir,
+            run_name="toy-artifact-run",
+            metadata={"suite": "offline"},
+            model_gateway={
+                "kind": "scripted",
+                "api_key": "sk-proj-secret-value",
+                "responses": {
+                    "judge_evidence": {
+                        "evidence_type": "supporting",
+                        "likelihoods": {
+                            "H1": "moderately_confirming",
+                            "H2": "moderately_disconfirming",
+                        },
+                        "interpretation": "Scripted artifact judgment.",
+                    }
+                },
+            },
+            judgment_repair_policy={"max_attempts": 1},
+        )
+    )
+
+    manifest_path = artifact_dir / "manifest.json"
+    config_snapshot_path = artifact_dir / "config_snapshot.json"
+    dataset_snapshot_path = artifact_dir / "dataset_snapshot.json"
+    artifact_report_path = artifact_dir / "report.json"
+    artifact_ledger_path = artifact_dir / "ledger.jsonl"
+
+    assert result.artifact_dir == artifact_dir
+    assert result.artifact_manifest_path == manifest_path
+    assert manifest_path.exists()
+    assert config_snapshot_path.exists()
+    assert dataset_snapshot_path.exists()
+    assert artifact_report_path.exists()
+    assert artifact_ledger_path.exists()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    config_snapshot = json.loads(config_snapshot_path.read_text(encoding="utf-8"))
+    dataset_snapshot = json.loads(dataset_snapshot_path.read_text(encoding="utf-8"))
+    artifact_report = json.loads(artifact_report_path.read_text(encoding="utf-8"))
+    artifact_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [
+            manifest_path,
+            config_snapshot_path,
+            dataset_snapshot_path,
+            artifact_report_path,
+            artifact_ledger_path,
+        ]
+    )
+
+    assert manifest["artifact_version"] == "0.1"
+    assert manifest["run_name"] == "toy-artifact-run"
+    assert manifest["dataset_name"] == "toy_belief_revision"
+    assert manifest["sample_count"] == 3
+    assert manifest["metadata"] == {"suite": "offline"}
+    assert manifest["model_gateway"]["kind"] == "scripted"
+    assert manifest["model_gateway"]["scripted_response_tasks"] == ["judge_evidence"]
+    assert "responses" not in manifest["model_gateway"]
+    assert config_snapshot["artifact_dir"] == str(artifact_dir)
+    assert config_snapshot["ledger_path"] == str(ledger_path)
+    assert dataset_snapshot["dataset_name"] == "toy_belief_revision"
+    assert len(dataset_snapshot["samples"]) == 3
+    assert artifact_report["sample_count"] == 3
+    assert "sk-proj-secret-value" not in artifact_text
+    assert '"api_key"' not in artifact_text
+
+
 def test_run_benchmark_experiment_writes_optional_ledger(tmp_path: Path):
     report_path = tmp_path / "toy-report.json"
     ledger_path = tmp_path / "ledgers" / "toy-ledger.jsonl"

@@ -11,6 +11,7 @@ from bayesprobe.benchmark_io import (
     load_benchmark_dataset,
     write_benchmark_report,
 )
+from bayesprobe.experiment_artifacts import write_experiment_artifact_bundle
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import (
     EvidenceJudgmentRepairPolicy,
@@ -58,6 +59,8 @@ class ExperimentRunResult:
     suite_result: BenchmarkSuiteResult
     report_path: Path
     ledger_path: Path | None = None
+    artifact_dir: Path | None = None
+    artifact_manifest_path: Path | None = None
 
 
 def run_benchmark_experiment(config: ExperimentRunConfig) -> ExperimentRunResult:
@@ -83,11 +86,25 @@ def run_benchmark_experiment(config: ExperimentRunConfig) -> ExperimentRunResult
         dataset_name=dataset.dataset_name,
         metadata=dataset.metadata,
     )
+    artifact_dir = Path(config.artifact_dir) if config.artifact_dir is not None else None
+    artifact_manifest_path = None
+    if artifact_dir is not None:
+        artifact_bundle = write_experiment_artifact_bundle(
+            artifact_dir=artifact_dir,
+            config=config,
+            dataset=dataset,
+            report_path=report_path,
+            ledger_path=ledger_path,
+            sample_count=suite_result.sample_count,
+        )
+        artifact_manifest_path = artifact_bundle.manifest_path
     return ExperimentRunResult(
         dataset=dataset,
         suite_result=suite_result,
         report_path=report_path,
         ledger_path=ledger_path,
+        artifact_dir=artifact_dir,
+        artifact_manifest_path=artifact_manifest_path,
     )
 
 
