@@ -26,7 +26,7 @@ class ExperimentRunConfig:
     ledger_path: str | Path | None = None
     artifact_dir: str | Path | None = None
     run_name: str | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     max_cycles: int = 1
     max_probes_per_cycle: int = 1
     model_gateway: ModelGatewayConfig | Mapping[str, Any] | None = None
