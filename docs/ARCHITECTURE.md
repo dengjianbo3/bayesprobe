@@ -356,6 +356,7 @@ Current adapters:
 - `DeterministicModelGateway`;
 - `ScriptedModelGateway`;
 - `OpenAIResponsesModelGateway`;
+- `OpenAIChatCompletionsModelGateway`;
 - `build_model_gateway(...)` from `ModelGatewayConfig`.
 
 Current validation:
@@ -508,7 +509,7 @@ Current limitations:
 - local-only;
 - no streaming UI;
 - no multi-user auth;
-- `openai_chat_completions` protocol is reserved but not implemented.
+- no provider-side cost/latency telemetry.
 
 ## 5. Implemented Capability Matrix
 
@@ -528,8 +529,8 @@ Current limitations:
 | Ledger/audit | Good MVP | JSONL audit path exists. |
 | Benchmark harness | Good MVP | Toy dataset and suite/report flow exist. |
 | Config/CLI/SDK | Good MVP | JSON experiment config, CLI, package exports exist. |
-| Autonomous WebUI | MVP | Local deterministic/OpenAI Responses workbench for autonomous runs and trace inspection. |
-| Model gateway | Good MVP | Structured seam plus deterministic, scripted, and OpenAI Responses adapters exist. Provider observability remains future work. |
+| Autonomous WebUI | MVP | Local deterministic/OpenAI Responses/OpenAI-compatible Chat Completions workbench for autonomous runs and trace inspection. |
+| Model gateway | Good MVP | Structured seam plus deterministic, scripted, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Provider observability remains future work. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
 | Multi-agent protocol | Partial | Projection-as-signal semantics exist; transport/protocol schema not complete. |
@@ -543,19 +544,20 @@ Using the final target as:
 > configurable, experiment-ready, provider-backed, tool-backed, multi-agent-ready
 > BayesProbe agent engineering kernel
 
-the current implementation is approximately **58%-62% complete**.
+the current implementation is approximately **68%-72% complete**.
 
-Using the narrower offline MVP target as:
+Using the narrower provider-backed MVP target as:
 
-> deterministic/scripted BayesProbe loop with benchmark and config support
+> deterministic/scripted/provider-backed BayesProbe loop with benchmark,
+> config, SDK, and local WebUI support
 
-the current implementation is approximately **82%-86% complete**.
+the current implementation is approximately **90%-93% complete**.
 
 The remaining work is mostly depth and robustness rather than direction:
 
 - stronger structured model output handling;
 - broader provider registry and provider observability;
-- provider adapter prompt-registry metadata;
+- provider adapter prompt-registry snapshots;
 - richer benchmark datasets and metrics;
 - stronger synchronized/multi-agent protocol objects;
 - production-grade persistence and experiment trace packaging.
@@ -572,10 +574,11 @@ Use for model-shaped structured decisions:
 - future judgment repair;
 - future hypothesis evolution assistance;
 - future projection writing or compression;
-- future prompt-versioned provider calls.
+- future prompt-versioned provider calls;
 - `ModelInvocationTrace` persists prompt/schema adapter metadata on evidence events.
-- `OpenAIResponsesModelGateway` provides the first real provider-backed adapter
-  while preserving the same structured output validation path.
+- `OpenAIResponsesModelGateway` and `OpenAIChatCompletionsModelGateway` provide
+  real provider-backed adapters while preserving the same structured output
+  validation path.
 
 Do not let callers pass arbitrary model outputs into belief update. Model output
 must be parsed, validated, and converted into BayesProbe domain objects.
@@ -669,9 +672,10 @@ Why this is next:
 
 ### Phase 2: Provider Adapter and Prompt Registry Metadata
 
-Status: OpenAI Responses adapter implemented as v0.1, and prompt/model
-invocation artifact summaries implemented as v0.1; broader provider registry,
-prompt registry snapshots, and provider observability remain future work.
+Status: OpenAI Responses and OpenAI-compatible Chat Completions adapters are
+implemented as v0.1, and prompt/model invocation artifact summaries are
+implemented as v0.1; broader provider registry, prompt registry snapshots, and
+provider observability remain future work.
 
 Goal:
 
@@ -756,6 +760,8 @@ Adapter tests should assert:
 
 - model gateway validation behavior;
 - scripted/deterministic adapters are reproducible;
+- provider-backed adapters use request-scoped credentials and never persist raw
+  API keys in artifacts;
 - tool gateway returns only active signals;
 - config objects propagate into benchmark and experiment runs.
 
