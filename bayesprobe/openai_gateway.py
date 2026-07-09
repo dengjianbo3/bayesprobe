@@ -142,6 +142,9 @@ def parse_openai_structured_response(response: Any) -> dict[str, Any]:
             return _parse_json_object(response["output_text"])
         if "text" in response:
             return _parse_json_object(response["text"])
+        text = _extract_text_from_output(response)
+        if text is not None:
+            return _parse_json_object(text)
         return dict(response)
     if isinstance(response, str):
         return _parse_json_object(response)
@@ -216,6 +219,8 @@ def _parse_json_object(text: Any) -> dict[str, Any]:
 
 def _extract_text_from_output(response: Any) -> str | None:
     output = getattr(response, "output", None)
+    if output is None and isinstance(response, Mapping):
+        output = response.get("output")
     if output is None:
         return None
     for item in output:

@@ -173,6 +173,34 @@ def test_parse_openai_structured_response_accepts_mapping_output_text():
     assert parse_openai_structured_response(response) == valid_payload()
 
 
+def test_parse_openai_structured_response_accepts_object_output_content_text():
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                content=[
+                    SimpleNamespace(text=json.dumps(valid_payload())),
+                ]
+            )
+        ]
+    )
+
+    assert parse_openai_structured_response(response) == valid_payload()
+
+
+def test_parse_openai_structured_response_accepts_mapping_output_content_text():
+    response = {
+        "output": [
+            {
+                "content": [
+                    {"text": json.dumps(valid_payload())},
+                ]
+            }
+        ]
+    }
+
+    assert parse_openai_structured_response(response) == valid_payload()
+
+
 @pytest.mark.parametrize(
     ("response", "expected_message"),
     [
