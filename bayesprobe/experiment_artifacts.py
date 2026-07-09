@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -218,7 +219,10 @@ def _sanitize_metadata(value: Any) -> Any:
 
 
 def _is_secret_metadata_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    normalized = normalized.replace("-", "_")
+    normalized = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", normalized)
+    normalized = normalized.lower()
     return any(
         normalized == secret_key
         or normalized.endswith(f"_{secret_key}")

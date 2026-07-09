@@ -65,6 +65,8 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
             metadata={
                 "suite": "offline",
                 "api_key": "sk-proj-secret-value",
+                "apiKey": "camel-secret-value",
+                "openaiApiKey": "openai-camel-secret-value",
                 "nested": {
                     "token": "hidden-token-value",
                     "safe": "kept",
@@ -135,7 +137,11 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     assert len(dataset_snapshot["samples"]) == 3
     assert artifact_report["sample_count"] == 3
     assert "sk-proj-secret-value" not in artifact_text
+    assert "camel-secret-value" not in artifact_text
+    assert "openai-camel-secret-value" not in artifact_text
     assert '"api_key"' not in artifact_text
+    assert '"apiKey"' not in artifact_text
+    assert '"openaiApiKey"' not in artifact_text
     assert '"token"' not in artifact_text
     assert "hidden-token-value" not in artifact_text
     assert "kept" in artifact_text
