@@ -121,6 +121,7 @@ def test_webui_http_server_serves_static_index():
         conn.request("GET", "/")
         response = conn.getresponse()
         body = response.read().decode("utf-8")
+        cache_control = response.getheader("Cache-Control")
         conn.close()
     finally:
         server.shutdown()
@@ -129,6 +130,7 @@ def test_webui_http_server_serves_static_index():
 
     assert response.status == 200
     assert "BayesProbe" in body
+    assert cache_control == "no-store"
 
 
 def test_webui_static_assets_define_operational_workbench():
@@ -147,6 +149,8 @@ def test_webui_static_assets_define_operational_workbench():
     assert "trace-pane" in index
     assert "localStorage" not in script
     assert "fetch('/api/runs/autonomous'" in script
+    assert "Responses-compatible providers only." in script
+    assert "Check base URL, model, API key, and max output tokens." in script
     assert "Chat Completions stays visible in v0.1 but is not supported." not in script
     assert 'provider.kind === "openai_chat_completions"' in script
     assert 'providerKind.value === "openai_chat_completions"' not in script
@@ -463,10 +467,14 @@ def test_webui_provider_errors_are_sanitized():
 
     assert status == 502
     assert payload["error"]["type"] == "provider_error"
+    assert payload["error"]["message"] == (
+        "provider request failed for openai_responses. "
+        "Use Chat Completions for /chat/completions-compatible providers."
+    )
     assert "sk-webui-secret" not in json.dumps(payload)
 
 
-def test_webui_provider_request_failures_return_generic_error_message_for_non_sk_keys():
+def test_webui_provider_request_failures_return_safe_diagnostic_for_non_sk_keys():
     status, payload = handle_autonomous_run_request(
         {
             "question": "Will provider request failures leak non-sk API keys?",
@@ -483,7 +491,10 @@ def test_webui_provider_request_failures_return_generic_error_message_for_non_sk
     assert payload == {
         "error": {
             "type": "provider_error",
-            "message": "provider request failed",
+            "message": (
+                "provider request failed for openai_responses. "
+                "Use Chat Completions for /chat/completions-compatible providers."
+            ),
         }
     }
     assert "provider-secret-123" not in json.dumps(payload)
@@ -528,10 +539,14 @@ def test_webui_provider_initialization_errors_are_sanitized():
 
     assert status == 502
     assert payload["error"]["type"] == "provider_error"
+    assert payload["error"]["message"] == (
+        "provider request failed for openai_responses. "
+        "Use Chat Completions for /chat/completions-compatible providers."
+    )
     assert "sk-webui-secret" not in json.dumps(payload)
 
 
-def test_webui_provider_initialization_failures_return_generic_error_message_for_non_sk_keys():
+def test_webui_provider_initialization_failures_return_safe_diagnostic_for_non_sk_keys():
     status, payload = handle_autonomous_run_request(
         {
             "question": "Will provider init failures leak non-sk API keys?",
@@ -548,7 +563,46 @@ def test_webui_provider_initialization_failures_return_generic_error_message_for
     assert payload == {
         "error": {
             "type": "provider_error",
-            "message": "provider request failed",
+            "message": (
+                "provider request failed for openai_responses. "
+                "Use Chat Completions for /chat/completions-compatible providers."
+            ),
+        }
+    }
+    assert "provider-secret-123" not in json.dumps(payload)
+
+
+class FailingChatWebUIOpenAI:
+    def __init__(self, **kwargs):
+        self.chat = type("Chat", (), {"completions": self})()
+
+    def create(self, **payload):
+        raise RuntimeError("provider rejected max token value provider-secret-123")
+
+
+def test_webui_chat_completions_provider_failures_return_safe_diagnostic_hint():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Will chat provider failures be diagnosable without leaking keys?",
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "model": "deepseek-v4-flash",
+                "base_url": "https://api.deepseek.com",
+                "max_output_tokens": 102400,
+            },
+        },
+        client_factory=FailingChatWebUIOpenAI,
+    )
+
+    assert status == 502
+    assert payload == {
+        "error": {
+            "type": "provider_error",
+            "message": (
+                "provider request failed for openai_chat_completions. "
+                "Check base URL, model, API key, and max output tokens."
+            ),
         }
     }
     assert "provider-secret-123" not in json.dumps(payload)

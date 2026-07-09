@@ -88,7 +88,7 @@ def handle_autonomous_run_request(
             )
         except Exception as error:
             if provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
-                raise ProviderError(_generic_provider_error_message()) from error
+                raise ProviderError(_provider_error_message(provider_kind)) from error
             raise
         return HTTPStatus.OK, serialize_autonomous_run_result(result)
     except WebUIError as error:
@@ -214,6 +214,7 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
                 return
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -222,6 +223,7 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(int(status))
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -315,7 +317,7 @@ def _build_webui_model_gateway(
             try:
                 client = client_factory(**_openai_client_kwargs(config, api_key))
             except Exception as error:
-                raise ProviderError(_generic_provider_error_message()) from error
+                raise ProviderError(_provider_error_message(kind)) from error
         if kind == "openai_chat_completions":
             return OpenAIChatCompletionsModelGateway(
                 config=config,
@@ -475,6 +477,20 @@ def _generic_server_error_message() -> str:
 
 def _generic_provider_error_message() -> str:
     return "provider request failed"
+
+
+def _provider_error_message(provider_kind: str) -> str:
+    if provider_kind == "openai_responses":
+        return (
+            "provider request failed for openai_responses. "
+            "Use Chat Completions for /chat/completions-compatible providers."
+        )
+    if provider_kind == "openai_chat_completions":
+        return (
+            "provider request failed for openai_chat_completions. "
+            "Check base URL, model, API key, and max output tokens."
+        )
+    return _generic_provider_error_message()
 
 
 if __name__ == "__main__":

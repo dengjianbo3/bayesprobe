@@ -12,9 +12,10 @@ const runButton = document.querySelector("#run-button");
 
 const PROVIDER_NOTE_BY_KIND = {
   deterministic: "Deterministic mode runs locally without a key.",
-  openai_responses: "OpenAI settings are used only for this request.",
+  openai_responses:
+    "Responses-compatible providers only. Use Chat Completions for /chat/completions-compatible providers.",
   openai_chat_completions:
-    "OpenAI-compatible Chat Completions settings are used only for this request.",
+    "OpenAI-compatible Chat Completions settings are used only for this request. Check base URL, model, API key, and max output tokens.",
 };
 const OPENAI_COMPATIBLE_PROVIDER_KINDS = new Set([
   "openai_responses",
