@@ -14,6 +14,7 @@ from bayesprobe.benchmark_io import (
     write_benchmark_report,
 )
 from bayesprobe.config import load_experiment_config
+from bayesprobe.experiment_artifacts import ExperimentArtifactBundle
 from bayesprobe.experiment_runner import (
     ExperimentRunConfig,
     ExperimentRunResult,
@@ -50,6 +51,7 @@ __all__ = [
     "DeterministicModelGateway",
     "EvidenceJudgment",
     "EvidenceJudgmentRepairPolicy",
+    "ExperimentArtifactBundle",
     "ExperimentRunConfig",
     "ExperimentRunResult",
     "ModelGateway",

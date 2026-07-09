@@ -686,6 +686,9 @@ Shape:
 
 ### Phase 5: Persistence and Experiment Packaging
 
+Status: stable artifact directory implemented as v0.1; SQLite persistence,
+dataset split filters, and prompt registry snapshots remain future work.
+
 Goal:
 
 - make experiments shareable and replayable.
@@ -695,6 +698,9 @@ Shape:
 - stable run artifact directory;
 - report + ledger + config + prompt versions + dataset snapshot;
 - optional SQLite adapter.
+
+Artifact v0.1 writes a manifest, report, ledger, config snapshot, and dataset
+snapshot without changing BayesProbe core control flow.
 
 ## 9. Testing Strategy
 
