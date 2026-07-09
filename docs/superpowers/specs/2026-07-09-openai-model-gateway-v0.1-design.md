@@ -111,7 +111,7 @@ class OpenAIModelGatewayConfig:
 Validation:
 
 - `model` is required and must be a non-empty string.
-- `api_key_env` must be a non-empty string.
+- `api_key_env` must be a non-empty environment variable name.
 - `timeout_seconds` must be positive.
 - `max_output_tokens`, when supplied, must be a positive integer.
 

@@ -343,7 +343,7 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
                     "model_gateway": {
                         "kind": "openai",
                         "model": "gpt-5.5",
-                        "api_key_env": "sk-live-secret",
+                        "api_key_env": "not-an-env-var",
                     },
                 }
             ),
