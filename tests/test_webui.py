@@ -153,6 +153,7 @@ def test_webui_static_assets_define_operational_workbench():
     assert "fetch('/api/runs/autonomous'" in script
     assert "Responses-compatible providers only." in script
     assert "Check base URL, model, API key, and max output tokens." in script
+    assert "Best answer / hypothesis" in script
     assert "Chat Completions stays visible in v0.1 but is not supported." not in script
     assert 'provider.kind === "openai_chat_completions"' in script
     assert 'providerKind.value === "openai_chat_completions"' not in script
@@ -363,6 +364,46 @@ class FakeWebUIChatOpenAI:
         )()
 
 
+class FakeChoiceAwareChatCompletions:
+    def create(self, **payload):
+        user_content = payload["messages"][1]["content"]
+        request = json.loads(user_content)
+        targets = request["input"]["target_hypotheses"]
+        likelihoods = {
+            target: (
+                "strongly_confirming"
+                if target == "D"
+                else "moderately_disconfirming"
+            )
+            for target in targets
+        }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "evidence_type": "supporting",
+                                "likelihoods": likelihoods,
+                                "interpretation": "Choice D is the well-behaved graph class.",
+                                "quality_overrides": {},
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+
+class FakeChoiceAwareChatOpenAI:
+    def __init__(self, **kwargs):
+        self.chat = type(
+            "FakeChat",
+            (),
+            {"completions": FakeChoiceAwareChatCompletions()},
+        )()
+
+
 def test_webui_openai_responses_provider_uses_request_key_and_redacts_response():
     FakeWebUIOpenAI.created_with = []
 
@@ -426,6 +467,43 @@ def test_webui_openai_chat_completions_provider_uses_request_key_and_redacts_res
         payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"]
         == "openai_chat_completions"
     )
+
+
+def test_webui_multiple_choice_question_returns_answer_choice_projection():
+    question = """Which graph class is well-behaved?
+
+Answer Choices:
+A. The class of all non-bipartite regular graphs
+B. The class of all connected cubic graphs
+C. The class of all connected graphs
+D. The class of all connected non-bipartite graphs
+E. The class of all connected bipartite graphs."""
+
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": question,
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "base_url": "https://provider.example/v1",
+                "model": "provider-model",
+            },
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        client_factory=FakeChoiceAwareChatOpenAI,
+    )
+
+    assert status == 200
+    assert payload["final_answer"]["current_best_hypothesis"] == "D"
+    assert payload["final_answer"]["answer"].startswith("Current best answer is D:")
+    assert "connected non-bipartite graphs" in payload["final_answer"]["answer"]
+    assert payload["cycles"][0]["probes"][0]["target_hypotheses"] == [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+    ]
 
 
 class FailingWebUIOpenAI:

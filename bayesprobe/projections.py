@@ -19,7 +19,7 @@ def build_answer_projection(
 ) -> AnswerProjection:
     top = _top_hypothesis(cycle_result.belief_state)
     return AnswerProjection(
-        answer=f"Current best hypothesis is {top.id}: {top.statement}",
+        answer=_answer_text(top),
         current_best_hypothesis=top.id,
         posterior_summary=_posterior_summary_text(cycle_result.belief_state),
         main_uncertainty=(
@@ -60,6 +60,13 @@ def build_belief_state_projection(
 
 def _top_hypothesis(belief_state: BeliefState) -> Hypothesis:
     return max(belief_state.hypotheses, key=lambda hypothesis: hypothesis.posterior)
+
+
+def _answer_text(hypothesis: Hypothesis) -> str:
+    prefix = f"Answer choice {hypothesis.id} is correct: "
+    if hypothesis.statement.startswith(prefix):
+        return f"Current best answer is {hypothesis.id}: {hypothesis.statement[len(prefix):]}"
+    return f"Current best hypothesis is {hypothesis.id}: {hypothesis.statement}"
 
 
 def _posterior_summary_text(belief_state: BeliefState) -> str:

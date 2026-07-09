@@ -139,7 +139,7 @@ function renderAnswer(answer) {
     return;
   }
 
-  answerPanel.appendChild(kv("Best hypothesis", answer.current_best_hypothesis));
+  answerPanel.appendChild(kv("Best answer / hypothesis", answer.current_best_hypothesis));
   answerPanel.appendChild(kv("Answer", answer.answer));
   answerPanel.appendChild(kv("Posterior summary", answer.posterior_summary));
   answerPanel.appendChild(kv("Main uncertainty", answer.main_uncertainty));

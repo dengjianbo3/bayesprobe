@@ -82,6 +82,38 @@ def test_initializer_creates_default_rival_hypotheses_from_problem():
     assert all(candidate.candidate_probe.cycle_id == "cycle_0" for candidate in result.probe_candidates)
 
 
+def test_initializer_creates_answer_choice_hypotheses_from_multiple_choice_problem():
+    problem = """Which graph class is well-behaved?
+
+Answer Choices:
+A. The class of all non-bipartite regular graphs
+B. The class of all connected cubic graphs
+C. The class of all connected graphs
+D. The class of all connected non-bipartite graphs
+E. The class of all connected bipartite graphs."""
+
+    result = BayesProbeInitializer().initialize(
+        InitializeRunInput(run_id="run_mcq", problem=problem)
+    )
+
+    hypotheses = result.belief_state.hypotheses_by_id()
+
+    assert list(hypotheses) == ["A", "B", "C", "D", "E"]
+    assert result.run.metadata["question_frame"] == "multiple_choice"
+    assert result.belief_state.posterior_summary["hypothesis_count"] == 5
+    assert hypotheses["D"].statement == (
+        "Answer choice D is correct: The class of all connected non-bipartite graphs"
+    )
+    assert hypotheses["D"].prior == pytest.approx(0.2)
+    assert hypotheses["D"].rivals == ["A", "B", "C", "E"]
+
+    first_candidate = result.probe_candidates[0]
+    assert first_candidate.source == "manual"
+    assert first_candidate.priority_features["probe_role"] == "answer_choice_discriminator"
+    assert first_candidate.candidate_probe.target_hypotheses == ["A", "B", "C", "D", "E"]
+    assert "which answer choice is best" in first_candidate.candidate_probe.inquiry_goal.lower()
+
+
 def test_initializer_preserves_seeded_hypotheses():
     result = BayesProbeInitializer().initialize(
         InitializeRunInput(
