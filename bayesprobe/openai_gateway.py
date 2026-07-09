@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -39,6 +40,8 @@ EVIDENCE_JUDGMENT_JSON_SCHEMA: dict[str, Any] = {
     },
 }
 
+ENVIRONMENT_VARIABLE_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
 
 @dataclass(frozen=True)
 class OpenAIModelGatewayConfig:
@@ -56,6 +59,10 @@ class OpenAIModelGatewayConfig:
             raise ValueError("openai model gateway api_key_env must be a string")
         if not self.api_key_env.strip():
             raise ValueError("openai model gateway api_key_env must not be empty")
+        if not ENVIRONMENT_VARIABLE_NAME_PATTERN.fullmatch(self.api_key_env.strip()):
+            raise ValueError(
+                "openai model gateway api_key_env must be an environment variable name"
+            )
         if type(self.timeout_seconds) not in (int, float):
             raise ValueError("openai model gateway timeout_seconds must be a number")
         if self.timeout_seconds <= 0:

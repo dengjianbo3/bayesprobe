@@ -58,6 +58,14 @@ def test_openai_model_gateway_config_requires_explicit_model():
             "openai model gateway api_key_env must be a string",
         ),
         (
+            {"model": "gpt-5.5", "api_key_env": "sk-live-secret"},
+            "openai model gateway api_key_env must be an environment variable name",
+        ),
+        (
+            {"model": "gpt-5.5", "api_key_env": "openai_api_key"},
+            "openai model gateway api_key_env must be an environment variable name",
+        ),
+        (
             {"model": "gpt-5.5", "timeout_seconds": 0},
             "openai model gateway timeout_seconds must be positive",
         ),

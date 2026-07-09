@@ -8,6 +8,7 @@ from typing import Any
 
 from bayesprobe.experiment_runner import ExperimentRunConfig
 from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGatewayConfig
+from bayesprobe.openai_gateway import OpenAIModelGatewayConfig
 
 
 def load_experiment_config(path: str | Path) -> ExperimentRunConfig:
@@ -100,6 +101,17 @@ def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfi
     api_key_env = value.get("api_key_env", "OPENAI_API_KEY")
     timeout_seconds = value.get("timeout_seconds", 30.0)
     max_output_tokens = value.get("max_output_tokens")
+    if kind == "openai":
+        validated_openai_config = OpenAIModelGatewayConfig(
+            model=model,
+            api_key_env=api_key_env,
+            timeout_seconds=timeout_seconds,
+            max_output_tokens=max_output_tokens,
+        )
+        model = validated_openai_config.model
+        api_key_env = validated_openai_config.api_key_env
+        timeout_seconds = validated_openai_config.timeout_seconds
+        max_output_tokens = validated_openai_config.max_output_tokens
 
     return ModelGatewayConfig(
         kind=kind,

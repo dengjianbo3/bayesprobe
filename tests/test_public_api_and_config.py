@@ -290,6 +290,73 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
             "openai model gateway requires model",
         ),
         (
+            "openai_non_string_model.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {"kind": "openai", "model": 1},
+                }
+            ),
+            "openai model gateway model must be a string",
+        ),
+        (
+            "openai_empty_model.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {"kind": "openai", "model": "   "},
+                }
+            ),
+            "openai model gateway model must not be empty",
+        ),
+        (
+            "openai_invalid_api_key_env.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {
+                        "kind": "openai",
+                        "model": "gpt-5.5",
+                        "api_key_env": "sk-live-secret",
+                    },
+                }
+            ),
+            "openai model gateway api_key_env must be an environment variable name",
+        ),
+        (
+            "openai_invalid_timeout.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {
+                        "kind": "openai",
+                        "model": "gpt-5.5",
+                        "timeout_seconds": 0,
+                    },
+                }
+            ),
+            "openai model gateway timeout_seconds must be positive",
+        ),
+        (
+            "openai_invalid_max_output_tokens.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {
+                        "kind": "openai",
+                        "model": "gpt-5.5",
+                        "max_output_tokens": 0,
+                    },
+                }
+            ),
+            "openai model gateway max_output_tokens must be positive",
+        ),
+        (
             "non_object_judgment_repair_policy.json",
             json.dumps(
                 {
