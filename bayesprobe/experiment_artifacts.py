@@ -12,6 +12,9 @@ from bayesprobe.benchmark_io import BenchmarkDataset
 from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGatewayConfig
 
 
+_SECRET_METADATA_KEYS = {"api_key", "openai_api_key", "token", "secret"}
+
+
 @dataclass(frozen=True)
 class ExperimentArtifactBundle:
     artifact_dir: Path
@@ -82,6 +85,8 @@ def _copy_text_file(source: Path, destination: Path | None) -> None:
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.resolve() == destination.resolve():
+        if not source.exists():
+            destination.touch()
         return
     shutil.copyfile(source, destination)
 
@@ -114,7 +119,7 @@ def _config_snapshot(config: Any, *, ledger_path: str | Path | None) -> dict[str
         "ledger_path": str(Path(ledger_path)) if ledger_path is not None else None,
         "artifact_dir": str(Path(config.artifact_dir)) if config.artifact_dir is not None else None,
         "run_name": config.run_name,
-        "metadata": dict(config.metadata),
+        "metadata": _sanitize_metadata(config.metadata),
         "max_cycles": config.max_cycles,
         "max_probes_per_cycle": config.max_probes_per_cycle,
         "model_gateway": _model_gateway_snapshot(config.model_gateway),
@@ -146,7 +151,7 @@ def _manifest_payload(
         "ledger_path": str(ledger_path) if ledger_path is not None else None,
         "config_snapshot_path": str(config_snapshot_path),
         "dataset_snapshot_path": str(dataset_snapshot_path),
-        "metadata": dict(config.metadata),
+        "metadata": _sanitize_metadata(config.metadata),
         "model_gateway": _model_gateway_snapshot(config.model_gateway),
         "judgment_repair_policy": _repair_policy_snapshot(config.judgment_repair_policy),
     }
@@ -194,6 +199,32 @@ def _repair_policy_snapshot(config: Any) -> dict[str, Any]:
         "max_attempts": policy.max_attempts,
         "repair_task": policy.repair_task,
     }
+
+
+def _sanitize_metadata(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _is_secret_metadata_key(key_text):
+                continue
+            sanitized[key_text] = _sanitize_metadata(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_metadata(item) for item in value]
+    return value
+
+
+def _is_secret_metadata_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(
+        normalized == secret_key
+        or normalized.endswith(f"_{secret_key}")
+        or normalized.endswith(secret_key)
+        for secret_key in _SECRET_METADATA_KEYS
+    )
 
 
 __all__ = [

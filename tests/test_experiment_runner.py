@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 
+from bayesprobe.benchmark_io import BenchmarkDataset
 import bayesprobe.experiment_runner as experiment_runner
+from bayesprobe.experiment_artifacts import write_experiment_artifact_bundle
 from bayesprobe.experiment_runner import (
     ExperimentRunConfig,
     run_benchmark_experiment,
@@ -60,7 +62,14 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
             ledger_path=ledger_path,
             artifact_dir=artifact_dir,
             run_name="toy-artifact-run",
-            metadata={"suite": "offline"},
+            metadata={
+                "suite": "offline",
+                "api_key": "sk-proj-secret-value",
+                "nested": {
+                    "token": "hidden-token-value",
+                    "safe": "kept",
+                },
+            },
             model_gateway={
                 "kind": "scripted",
                 "api_key": "sk-proj-secret-value",
@@ -112,17 +121,53 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     assert manifest["run_name"] == "toy-artifact-run"
     assert manifest["dataset_name"] == "toy_belief_revision"
     assert manifest["sample_count"] == 3
-    assert manifest["metadata"] == {"suite": "offline"}
+    assert manifest["metadata"] == {"suite": "offline", "nested": {"safe": "kept"}}
     assert manifest["model_gateway"]["kind"] == "scripted"
     assert manifest["model_gateway"]["scripted_response_tasks"] == ["judge_evidence"]
     assert "responses" not in manifest["model_gateway"]
     assert config_snapshot["artifact_dir"] == str(artifact_dir)
     assert config_snapshot["ledger_path"] == str(ledger_path)
+    assert config_snapshot["metadata"] == {
+        "suite": "offline",
+        "nested": {"safe": "kept"},
+    }
     assert dataset_snapshot["dataset_name"] == "toy_belief_revision"
     assert len(dataset_snapshot["samples"]) == 3
     assert artifact_report["sample_count"] == 3
     assert "sk-proj-secret-value" not in artifact_text
     assert '"api_key"' not in artifact_text
+    assert '"token"' not in artifact_text
+    assert "hidden-token-value" not in artifact_text
+    assert "kept" in artifact_text
+
+
+def test_write_experiment_artifact_bundle_creates_selected_ledger_when_missing(
+    tmp_path: Path,
+):
+    report_path = tmp_path / "reports" / "toy-report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("{}", encoding="utf-8")
+    artifact_dir = tmp_path / "artifacts" / "toy-run"
+    ledger_path = artifact_dir / "ledger.jsonl"
+
+    bundle = write_experiment_artifact_bundle(
+        artifact_dir=artifact_dir,
+        config=ExperimentRunConfig(
+            dataset_path=FIXTURE_PATH,
+            report_path=report_path,
+            ledger_path=ledger_path,
+            artifact_dir=artifact_dir,
+            run_name="empty-ledger-run",
+        ),
+        dataset=BenchmarkDataset(dataset_name="toy_belief_revision", samples=[]),
+        report_path=report_path,
+        ledger_path=ledger_path,
+        sample_count=0,
+    )
+
+    assert bundle.ledger_path == ledger_path
+    assert ledger_path.exists()
+    assert ledger_path.read_text(encoding="utf-8") == ""
 
 
 def test_run_benchmark_experiment_uses_artifact_ledger_when_ledger_path_is_omitted(
