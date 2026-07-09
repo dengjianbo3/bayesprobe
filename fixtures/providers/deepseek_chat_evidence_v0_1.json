@@ -1,0 +1,160 @@
+{
+  "fixture_name": "deepseek_chat_evidence_v0_1",
+  "metadata": {
+    "model": "deepseek-v4-flash",
+    "notes": "Offline replay fixture. No credentials or raw headers are stored.",
+    "provider_kind": "openai_chat_completions",
+    "recorded_at": "2026-07-10"
+  },
+  "responses": [
+    {
+      "match": {
+        "signal_id": "S_v02_expert_constant_volume",
+        "task": "judge_evidence"
+      },
+      "response": {
+        "evidence_type": "supporting",
+        "interpretation": "At constant volume, adding inert gas does not change reacting-gas partial pressures, supporting the no-shift hypothesis.",
+        "likelihoods": {
+          "H1": "moderately_confirming",
+          "H2": "moderately_disconfirming"
+        },
+        "quality_overrides": {
+          "relevance": 0.9,
+          "reliability": 0.85,
+          "specificity": 0.85
+        }
+      }
+    },
+    {
+      "match": {
+        "signal_id": "S_v02_mixed_conflict_passive",
+        "task": "judge_evidence"
+      },
+      "response": {
+        "evidence_type": "counterevidence",
+        "interpretation": "The passive expert correction contradicts the initial support cue and gives stronger support to H2.",
+        "likelihoods": {
+          "H1": "moderately_disconfirming",
+          "H2": "strongly_confirming"
+        },
+        "quality_overrides": {
+          "relevance": 0.9,
+          "reliability": 0.88,
+          "specificity": 0.8
+        }
+      }
+    },
+    {
+      "match": {
+        "signal_id": "S_v02_noisy_stream_primary",
+        "task": "judge_evidence"
+      },
+      "response": {
+        "evidence_type": "supporting",
+        "interpretation": "The reliable part of the noisy stream supports H1 while the unrelated sentence should not dominate the update.",
+        "likelihoods": {
+          "H1": "weakly_confirming",
+          "H2": "neutral"
+        },
+        "quality_overrides": {
+          "relevance": 0.55,
+          "reliability": 0.55,
+          "specificity": 0.5
+        }
+      }
+    },
+    {
+      "match": {
+        "signal_id": "S_v02_system_log_regression",
+        "task": "judge_evidence"
+      },
+      "response": {
+        "evidence_type": "counterevidence",
+        "interpretation": "The system log indicates the old hypothesis fails under a concrete regression condition, moving support toward H2.",
+        "likelihoods": {
+          "H1": "moderately_disconfirming",
+          "H2": "moderately_confirming"
+        },
+        "quality_overrides": {
+          "relevance": 0.86,
+          "reliability": 0.82,
+          "specificity": 0.78
+        }
+      }
+    },
+    {
+      "match": {
+        "signal_id": "S_v02_agent_projection",
+        "task": "judge_evidence"
+      },
+      "response": {
+        "evidence_type": "sender_judgment",
+        "interpretation": "The peer projection is useful as a signal about another agent's belief, but should not be imported as BayesProbe's posterior.",
+        "likelihoods": {
+          "H1": "weakly_disconfirming",
+          "H2": "weakly_confirming"
+        },
+        "quality_overrides": {
+          "independence": 0.48,
+          "relevance": 0.72,
+          "reliability": 0.64
+        }
+      }
+    },
+    {
+      "match": {
+        "signal_id": "S_v02_schema_repair_passive",
+        "task": "judge_evidence"
+      },
+      "response": {
+        "evidence_type": "supporting",
+        "interpretation": "The provider-shaped recorded judgment supplies the repaired schema form and supports H1.",
+        "likelihoods": {
+          "H1": "moderately_confirming",
+          "H2": "weakly_disconfirming"
+        },
+        "quality_overrides": {
+          "relevance": 0.75,
+          "reliability": 0.7
+        }
+      }
+    },
+    {
+      "match": {
+        "signal_id": "S_v02_ambiguous_boundary",
+        "task": "judge_evidence"
+      },
+      "response": {
+        "evidence_type": "boundary_condition",
+        "interpretation": "The signal identifies a boundary condition but does not justify a decisive shift between H1 and H2.",
+        "likelihoods": {
+          "H1": "neutral",
+          "H2": "neutral"
+        },
+        "quality_overrides": {
+          "relevance": 0.65,
+          "reliability": 0.6,
+          "specificity": 0.55
+        }
+      }
+    },
+    {
+      "match": {
+        "task": "judge_evidence"
+      },
+      "response": {
+        "evidence_type": "supporting",
+        "interpretation": "Generic recorded judgment for deterministic active probe output supporting H1.",
+        "likelihoods": {
+          "H1": "moderately_confirming",
+          "H2": "moderately_disconfirming"
+        },
+        "quality_overrides": {
+          "relevance": 0.7,
+          "reliability": 0.7
+        }
+      }
+    }
+  ]
+}

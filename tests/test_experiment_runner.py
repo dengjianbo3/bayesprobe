@@ -365,6 +365,29 @@ def test_run_benchmark_experiment_constructs_openai_gateway_without_network(
     assert result.suite_result.sample_count == 3
 
 
+def test_experiment_runner_runs_v0_2_dataset_with_recorded_gateway(tmp_path: Path):
+    config = ExperimentRunConfig(
+        dataset_path=Path("fixtures/benchmarks/bayesprobe_v0_2_methodology.json"),
+        report_path=tmp_path / "report.json",
+        ledger_path=tmp_path / "ledger.jsonl",
+        model_gateway={
+            "kind": "recorded",
+            "fixture_path": "fixtures/providers/deepseek_chat_evidence_v0_1.json",
+        },
+        max_cycles=1,
+        max_probes_per_cycle=1,
+    )
+
+    result = run_benchmark_experiment(config)
+
+    assert result.suite_result.sample_count >= 8
+    assert result.report_path.exists()
+    assert result.ledger_path is not None
+    assert result.ledger_path.exists()
+    assert result.suite_result.final_accuracy >= 0.5
+    assert result.suite_result.update_direction_accuracy is not None
+
+
 @pytest.mark.parametrize(
     "config_kwargs",
     [

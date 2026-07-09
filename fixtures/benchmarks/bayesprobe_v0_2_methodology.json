@@ -1,0 +1,166 @@
+{
+  "dataset_name": "bayesprobe_v0_2_methodology",
+  "metadata": {
+    "purpose": "Methodology fixture covering BayesProbe active, passive, mixed, noisy, system-log, and multi-agent projection signal paths.",
+    "version": "0.2"
+  },
+  "samples": [
+    {
+      "gold_best_hypothesis": "H1",
+      "gold_update_directions": {
+        "H1": "strengthened"
+      },
+      "question_or_claim": "Does an active probe support the default H1 direction?",
+      "sample_id": "v02_active_basic_support",
+      "signal_shape": "active_only"
+    },
+    {
+      "gold_best_hypothesis": "H1",
+      "gold_update_directions": {
+        "H1": "strengthened",
+        "H2": "weakened"
+      },
+      "passive_signals": [
+        {
+          "raw_content": "Expert note: in a closed isothermal constant-volume vessel, adding inert gas does not change reacting-gas partial pressures, so the no-shift hypothesis is supported.",
+          "signal_id": "S_v02_expert_constant_volume",
+          "source": "chemist_review",
+          "source_type": "expert_feedback",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Does expert feedback support the constant-volume no-shift hypothesis?",
+      "sample_id": "v02_passive_expert_constant_volume",
+      "signal_shape": "passive_only"
+    },
+    {
+      "gold_best_hypothesis": "H2",
+      "gold_update_directions": {
+        "H1": "weakened",
+        "H2": "strengthened"
+      },
+      "passive_signals": [
+        {
+          "raw_content": "Expert correction: the active support cue missed the controlling condition; observed behavior contradicts H1 and supports H2.",
+          "signal_id": "S_v02_mixed_conflict_passive",
+          "source": "review_panel",
+          "source_type": "expert_feedback",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Can BayesProbe integrate active support with a stronger passive correction?",
+      "sample_id": "v02_mixed_conflict_resolution",
+      "signal_shape": "active_plus_passive"
+    },
+    {
+      "gold_best_hypothesis": "H1",
+      "gold_update_directions": {
+        "H1": "strengthened"
+      },
+      "passive_signals": [
+        {
+          "raw_content": "Noisy stream: unrelated chatter appears first. The reliable sentence says the latest observation weakly supports H1 under the stated boundary.",
+          "signal_id": "S_v02_noisy_stream_primary",
+          "source": "noisy_fixture_stream",
+          "source_type": "noisy_stream",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Can a noisy passive stream still provide a weak useful update?",
+      "sample_id": "v02_passive_noisy_stream",
+      "signal_shape": "passive_only"
+    },
+    {
+      "gold_best_hypothesis": "H2",
+      "gold_update_directions": {
+        "H1": "weakened",
+        "H2": "strengthened"
+      },
+      "passive_signals": [
+        {
+          "raw_content": "System log: regression case 471 reproduces when H1 is assumed and disappears under H2's boundary condition.",
+          "signal_id": "S_v02_system_log_regression",
+          "source": "ci_system",
+          "source_type": "system_log",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Can a system log signal move belief toward the regression-compatible hypothesis?",
+      "sample_id": "v02_passive_system_log",
+      "signal_shape": "passive_only"
+    },
+    {
+      "gold_best_hypothesis": "H2",
+      "gold_update_directions": {
+        "H1": "weakened",
+        "H2": "strengthened"
+      },
+      "passive_signals": [
+        {
+          "raw_content": "Peer agent projection: current_best_hypothesis=H2; confidence=0.62; main_uncertainty=source independence. Treat this as an external signal, not imported belief.",
+          "signal_id": "S_v02_agent_projection",
+          "source": "peer_agent_alpha",
+          "source_type": "agent_projection",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Can another agent's projection enter as a passive signal?",
+      "sample_id": "v02_passive_agent_projection",
+      "signal_shape": "passive_only"
+    },
+    {
+      "gold_best_hypothesis": "H1",
+      "gold_update_directions": {
+        "H1": "strengthened"
+      },
+      "passive_signals": [
+        {
+          "raw_content": "Provider replay note: the original live response was malformed, but the recorded repair fixture supplies a valid EvidenceJudgment supporting H1.",
+          "signal_id": "S_v02_schema_repair_passive",
+          "source": "recorded_provider_fixture",
+          "source_type": "provider_replay",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Can a provider-backed fixture preserve schema-safe evidence flow?",
+      "sample_id": "v02_mixed_schema_repair",
+      "signal_shape": "active_plus_passive"
+    },
+    {
+      "gold_best_hypothesis": "H1",
+      "passive_signals": [
+        {
+          "raw_content": "Boundary note: the observation is relevant but underspecified; it should identify uncertainty without forcing a decisive posterior jump.",
+          "signal_id": "S_v02_ambiguous_boundary",
+          "source": "review_note",
+          "source_type": "expert_feedback",
+          "target_hypotheses": [
+            "H1",
+            "H2"
+          ]
+        }
+      ],
+      "question_or_claim": "Can ambiguous evidence remain cautious instead of over-updating?",
+      "sample_id": "v02_passive_ambiguous_boundary",
+      "signal_shape": "passive_only"
+    }
+  ]
+}

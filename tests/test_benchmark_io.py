@@ -219,3 +219,23 @@ def test_loaded_dataset_runs_through_benchmark_harness(tmp_path: Path):
     assert suite_result.sample_count == 2
     assert suite_result.final_accuracy == 1.0
     assert suite_result.update_direction_accuracy == 1.0
+
+
+def test_v0_2_methodology_fixture_covers_required_scenarios():
+    dataset = load_benchmark_dataset(
+        "fixtures/benchmarks/bayesprobe_v0_2_methodology.json"
+    )
+
+    assert dataset.dataset_name == "bayesprobe_v0_2_methodology"
+    assert len(dataset.samples) >= 8
+    assert {sample.signal_shape for sample in dataset.samples} == {
+        BenchmarkSignalShape.ACTIVE_ONLY,
+        BenchmarkSignalShape.PASSIVE_ONLY,
+        BenchmarkSignalShape.ACTIVE_PLUS_PASSIVE,
+    }
+    source_types = {
+        signal.source_type
+        for sample in dataset.samples
+        for signal in sample.passive_signals
+    }
+    assert {"system_log", "agent_projection", "noisy_stream"} <= source_types
