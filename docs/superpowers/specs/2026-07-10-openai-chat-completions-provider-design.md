@@ -8,8 +8,9 @@ Status: Proposed for implementation
 BayesProbe WebUI v0.1 can already run deterministic autonomous questions and
 OpenAI Responses-backed evidence judgment. The next practical gap is broader
 OpenAI-compatible provider support. Many providers expose an OpenAI-shaped
-`/chat/completions` API rather than the newer Responses API. DeepSeek is the
-immediate motivating provider: its quick-start documentation lists
+`/chat/completions` API rather than the newer Responses API. DeepSeek is an
+immediate validation example, not the design boundary: its quick-start
+documentation lists
 `https://api.deepseek.com` as the OpenAI `base_url`, names current models such
 as `deepseek-v4-flash` and `deepseek-v4-pro`, and demonstrates
 `client.chat.completions.create(...)`.
@@ -22,14 +23,16 @@ only through the existing Evidence Integration Gate and structured
 ## Goals
 
 - Add a first-class `OpenAIChatCompletionsModelGateway`.
-- Support OpenAI-compatible Chat Completions providers in the local WebUI,
-  especially DeepSeek-compatible configuration:
+- Support OpenAI-compatible Chat Completions providers in the local WebUI using
+  the common Chat Completions request/response shape:
   - `kind="openai_chat_completions"`;
   - request-scoped `api_key`;
   - `base_url`;
   - `model`;
   - `timeout_seconds`;
   - `max_output_tokens`.
+- Treat DeepSeek as one smoke-testable provider example, not a special-case
+  adapter.
 - Preserve deterministic mode and OpenAI Responses mode unchanged.
 - Preserve all WebUI secret rules:
   - no raw API key in JSON config;
@@ -43,10 +46,11 @@ only through the existing Evidence Integration Gate and structured
 ## Non-Goals
 
 - No provider registry in this slice.
-- No Anthropic-format DeepSeek adapter.
+- No provider-specific adapter branches for individual OpenAI-compatible
+  providers.
 - No streaming UI or token streaming.
-- No provider-specific reasoning controls such as DeepSeek `thinking` or
-  `reasoning_effort` in v0.1.
+- No provider-specific extension parameters such as custom reasoning controls,
+  cache controls, beta flags, or provider-specific tool formats in v0.1.
 - No benchmark comparison UI.
 - No changes to `BayesProbeCore`, the Evidence Integration Gate, posterior
   update rules, hypothesis evolution, probe planning, or probe execution.
@@ -139,9 +143,9 @@ Completions adapter without allowing raw API keys:
 {
   "model_gateway": {
     "kind": "openai_chat_completions",
-    "model": "deepseek-v4-flash",
-    "api_key_env": "DEEPSEEK_API_KEY",
-    "base_url": "https://api.deepseek.com"
+    "model": "provider-model-name",
+    "api_key_env": "PROVIDER_API_KEY",
+    "base_url": "https://provider.example/v1"
   }
 }
 ```
@@ -218,14 +222,17 @@ git diff --check
 ```
 
 Optional live smoke with a user-provided key should be manual and explicit. It
-must not run by default in CI or offline tests.
+must not run by default in CI or offline tests. DeepSeek can be the first live
+smoke target because it motivated this work, but the implementation should not
+hard-code DeepSeek-specific branches.
 
 ## Definition of Done
 
-- DeepSeek-style WebUI configuration can use:
+- OpenAI-compatible Chat Completions WebUI configuration can use:
   - Protocol: Chat Completions;
-  - Base URL: `https://api.deepseek.com`;
-  - Model: `deepseek-v4-flash` or `deepseek-v4-pro`;
+  - provider base URL such as `https://api.deepseek.com` or another compatible
+    endpoint;
+  - provider model name such as `deepseek-v4-flash` or another compatible model;
   - request-scoped API key.
 - Chat Completions model output enters BayesProbe only through
   `ModelGateway.complete_structured(...)` and existing evidence validation.
