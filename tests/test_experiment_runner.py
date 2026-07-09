@@ -97,9 +97,11 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     dataset_snapshot_path = artifact_dir / "dataset_snapshot.json"
     artifact_report_path = artifact_dir / "report.json"
     artifact_ledger_path = artifact_dir / "ledger.jsonl"
+    model_invocations_path = artifact_dir / "model_invocations.json"
 
     assert result.artifact_dir == artifact_dir
     assert result.artifact_manifest_path == manifest_path
+    assert model_invocations_path.exists()
     assert manifest_path.exists()
     assert config_snapshot_path.exists()
     assert dataset_snapshot_path.exists()
@@ -110,6 +112,7 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     config_snapshot = json.loads(config_snapshot_path.read_text(encoding="utf-8"))
     dataset_snapshot = json.loads(dataset_snapshot_path.read_text(encoding="utf-8"))
     artifact_report = json.loads(artifact_report_path.read_text(encoding="utf-8"))
+    model_invocations = json.loads(model_invocations_path.read_text(encoding="utf-8"))
     artifact_text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in [
@@ -118,6 +121,7 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
             dataset_snapshot_path,
             artifact_report_path,
             artifact_ledger_path,
+            model_invocations_path,
         ]
     )
 
@@ -151,6 +155,26 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     assert '"token"' not in artifact_text
     assert "hidden-token-value" not in artifact_text
     assert "kept" in artifact_text
+    assert manifest["model_invocations_path"] == str(model_invocations_path)
+    assert manifest["model_invocation_count"] == 4
+    assert manifest["model_invocation_summary"] == [
+        {
+            "task": "judge_evidence",
+            "adapter_kind": "scripted",
+            "prompt_id": "evidence_judgment",
+            "prompt_version": "v0.1",
+            "schema_name": "EvidenceJudgment",
+            "schema_version": "v0.1",
+            "repair_attempt_index": None,
+            "metadata": {},
+            "occurrence_count": 4,
+        }
+    ]
+    assert model_invocations == {
+        "artifact_version": "0.1",
+        "invocation_count": 4,
+        "invocations": manifest["model_invocation_summary"],
+    }
 
 
 def test_write_experiment_artifact_bundle_creates_selected_ledger_when_missing(

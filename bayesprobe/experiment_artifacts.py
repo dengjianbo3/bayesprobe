@@ -27,6 +27,7 @@ class ExperimentArtifactBundle:
     ledger_path: Path | None
     config_snapshot_path: Path
     dataset_snapshot_path: Path
+    model_invocations_path: Path
 
 
 def write_experiment_artifact_bundle(
@@ -46,6 +47,7 @@ def write_experiment_artifact_bundle(
     artifact_ledger_path = target_dir / "ledger.jsonl" if ledger_path is not None else None
     config_snapshot_path = target_dir / "config_snapshot.json"
     dataset_snapshot_path = target_dir / "dataset_snapshot.json"
+    model_invocations_path = target_dir / "model_invocations.json"
     manifest_path = target_dir / "manifest.json"
 
     _copy_json_file(Path(report_path), artifact_report_path)
@@ -54,6 +56,8 @@ def write_experiment_artifact_bundle(
 
     _write_json(config_snapshot_path, _config_snapshot(config, ledger_path=ledger_path))
     _write_json(dataset_snapshot_path, _dataset_snapshot(dataset))
+    model_invocations = _model_invocation_artifact(artifact_ledger_path)
+    _write_json(model_invocations_path, model_invocations)
     _write_json(
         manifest_path,
         _manifest_payload(
@@ -65,6 +69,8 @@ def write_experiment_artifact_bundle(
             ledger_path=artifact_ledger_path,
             config_snapshot_path=config_snapshot_path,
             dataset_snapshot_path=dataset_snapshot_path,
+            model_invocations_path=model_invocations_path,
+            model_invocations=model_invocations,
             created_at_utc=created_at_utc,
         ),
     )
@@ -76,6 +82,7 @@ def write_experiment_artifact_bundle(
         ledger_path=artifact_ledger_path,
         config_snapshot_path=config_snapshot_path,
         dataset_snapshot_path=dataset_snapshot_path,
+        model_invocations_path=model_invocations_path,
     )
 
 
@@ -141,6 +148,8 @@ def _manifest_payload(
     ledger_path: Path | None,
     config_snapshot_path: Path,
     dataset_snapshot_path: Path,
+    model_invocations_path: Path,
+    model_invocations: dict[str, Any],
     created_at_utc: datetime | None,
 ) -> dict[str, Any]:
     created_at = created_at_utc or datetime.now(UTC)
@@ -155,9 +164,71 @@ def _manifest_payload(
         "ledger_path": str(ledger_path) if ledger_path is not None else None,
         "config_snapshot_path": str(config_snapshot_path),
         "dataset_snapshot_path": str(dataset_snapshot_path),
+        "model_invocations_path": str(model_invocations_path),
         "metadata": _sanitize_metadata(config.metadata),
+        "model_invocation_count": model_invocations["invocation_count"],
+        "model_invocation_summary": model_invocations["invocations"],
         "model_gateway": _model_gateway_snapshot(config.model_gateway),
         "judgment_repair_policy": _repair_policy_snapshot(config.judgment_repair_policy),
+    }
+
+
+def _model_invocation_artifact(ledger_path: Path | None) -> dict[str, Any]:
+    traces = _model_traces_from_ledger(ledger_path)
+    invocations = _aggregate_model_traces(traces)
+    return {
+        "artifact_version": "0.1",
+        "invocation_count": len(traces),
+        "invocations": invocations,
+    }
+
+
+def _model_traces_from_ledger(ledger_path: Path | None) -> list[Mapping[str, Any]]:
+    if ledger_path is None or not ledger_path.exists():
+        return []
+    traces: list[Mapping[str, Any]] = []
+    for line in ledger_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        envelope = json.loads(line)
+        if envelope.get("record_type") != "evidence_event":
+            continue
+        payload = envelope.get("payload", {})
+        if not isinstance(payload, Mapping):
+            continue
+        model_trace = payload.get("model_trace", {})
+        if isinstance(model_trace, Mapping) and model_trace:
+            traces.append(model_trace)
+    return traces
+
+
+def _aggregate_model_traces(traces: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, dict[str, Any]] = {}
+    for trace in traces:
+        invocation = _model_invocation_signature(trace)
+        key = json.dumps(invocation, ensure_ascii=False, sort_keys=True)
+        if key not in counts:
+            counts[key] = {**invocation, "occurrence_count": 0}
+        counts[key]["occurrence_count"] += 1
+    return sorted(
+        counts.values(),
+        key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _model_invocation_signature(trace: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = trace.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    return {
+        "task": trace.get("task"),
+        "adapter_kind": trace.get("adapter_kind"),
+        "prompt_id": trace.get("prompt_id"),
+        "prompt_version": trace.get("prompt_version"),
+        "schema_name": trace.get("schema_name"),
+        "schema_version": trace.get("schema_version"),
+        "repair_attempt_index": trace.get("repair_attempt_index"),
+        "metadata": _sanitize_metadata(metadata),
     }
 
 
