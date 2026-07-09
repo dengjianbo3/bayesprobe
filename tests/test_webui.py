@@ -99,8 +99,11 @@ def test_webui_deterministic_autonomous_run_returns_trace():
             "max_cycles must be at least 1",
         ),
         (
-            {"question": "Q", "provider": {"kind": "openai_chat_completions"}},
-            "provider kind openai_chat_completions is not supported in v0.1",
+            {
+                "question": "Q",
+                "provider": {"kind": "openai_chat_completions", "model": "gpt-5.5"},
+            },
+            "provider.api_key must not be empty",
         ),
     ],
 )
@@ -135,6 +138,8 @@ def test_webui_static_assets_define_operational_workbench():
 
     assert "BayesProbe" in index
     assert "provider-kind" in index
+    assert "Chat Completions (unsupported)" not in index
+    assert '<option value="openai_chat_completions">Chat Completions</option>' in index
     assert "api-key" in index
     assert "base-url" in index
     assert "model-name" in index
@@ -142,6 +147,9 @@ def test_webui_static_assets_define_operational_workbench():
     assert "trace-pane" in index
     assert "localStorage" not in script
     assert "fetch('/api/runs/autonomous'" in script
+    assert "Chat Completions stays visible in v0.1 but is not supported." not in script
+    assert 'provider.kind === "openai_chat_completions"' in script
+    assert 'providerKind.value === "openai_chat_completions"' not in script
     assert ".trace-item" in styles
     assert "@media" in styles
 
@@ -310,6 +318,45 @@ class FakeWebUIOpenAI:
         self.responses = FakeWebUIResponses()
 
 
+class FakeWebUIChatCompletions:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **payload):
+        self.calls.append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "evidence_type": "supporting",
+                                "likelihoods": {
+                                    "H1": "moderately_confirming",
+                                    "H2": "moderately_disconfirming",
+                                },
+                                "interpretation": "WebUI fake chat response.",
+                                "quality_overrides": {},
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+
+class FakeWebUIChatOpenAI:
+    created_with = []
+
+    def __init__(self, **kwargs):
+        self.__class__.created_with.append(kwargs)
+        self.chat = type(
+            "FakeChat",
+            (),
+            {"completions": FakeWebUIChatCompletions()},
+        )()
+
+
 def test_webui_openai_responses_provider_uses_request_key_and_redacts_response():
     FakeWebUIOpenAI.created_with = []
 
@@ -339,6 +386,40 @@ def test_webui_openai_responses_provider_uses_request_key_and_redacts_response()
     ]
     assert "sk-webui-secret" not in json.dumps(payload)
     assert payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"] == "openai"
+
+
+def test_webui_openai_chat_completions_provider_uses_request_key_and_redacts_response():
+    FakeWebUIChatOpenAI.created_with = []
+
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Can the WebUI use a Chat Completions-compatible provider?",
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "base_url": "https://provider.example/v1",
+                "model": "provider-model",
+                "timeout_seconds": 11,
+                "max_output_tokens": 128,
+            },
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        client_factory=FakeWebUIChatOpenAI,
+    )
+
+    assert status == 200
+    assert FakeWebUIChatOpenAI.created_with == [
+        {
+            "api_key": "provider-secret-123",
+            "timeout": 11.0,
+            "base_url": "https://provider.example/v1",
+        }
+    ]
+    assert "provider-secret-123" not in json.dumps(payload)
+    assert (
+        payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"]
+        == "openai_chat_completions"
+    )
 
 
 class FailingWebUIOpenAI:

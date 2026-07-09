@@ -19,6 +19,7 @@ from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import InitializeRunInput
 from bayesprobe.model_gateway import DeterministicModelGateway, ModelGateway
 from bayesprobe.openai_gateway import (
+    OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
 )
@@ -30,8 +31,8 @@ from bayesprobe.question_runner import (
 
 
 STATIC_DIR = Path(__file__).with_name("webui_static")
-SUPPORTED_PROVIDER_KINDS = {"deterministic", "openai_responses"}
-RESERVED_PROVIDER_KINDS = {"openai_chat_completions"}
+OPENAI_COMPATIBLE_PROVIDER_KINDS = {"openai_responses", "openai_chat_completions"}
+SUPPORTED_PROVIDER_KINDS = {"deterministic"} | OPENAI_COMPATIBLE_PROVIDER_KINDS
 
 
 class WebUIError(Exception):
@@ -86,7 +87,7 @@ def handle_autonomous_run_request(
                 )
             )
         except Exception as error:
-            if provider_kind == "openai_responses":
+            if provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
                 raise ProviderError(_generic_provider_error_message()) from error
             raise
         return HTTPStatus.OK, serialize_autonomous_run_result(result)
@@ -293,11 +294,9 @@ def _build_webui_model_gateway(
     client_factory: Callable[..., Any] | None,
 ) -> ModelGateway:
     kind = _optional_string(provider.get("kind"), "provider.kind", default="deterministic")
-    if kind in RESERVED_PROVIDER_KINDS:
-        raise UnsupportedProviderError(f"provider kind {kind} is not supported in v0.1")
     if kind == "deterministic":
         return DeterministicModelGateway()
-    if kind == "openai_responses":
+    if kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
         model = _required_nonempty_string(provider.get("model"), "provider.model")
         api_key = _required_nonempty_string(provider.get("api_key"), "provider.api_key")
         try:
@@ -317,6 +316,12 @@ def _build_webui_model_gateway(
                 client = client_factory(**_openai_client_kwargs(config, api_key))
             except Exception as error:
                 raise ProviderError(_generic_provider_error_message()) from error
+        if kind == "openai_chat_completions":
+            return OpenAIChatCompletionsModelGateway(
+                config=config,
+                api_key=api_key,
+                client=client,
+            )
         return OpenAIResponsesModelGateway(
             config=config,
             api_key=api_key,

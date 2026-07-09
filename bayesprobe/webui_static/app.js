@@ -13,8 +13,13 @@ const runButton = document.querySelector("#run-button");
 const PROVIDER_NOTE_BY_KIND = {
   deterministic: "Deterministic mode runs locally without a key.",
   openai_responses: "OpenAI settings are used only for this request.",
-  openai_chat_completions: "Chat Completions stays visible in v0.1 but is not supported.",
+  openai_chat_completions:
+    "OpenAI-compatible Chat Completions settings are used only for this request.",
 };
+const OPENAI_COMPATIBLE_PROVIDER_KINDS = new Set([
+  "openai_responses",
+  "openai_chat_completions",
+]);
 
 providerKind.addEventListener("change", syncProviderControls);
 form.addEventListener("submit", handleSubmit);
@@ -26,14 +31,6 @@ async function handleSubmit(event) {
   setStatus("Running autonomous loop...", "busy");
   setBusy(true);
   clearRunOutput("running");
-
-  if (providerKind.value === "openai_chat_completions") {
-    clearRunOutput("failed");
-    setStatus(PROVIDER_NOTE_BY_KIND.openai_chat_completions, "error");
-    clearApiKey();
-    setBusy(false);
-    return;
-  }
 
   try {
     const requestPayload = buildPayload();
@@ -61,14 +58,13 @@ async function handleSubmit(event) {
 }
 
 function syncProviderControls() {
-  const usesRemoteProvider = providerKind.value === "openai_responses";
-  providerAuth.hidden = !usesRemoteProvider;
-  runButton.disabled = providerKind.value === "openai_chat_completions";
-  providerNote.textContent = PROVIDER_NOTE_BY_KIND[providerKind.value] || "";
-  providerNote.classList.toggle(
-    "is-warning",
-    providerKind.value === "openai_chat_completions"
+  const usesRemoteProvider = OPENAI_COMPATIBLE_PROVIDER_KINDS.has(
+    providerKind.value
   );
+  providerAuth.hidden = !usesRemoteProvider;
+  runButton.disabled = false;
+  providerNote.textContent = PROVIDER_NOTE_BY_KIND[providerKind.value] || "";
+  providerNote.classList.toggle("is-warning", false);
   if (!usesRemoteProvider) {
     clearApiKey();
   }
@@ -77,7 +73,10 @@ function syncProviderControls() {
 function buildPayload() {
   const provider = { kind: providerKind.value };
 
-  if (provider.kind === "openai_responses") {
+  if (
+    provider.kind === "openai_responses" ||
+    provider.kind === "openai_chat_completions"
+  ) {
     provider.api_key = valueOf("api-key");
     provider.base_url = valueOf("base-url") || null;
     provider.model = valueOf("model-name");
@@ -261,8 +260,7 @@ function formatNumber(value) {
 }
 
 function setBusy(isBusy) {
-  runButton.disabled =
-    isBusy || providerKind.value === "openai_chat_completions";
+  runButton.disabled = isBusy;
   runButton.textContent = isBusy ? "Running..." : "Run autonomous loop";
 }
 
