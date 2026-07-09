@@ -14,7 +14,7 @@ from bayesprobe.webui import (
 )
 
 
-STATIC_DIR = Path("bayesprobe/webui_static")
+STATIC_DIR = Path(__file__).resolve().parents[1] / "bayesprobe" / "webui_static"
 
 
 @contextmanager
@@ -144,6 +144,24 @@ def test_webui_static_assets_define_operational_workbench():
     assert "fetch('/api/runs/autonomous'" in script
     assert ".trace-item" in styles
     assert "@media" in styles
+
+
+def test_webui_static_script_clears_stale_run_output_on_submit_and_failure():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "function clearRunOutput(" in script
+    assert 'clearRunOutput("running");' in script
+    assert 'clearRunOutput("failed");' in script
+    assert script.index('clearRunOutput("running");') < script.index(
+        "const response = await fetch('/api/runs/autonomous',"
+    )
+    assert script.index('clearRunOutput("failed");') < script.index(
+        'setStatus(error.message || "Run failed", "error");'
+    )
+    assert 'runId.textContent = failed ? "Last run failed." : "Run pending.";' in script
+    assert "Run failed. No answer projection." in script
+    assert "Run failed. No belief state." in script
+    assert "Run failed. Cycle trace unavailable." in script
 
 
 @pytest.mark.parametrize(

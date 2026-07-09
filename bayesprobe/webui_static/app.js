@@ -23,13 +23,17 @@ syncProviderControls();
 
 async function handleSubmit(event) {
   event.preventDefault();
-  if (providerKind.value === "openai_chat_completions") {
-    setStatus(PROVIDER_NOTE_BY_KIND.openai_chat_completions, "error");
-    return;
-  }
-
   setStatus("Running autonomous loop...", "busy");
   setBusy(true);
+  clearRunOutput("running");
+
+  if (providerKind.value === "openai_chat_completions") {
+    clearRunOutput("failed");
+    setStatus(PROVIDER_NOTE_BY_KIND.openai_chat_completions, "error");
+    clearApiKey();
+    setBusy(false);
+    return;
+  }
 
   try {
     const requestPayload = buildPayload();
@@ -48,6 +52,7 @@ async function handleSubmit(event) {
     renderRun(payload);
     setStatus(`Stopped: ${payload.stop_reason}`, "ok");
   } catch (error) {
+    clearRunOutput("failed");
     setStatus(error.message || "Run failed", "error");
   } finally {
     clearApiKey();
@@ -111,6 +116,19 @@ function renderRun(payload) {
   renderAnswer(payload.final_answer);
   renderBeliefs(payload.final_belief_state);
   renderTrace(payload.cycles || []);
+}
+
+function clearRunOutput(state = "running") {
+  const failed = state === "failed";
+
+  runId.textContent = failed ? "Last run failed." : "Run pending.";
+  answerPanel.textContent = failed
+    ? "Run failed. No answer projection."
+    : "Run pending.";
+  beliefPanel.textContent = failed
+    ? "Run failed. No belief state."
+    : "Run pending.";
+  tracePane.innerHTML = `<div class="empty-state">${failed ? "Run failed. Cycle trace unavailable." : "Run pending."}</div>`;
 }
 
 function renderAnswer(answer) {
