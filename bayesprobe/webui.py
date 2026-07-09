@@ -44,6 +44,10 @@ class UnsupportedProviderError(WebUIError):
     error_type = "unsupported_provider"
 
 
+class InvalidJSONError(WebUIError):
+    error_type = "invalid_json"
+
+
 class ProviderError(WebUIError):
     status_code = HTTPStatus.BAD_GATEWAY
     error_type = "provider_error"
@@ -54,10 +58,11 @@ def handle_autonomous_run_request(
     *,
     client_factory: Callable[..., Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    del client_factory
     try:
         request = _parse_autonomous_request(payload)
-        gateway = _build_webui_model_gateway(request["provider"], client_factory=None)
+        gateway = _build_webui_model_gateway(
+            request["provider"], client_factory=client_factory
+        )
         core = BayesProbeCore(model_gateway=gateway)
         runner = AutonomousQuestionRunner(
             core=core,
@@ -74,9 +79,9 @@ def handle_autonomous_run_request(
         return HTTPStatus.OK, serialize_autonomous_run_result(result)
     except WebUIError as error:
         return int(error.status_code), _error_payload(error.error_type, error.message)
-    except (RuntimeError, OSError) as error:
-        return int(HTTPStatus.BAD_GATEWAY), _error_payload(
-            "provider_error", _sanitize_error_message(str(error))
+    except Exception:
+        return int(HTTPStatus.INTERNAL_SERVER_ERROR), _error_payload(
+            "server_error", _generic_server_error_message()
         )
 
 
@@ -111,36 +116,49 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
         server_version = "BayesProbeWebUI/0.1"
 
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/":
-                self._serve_static_file("index.html")
-                return
-            if self.path in {"/styles.css", "/app.js"}:
-                self._serve_static_file(self.path.lstrip("/"))
-                return
-            self._write_json(
-                HTTPStatus.NOT_FOUND,
-                _error_payload("not_found", f"unknown path: {self.path}"),
-            )
-
-        def do_POST(self) -> None:  # noqa: N802
-            if self.path != "/api/runs/autonomous":
+            try:
+                if self.path == "/":
+                    self._serve_static_file("index.html")
+                    return
+                if self.path in {"/styles.css", "/app.js"}:
+                    self._serve_static_file(self.path.lstrip("/"))
+                    return
                 self._write_json(
                     HTTPStatus.NOT_FOUND,
                     _error_payload("not_found", f"unknown path: {self.path}"),
                 )
-                return
-
-            try:
-                payload = self._read_json_body()
             except WebUIError as error:
                 self._write_json(
                     error.status_code,
                     _error_payload(error.error_type, error.message),
                 )
-                return
+            except Exception:
+                self._write_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    _error_payload("server_error", _generic_server_error_message()),
+                )
 
-            status, response = handle_autonomous_run_request(payload)
-            self._write_json(status, response)
+        def do_POST(self) -> None:  # noqa: N802
+            try:
+                if self.path != "/api/runs/autonomous":
+                    self._write_json(
+                        HTTPStatus.NOT_FOUND,
+                        _error_payload("not_found", f"unknown path: {self.path}"),
+                    )
+                    return
+                payload = self._read_json_body()
+                status, response = handle_autonomous_run_request(payload)
+                self._write_json(status, response)
+            except WebUIError as error:
+                self._write_json(
+                    error.status_code,
+                    _error_payload(error.error_type, error.message),
+                )
+            except Exception:
+                self._write_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    _error_payload("server_error", _generic_server_error_message()),
+                )
 
         def log_message(self, format: str, *args: Any) -> None:
             return
@@ -159,7 +177,7 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise WebUIError("request body must be valid JSON") from error
+                raise InvalidJSONError("request body must be valid JSON") from error
             if not isinstance(payload, Mapping):
                 raise WebUIError("request payload must be an object")
             return payload
@@ -174,10 +192,10 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 body = file_path.read_bytes()
-            except OSError as error:
+            except OSError:
                 self._write_json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
-                    _error_payload("server_error", str(error)),
+                    _error_payload("server_error", _generic_server_error_message()),
                 )
                 return
             content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
@@ -360,6 +378,10 @@ def _error_payload(error_type: str, message: str) -> dict[str, Any]:
 
 def _sanitize_error_message(message: str) -> str:
     return re.sub(r"sk-[A-Za-z0-9_\\-]+", "sk-redacted", message)
+
+
+def _generic_server_error_message() -> str:
+    return "internal server error"
 
 
 if __name__ == "__main__":
