@@ -504,7 +504,7 @@ core's private internals.
 | Config/CLI/SDK | Good MVP | JSON experiment config, CLI, package exports exist. |
 | Model gateway | Partial | Structured seam and scripted/deterministic adapters exist; no real provider. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
-| Prompt/version metadata | Missing | Needed before serious provider-based experiments. |
+| Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
 | Multi-agent protocol | Partial | Projection-as-signal semantics exist; transport/protocol schema not complete. |
 | Production persistence | Missing | JSONL only. |
 | Large benchmark suite | Missing | Current fixture is a tracer bullet. |
@@ -546,6 +546,7 @@ Use for model-shaped structured decisions:
 - future hypothesis evolution assistance;
 - future projection writing or compression;
 - future prompt-versioned provider calls.
+- `ModelInvocationTrace` persists prompt/schema adapter metadata on evidence events.
 
 Do not let callers pass arbitrary model outputs into belief update. Model output
 must be parsed, validated, and converted into BayesProbe domain objects.
@@ -638,6 +639,8 @@ Why this is next:
 - it keeps schema failure visible in the ledger.
 
 ### Phase 2: Provider Adapter and Prompt Metadata
+
+Status: prompt/response metadata contract implemented as MVP; provider adapter remains future work.
 
 Goal:
 
