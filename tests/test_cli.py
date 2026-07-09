@@ -45,6 +45,7 @@ def test_cli_run_writes_report_ledger_and_prints_summary(tmp_path: Path, capsys)
     assert "update_direction_accuracy=1.0" in captured.out
     assert f"report={report_path}" in captured.out
     assert f"ledger={ledger_path}" in captured.out
+    assert "artifact=" not in captured.out
     assert report["sample_count"] == 3
     assert ledger_path.exists()
 
