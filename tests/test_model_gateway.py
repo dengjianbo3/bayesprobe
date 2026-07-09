@@ -2,7 +2,10 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from bayesprobe.openai_gateway import OpenAIResponsesModelGateway
+from bayesprobe.openai_gateway import (
+    OpenAIChatCompletionsModelGateway,
+    OpenAIResponsesModelGateway,
+)
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     EvidenceJudgmentRepairPolicy,
@@ -365,6 +368,22 @@ def test_build_model_gateway_accepts_openai_mapping_without_network():
     assert gateway.config.api_key_env == "BAYESPROBE_TEST_OPENAI_KEY"
     assert gateway.config.timeout_seconds == 12.5
     assert gateway.config.max_output_tokens == 256
+
+
+def test_build_model_gateway_creates_openai_chat_completions_gateway():
+    gateway = build_model_gateway(
+        {
+            "kind": "openai_chat_completions",
+            "model": "provider-model",
+            "api_key_env": "PROVIDER_API_KEY",
+            "base_url": "https://provider.example/v1",
+        }
+    )
+
+    assert isinstance(gateway, OpenAIChatCompletionsModelGateway)
+    assert gateway.config.model == "provider-model"
+    assert gateway.config.api_key_env == "PROVIDER_API_KEY"
+    assert gateway.config.base_url == "https://provider.example/v1"
 
 
 def test_build_model_gateway_rejects_unknown_kind():

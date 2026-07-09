@@ -34,6 +34,7 @@ from bayesprobe.model_gateway import (
     evidence_judgment_from_mapping,
 )
 from bayesprobe.openai_gateway import (
+    OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
     build_openai_request_payload,
@@ -58,6 +59,7 @@ __all__ = [
     "ModelGatewayConfig",
     "ModelGatewayValidationError",
     "ModelInvocationTrace",
+    "OpenAIChatCompletionsModelGateway",
     "OpenAIModelGatewayConfig",
     "OpenAIResponsesModelGateway",
     "ScriptedModelGateway",

@@ -119,15 +119,16 @@ def _optional_model_gateway_config(data: Mapping[str, Any]) -> ModelGatewayConfi
     if responses is not None and not isinstance(responses, Mapping):
         raise ValueError("model gateway responses must be an object")
     model = value.get("model")
-    if kind == "openai" and model is None:
+    openai_kind = kind in {"openai", "openai_chat_completions"}
+    if openai_kind and model is None:
         raise ValueError("openai model gateway requires model")
-    if kind == "openai" and "api_key" in value:
+    if openai_kind and "api_key" in value:
         raise ValueError("openai model gateway api_key is not allowed in experiment config")
     api_key_env = value.get("api_key_env", "OPENAI_API_KEY")
     timeout_seconds = value.get("timeout_seconds", 30.0)
     max_output_tokens = value.get("max_output_tokens")
     base_url = value.get("base_url")
-    if kind == "openai":
+    if openai_kind:
         validated_openai_config = OpenAIModelGatewayConfig(
             model=model,
             api_key_env=api_key_env,

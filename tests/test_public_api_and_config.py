@@ -23,6 +23,7 @@ from bayesprobe import (
     ModelGatewayConfig,
     ModelGatewayValidationError,
     ModelInvocationTrace,
+    OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
     ScriptedModelGateway,
@@ -65,6 +66,7 @@ def test_public_sdk_exports_supported_names():
         "ModelGatewayConfig",
         "ModelGatewayValidationError",
         "ModelInvocationTrace",
+        "OpenAIChatCompletionsModelGateway",
         "OpenAIModelGatewayConfig",
         "OpenAIResponsesModelGateway",
         "ScriptedModelGateway",
@@ -97,6 +99,7 @@ def test_public_sdk_exports_supported_names():
     assert ModelGatewayConfig is not None
     assert ModelGatewayValidationError is not None
     assert ModelInvocationTrace is not None
+    assert OpenAIChatCompletionsModelGateway is not None
     assert OpenAIModelGatewayConfig is not None
     assert OpenAIResponsesModelGateway is not None
     assert ScriptedModelGateway is not None
@@ -256,6 +259,30 @@ def test_experiment_config_from_mapping_parses_openai_base_url(tmp_path: Path):
     )
 
     assert config.model_gateway is not None
+    assert config.model_gateway.base_url == "https://provider.example/v1"
+
+
+def test_experiment_config_from_mapping_parses_openai_chat_completions(tmp_path: Path):
+    dataset_path = tmp_path / "dataset.json"
+    report_path = tmp_path / "report.json"
+
+    config = experiment_config_from_mapping(
+        {
+            "dataset_path": str(dataset_path),
+            "report_path": str(report_path),
+            "model_gateway": {
+                "kind": "openai_chat_completions",
+                "model": "provider-model",
+                "api_key_env": "PROVIDER_API_KEY",
+                "base_url": "https://provider.example/v1",
+            },
+        }
+    )
+
+    assert config.model_gateway is not None
+    assert config.model_gateway.kind == "openai_chat_completions"
+    assert config.model_gateway.model == "provider-model"
+    assert config.model_gateway.api_key_env == "PROVIDER_API_KEY"
     assert config.model_gateway.base_url == "https://provider.example/v1"
 
 
@@ -446,6 +473,21 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
                         "kind": "openai",
                         "model": "gpt-5.5",
                         "api_key": "sk-not-allowed",
+                    },
+                }
+            ),
+            "openai model gateway api_key is not allowed in experiment config",
+        ),
+        (
+            "openai_chat_raw_api_key_rejected.json",
+            json.dumps(
+                {
+                    "dataset_path": "dataset.json",
+                    "report_path": "report.json",
+                    "model_gateway": {
+                        "kind": "openai_chat_completions",
+                        "model": "provider-model",
+                        "api_key": "provider-secret-123",
                     },
                 }
             ),

@@ -344,6 +344,23 @@ def build_model_gateway(
                 base_url=gateway_config.base_url,
             )
         )
+    if gateway_config.kind == "openai_chat_completions":
+        if gateway_config.model is None:
+            raise ValueError("openai chat completions model gateway requires model")
+        from bayesprobe.openai_gateway import (
+            OpenAIChatCompletionsModelGateway,
+            OpenAIModelGatewayConfig,
+        )
+
+        return OpenAIChatCompletionsModelGateway(
+            config=OpenAIModelGatewayConfig(
+                model=gateway_config.model,
+                api_key_env=gateway_config.api_key_env,
+                timeout_seconds=gateway_config.timeout_seconds,
+                max_output_tokens=gateway_config.max_output_tokens,
+                base_url=gateway_config.base_url,
+            )
+        )
     raise ValueError(f"unsupported model gateway kind: {gateway_config.kind}")
 
 
