@@ -105,6 +105,38 @@ def test_webui_deterministic_autonomous_run_returns_trace():
     assert cycle["answer_projection"]["current_best_hypothesis"] == "H1"
 
 
+def test_webui_deterministic_inline_mcq_context_selects_explicit_choice():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": (
+                "Which graph class is well-behaved? Answer Choices: "
+                "A. Non-bipartite regular graphs "
+                "B. Connected cubic graphs "
+                "C. Connected graphs "
+                "D. Connected non-bipartite graphs "
+                "E. Connected bipartite graphs"
+            ),
+            "context": (
+                "SUPPORTS D: The chain is irreducible exactly when the connected "
+                "graph is non-bipartite, while self-loops make it aperiodic."
+            ),
+            "provider": {"kind": "deterministic"},
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        }
+    )
+
+    assert status == 200
+    assert [
+        hypothesis["id"]
+        for hypothesis in payload["final_belief_state"]["hypotheses"]
+    ] == ["A", "B", "C", "D", "E"]
+    assert payload["final_answer"]["current_best_hypothesis"] == "D"
+    assert sum(
+        hypothesis["posterior"]
+        for hypothesis in payload["final_belief_state"]["hypotheses"]
+    ) == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize(
     ("payload", "expected_message"),
     [

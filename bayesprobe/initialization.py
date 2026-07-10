@@ -258,7 +258,7 @@ def _parse_answer_choice_frame(problem: str) -> _AnswerChoiceFrame | None:
 
 def _parse_choice_lines(choice_text: str) -> list[_AnswerChoice]:
     matches = list(_CHOICE_BLOCK_LINE_RE.finditer(choice_text))
-    if not matches:
+    if len(matches) < 2:
         matches = list(_CHOICE_INLINE_RE.finditer(choice_text))
     choices: list[_AnswerChoice] = []
     used_labels: set[str] = set()

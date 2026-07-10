@@ -65,6 +65,23 @@ def test_deterministic_gateway_judges_supporting_signal():
     assert judgment.likelihoods["H2"] == LikelihoodBand.MODERATELY_DISCONFIRMING
 
 
+def test_deterministic_gateway_supports_explicit_non_hypothesis_id():
+    response = DeterministicModelGateway().complete_structured(
+        make_request(
+            "SUPPORTS D: The parity argument selects answer choice D.",
+            target_hypotheses=("A", "B", "C", "D", "E"),
+        )
+    )
+
+    judgment = evidence_judgment_from_mapping(response)
+
+    assert judgment.likelihoods["D"] == LikelihoodBand.MODERATELY_CONFIRMING
+    assert {
+        judgment.likelihoods[hypothesis_id]
+        for hypothesis_id in ("A", "B", "C", "E")
+    } == {LikelihoodBand.MODERATELY_DISCONFIRMING}
+
+
 def test_deterministic_gateway_judges_anomaly_for_all_targets():
     response = DeterministicModelGateway().complete_structured(
         make_request("ANOMALY: current hypotheses explain this badly.", target_hypotheses=("H1", "H2", "H3"))

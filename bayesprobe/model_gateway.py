@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -298,19 +299,27 @@ class DeterministicModelGateway:
             for hypothesis_id in hypothesis_ids
         }
         evidence_type = EvidenceType.NEUTRAL
+        explicit_target = _deterministic_target_hypothesis(
+            raw_content=content_upper,
+            hypothesis_ids=hypothesis_ids,
+        )
 
         if "REFUTES" in content_upper or "CONTRADICTS" in content_upper:
             evidence_type = EvidenceType.COUNTEREVIDENCE
-            if "H1" in likelihoods:
-                likelihoods["H1"] = LikelihoodBand.MODERATELY_DISCONFIRMING.value
-            if "H2" in likelihoods:
-                likelihoods["H2"] = LikelihoodBand.MODERATELY_CONFIRMING.value
+            for hypothesis_id in hypothesis_ids:
+                likelihoods[hypothesis_id] = (
+                    LikelihoodBand.MODERATELY_DISCONFIRMING.value
+                    if hypothesis_id == explicit_target
+                    else LikelihoodBand.MODERATELY_CONFIRMING.value
+                )
         elif "SUPPORTS" in content_upper:
             evidence_type = EvidenceType.SUPPORTING
-            if "H1" in likelihoods:
-                likelihoods["H1"] = LikelihoodBand.MODERATELY_CONFIRMING.value
-            if "H2" in likelihoods:
-                likelihoods["H2"] = LikelihoodBand.MODERATELY_DISCONFIRMING.value
+            for hypothesis_id in hypothesis_ids:
+                likelihoods[hypothesis_id] = (
+                    LikelihoodBand.MODERATELY_CONFIRMING.value
+                    if hypothesis_id == explicit_target
+                    else LikelihoodBand.MODERATELY_DISCONFIRMING.value
+                )
         elif "ANOMALY" in content_upper:
             evidence_type = EvidenceType.ANOMALY
             likelihoods = {
@@ -324,6 +333,24 @@ class DeterministicModelGateway:
             "interpretation": f"Deterministic v0.2 interpretation for {source_type}.",
             "quality_overrides": {},
         }
+
+
+def _deterministic_target_hypothesis(
+    *,
+    raw_content: str,
+    hypothesis_ids: list[str],
+) -> str | None:
+    if not hypothesis_ids:
+        return None
+    by_upper = {hypothesis_id.upper(): hypothesis_id for hypothesis_id in hypothesis_ids}
+    match = re.search(
+        r"\b(?:SUPPORTS|REFUTES|CONTRADICTS)\s+"
+        r"(?:ANSWER\s+CHOICE\s+)?([A-Z][A-Z0-9_]*)\b",
+        raw_content,
+    )
+    if match is not None and match.group(1) in by_upper:
+        return by_upper[match.group(1)]
+    return hypothesis_ids[0]
 
 
 class ScriptedModelGateway:

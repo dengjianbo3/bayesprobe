@@ -114,6 +114,30 @@ E. The class of all connected bipartite graphs."""
     assert "which answer choice is best" in first_candidate.candidate_probe.inquiry_goal.lower()
 
 
+def test_initializer_parses_inline_answer_choices_without_binary_fallback():
+    problem = (
+        "Which graph class is well-behaved? Answer Choices: "
+        "A. Non-bipartite regular graphs "
+        "B. Connected cubic graphs "
+        "C. Connected graphs "
+        "D. Connected non-bipartite graphs "
+        "E. Connected bipartite graphs"
+    )
+
+    result = BayesProbeInitializer().initialize(
+        InitializeRunInput(run_id="run_mcq_inline", problem=problem)
+    )
+
+    assert [hypothesis.id for hypothesis in result.belief_state.hypotheses] == [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+    ]
+    assert result.run.metadata["question_frame"] == "multiple_choice"
+
+
 def test_initializer_preserves_seeded_hypotheses():
     result = BayesProbeInitializer().initialize(
         InitializeRunInput(
