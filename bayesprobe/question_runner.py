@@ -438,20 +438,23 @@ class AutonomousQuestionRunner:
     ) -> None:
         if self.progress_observer is None:
             return
-        self.progress_observer(
-            AutonomousQuestionProgress(
-                kind=kind,
-                run_id=run_id,
-                cycle_id=cycle_id,
-                cycle_index=cycle_index,
-                run=run,
-                belief_state=belief_state,
-                probe_set=probe_set,
-                signals=signals,
-                cycle_result=cycle_result,
-                result=result,
+        try:
+            self.progress_observer(
+                AutonomousQuestionProgress(
+                    kind=kind,
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    cycle_index=cycle_index,
+                    run=run,
+                    belief_state=belief_state,
+                    probe_set=probe_set,
+                    signals=signals,
+                    cycle_result=cycle_result,
+                    result=result,
+                )
             )
-        )
+        except Exception:
+            return
 
 
 def _top_hypothesis(belief_state: BeliefState) -> Hypothesis:

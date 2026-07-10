@@ -401,3 +401,26 @@ def test_question_runner_repeats_cycle_progress_for_each_integrated_cycle():
     ]
     assert [event.cycle_index for event in integrated] == [1, 2]
     assert [event.cycle_result for event in integrated] == result.cycle_results
+
+
+def test_question_runner_ignores_progress_observer_exceptions():
+    def failing_observer(event):
+        raise RuntimeError(f"observer failed for {event.kind}")
+
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+        progress_observer=failing_observer,
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_question_progress_observer_failure",
+            problem="Does observer failure leave the autonomous run intact?",
+        )
+    )
+
+    assert result.run.status == RunStatus.COMPLETED
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert len(result.cycle_results) == 1
+    assert result.cycle_results[0].cycle.boundary_status.value == "integrated"
