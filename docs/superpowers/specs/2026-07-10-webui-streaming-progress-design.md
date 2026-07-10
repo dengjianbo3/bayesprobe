@@ -1,7 +1,7 @@
 # WebUI Streaming Progress and Session-Only Credential Design
 
 Date: 2026-07-10
-Status: Approved for implementation planning
+Status: Implemented and verified
 
 ## Context
 
@@ -273,6 +273,33 @@ Frontend and browser tests verify:
   overlap.
 
 The full pytest suite must pass after focused tests.
+
+## Verification Record
+
+Verification completed on 2026-07-10 after implementation.
+
+- `pytest tests/test_question_runner.py tests/test_webui.py tests/test_public_api_and_config.py -q`:
+  `92 passed in 5.40s`.
+- `node --test tests/test_webui_stream.js`: `6 pass`, `0 fail`.
+- `pytest -q`: `377 passed, 2 skipped in 5.67s`.
+- Restarted `python3 -m bayesprobe.webui --host 127.0.0.1 --port 8766` and
+  confirmed `GET /` returns `200 OK`.
+- Browser verification on the local WebUI confirmed that a non-secret test
+  value remains in the API-key field across a deterministic one-cycle run and
+  a switch back to Chat Completions, then is empty after reload. The A-E graph
+  run rendered initialization, probe planning, probe execution, evidence
+  integration, posterior update, and completion; it finished as `completed`,
+  its cycle was `integrated`, its best answer was `D`, and its posterior mass
+  was `1.000`.
+- A test-only delayed Chat Completions provider rendered `Executing probes`
+  before the request completed, then rendered the integrated cycle and
+  terminal completion on the same page.
+- At the default desktop viewport and at `390 x 844`, document scroll width
+  did not exceed client width and progress labels/statuses did not overlap.
+  The populated trace has a remaining layout concern: its JSON blocks expand
+  beyond the trace pane rather than fitting inside a constrained scrollable
+  block. This concern is recorded for follow-up and does not change the
+  streaming contract above.
 
 ## Acceptance Criteria
 

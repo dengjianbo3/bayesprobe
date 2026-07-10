@@ -434,6 +434,12 @@ Responsibilities:
 - call the shared core;
 - emit answer or belief-state projections;
 - apply continuation and stop conditions.
+- publish optional, typed autonomous-question progress observations without
+  changing runner control flow or domain state.
+
+The autonomous-question observer is an observation-only seam. Its phase and
+cycle observations are consumed by transports such as the WebUI; they do not
+select probes, construct evidence, update beliefs, or decide stop conditions.
 
 Current limitations:
 
@@ -527,6 +533,9 @@ Responsibilities:
 - use provider-backed gateways for separate `execute_probe` and
   `judge_evidence` calls;
 - run `AutonomousQuestionRunner`;
+- adapt runner observations into flushed NDJSON records on
+  `POST /api/runs/autonomous/stream` while retaining
+  `/api/runs/autonomous` for the synchronous JSON contract;
 - serialize the terminal run record, final answer, normalized belief state,
   integrated cycle, signal, evidence, update, and evolution traces;
 - expose run regime/status/stop reason, posterior mass, top-gap uncertainty,
@@ -541,7 +550,10 @@ to evidence, update posterior values, evolve hypotheses, or bypass
 Current limitations:
 
 - local-only;
-- no streaming UI;
+- progress is phase/cycle streaming, not token streaming;
+- an HTTP disconnect does not cooperatively cancel an in-flight provider call;
+- only autonomous WebUI runs stream in M0.10;
+- credentials remain request-scoped and page-memory-only;
 - no multi-user auth;
 - no provider-side cost/latency telemetry.
 
@@ -563,7 +575,7 @@ Current limitations:
 | Ledger/audit | Strong MVP | JSONL audit path has explicit canonical ownership and exactly-once probe-set/signal records. |
 | Benchmark harness | Good MVP | Toy and real methodology-path fixtures, suite/report flow, net-direction scoring, and belief-quality metrics exist. |
 | Config/CLI/SDK | Strong MVP | JSON experiment config, CLI, public core/runners/tool seams, package-root imports, and external execution regression coverage exist. |
-| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; completed run, normalized belief, integrated cycle, provider errors, and full traces are visible. The deterministic path is manually validated on desktop/mobile. |
+| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; synchronous JSON and autonomous NDJSON progress streams expose completed runs, normalized belief, integrated cycles, provider errors, and full traces. Streaming remains phase/cycle-only and credentials remain request-scoped and page-memory-only. |
 | Model gateway | Good MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Provider observability remains future work. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
