@@ -357,6 +357,7 @@ def test_webui_static_assets_define_operational_workbench():
     assert 'value="https://api.deepseek.com"' in index
     assert "model-name" in index
     assert 'value="deepseek-v4-flash"' in index
+    assert 'id="timeout-seconds" type="number" min="360" value="360"' in index
     assert "max-cycles" in index
     assert "trace-pane" in index
     assert 'id="progress-panel"' in index
@@ -1033,7 +1034,7 @@ def test_webui_openai_responses_provider_uses_request_key_and_redacts_response()
     assert FakeWebUIOpenAI.created_with == [
         {
             "api_key": "sk-webui-secret",
-            "timeout": 11.0,
+            "timeout": 360.0,
             "base_url": "https://provider.example/v1",
         }
     ]
@@ -1064,7 +1065,7 @@ def test_webui_openai_chat_completions_provider_uses_request_key_and_redacts_res
     assert FakeWebUIChatOpenAI.created_with == [
         {
             "api_key": "provider-secret-123",
-            "timeout": 11.0,
+            "timeout": 360.0,
             "base_url": "https://provider.example/v1",
         }
     ]
@@ -1073,6 +1074,44 @@ def test_webui_openai_chat_completions_provider_uses_request_key_and_redacts_res
         payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"]
         == "openai_chat_completions"
     )
+
+
+@pytest.mark.parametrize(
+    ("kind", "client_factory"),
+    [
+        ("openai_responses", FakeWebUIOpenAI),
+        ("openai_chat_completions", FakeWebUIChatOpenAI),
+    ],
+)
+@pytest.mark.parametrize(
+    ("requested_timeout", "expected_timeout"),
+    [(None, 360.0), (30, 360.0), (720, 720.0)],
+)
+def test_webui_provider_timeout_has_360_second_floor(
+    kind,
+    client_factory,
+    requested_timeout,
+    expected_timeout,
+):
+    client_factory.created_with = []
+    provider = {
+        "kind": kind,
+        "api_key": "provider-secret-123",
+        "base_url": "https://provider.example/v1",
+        "model": "provider-model",
+    }
+    if requested_timeout is not None:
+        provider["timeout_seconds"] = requested_timeout
+
+    webui._build_webui_model_gateway(provider, client_factory=client_factory)
+
+    assert client_factory.created_with == [
+        {
+            "api_key": "provider-secret-123",
+            "timeout": expected_timeout,
+            "base_url": "https://provider.example/v1",
+        }
+    ]
 
 
 def test_webui_multiple_choice_question_returns_answer_choice_projection():

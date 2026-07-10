@@ -530,6 +530,9 @@ Responsibilities:
 - serve the local autonomous workbench;
 - validate local WebUI requests;
 - build request-scoped provider gateways;
+- enforce a 360-second timeout floor for provider calls initiated by the
+  WebUI, while leaving the reusable SDK gateway timeout explicitly
+  configurable;
 - use provider-backed gateways for separate `execute_probe` and
   `judge_evidence` calls;
 - run `AutonomousQuestionRunner`;

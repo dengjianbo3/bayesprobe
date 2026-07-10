@@ -6,7 +6,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +37,7 @@ from bayesprobe.question_runner import (
 STATIC_DIR = Path(__file__).with_name("webui_static")
 OPENAI_COMPATIBLE_PROVIDER_KINDS = {"openai_responses", "openai_chat_completions"}
 SUPPORTED_PROVIDER_KINDS = {"deterministic"} | OPENAI_COMPATIBLE_PROVIDER_KINDS
+WEBUI_MIN_PROVIDER_TIMEOUT_SECONDS = 360.0
 
 
 class WebUIError(Exception):
@@ -514,10 +515,17 @@ def _build_webui_model_gateway(
                 model=model,
                 base_url=_optional_string(provider.get("base_url"), "provider.base_url"),
                 timeout_seconds=_optional_number_from_mapping(
-                    provider, "timeout_seconds", default=30.0
+                    provider,
+                    "timeout_seconds",
+                    default=WEBUI_MIN_PROVIDER_TIMEOUT_SECONDS,
                 ),
                 max_output_tokens=_optional_int_or_none(provider, "max_output_tokens"),
             )
+            if config.timeout_seconds < WEBUI_MIN_PROVIDER_TIMEOUT_SECONDS:
+                config = replace(
+                    config,
+                    timeout_seconds=WEBUI_MIN_PROVIDER_TIMEOUT_SECONDS,
+                )
         except ValueError as error:
             raise WebUIError(str(error)) from error
         client = None
