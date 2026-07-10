@@ -135,9 +135,14 @@ def test_anomaly_spawns_hypothesis_and_probe_candidate():
     spawned = result.hypotheses_by_id()["H_run_1_cycle_1_E1_spawned"]
     assert spawned.created_by == "spawned"
     assert spawned.prior == 0.12
-    assert spawned.posterior == 0.12
+    assert spawned.posterior != spawned.prior
     assert spawned.rivals == ["H1", "H2"]
     assert spawned.why_existing_hypotheses_failed == result.evolutions[0].reason
+    assert sum(
+        hypothesis.posterior
+        for hypothesis in result.hypotheses
+        if hypothesis.status != HypothesisStatus.RETIRED
+    ) == 1.0
     assert result.probe_candidates[0].source == "anomaly"
     assert result.probe_candidates[0].candidate_probe.target_hypotheses == [
         "H_run_1_cycle_1_E1_spawned"

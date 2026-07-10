@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from bayesprobe.belief import normalize_hypotheses
 from bayesprobe.schemas import (
     BeliefState,
     BeliefUpdate,
@@ -86,7 +87,7 @@ class HypothesisEvolutionEngine:
         probe_candidates.extend(reframe_result.probe_candidates)
 
         return HypothesisEvolutionResult(
-            hypotheses=hypotheses,
+            hypotheses=normalize_hypotheses(hypotheses),
             evolutions=evolutions,
             probe_candidates=probe_candidates,
         )

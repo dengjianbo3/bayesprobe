@@ -197,7 +197,9 @@ def test_write_benchmark_report_includes_belief_quality_metrics(tmp_path: Path):
     assert result["discarded_evidence_count"] == 0
     assert result["schema_violation_count"] == 0
     assert result["dominant_hypothesis_margin"] > 0
-    assert result["belief_revision_efficiency"] == 1.0
+    assert result["belief_revision_efficiency"] == pytest.approx(
+        result["dominant_hypothesis_margin"] / 2
+    )
 
 
 def test_loaded_dataset_runs_through_benchmark_harness(tmp_path: Path):

@@ -453,9 +453,20 @@ def _belief_revision_efficiency(
     belief_updates: list[BeliefUpdate],
     evidence_events: list[EvidenceEvent],
 ) -> float:
-    if not evidence_events:
+    accepted_evidence_count = sum(
+        1 for event in evidence_events if event.discard_reason is None
+    )
+    if accepted_evidence_count == 0:
         return 0.0
-    return round(len(belief_updates) / len(evidence_events), 6)
+    updates_by_hypothesis: dict[str, list[BeliefUpdate]] = {}
+    for update in belief_updates:
+        updates_by_hypothesis.setdefault(update.hypothesis_id, []).append(update)
+    total_variation = 0.5 * sum(
+        abs(updates[-1].posterior - updates[0].prior)
+        for updates in updates_by_hypothesis.values()
+        if updates
+    )
+    return round(total_variation / accepted_evidence_count, 6)
 
 
 def _mean(values) -> float:

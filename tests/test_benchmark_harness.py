@@ -43,7 +43,7 @@ def test_benchmark_harness_runs_active_only_sample():
     assert result.active_signal_count == 1
     assert result.passive_signal_count == 0
     assert result.evidence_event_count == 1
-    assert result.belief_update_count == 1
+    assert result.belief_update_count == 2
 
 
 def test_benchmark_harness_runs_passive_only_sample():
@@ -91,7 +91,7 @@ def test_benchmark_harness_runs_active_plus_passive_sample():
     assert result.active_signal_count == 1
     assert result.passive_signal_count == 1
     assert result.evidence_event_count == 2
-    assert result.belief_update_count == 3
+    assert result.belief_update_count == 4
 
 
 def test_benchmark_harness_aggregates_suite_metrics():
@@ -367,7 +367,9 @@ def test_benchmark_harness_reports_belief_quality_metrics():
     assert result.discarded_evidence_count == 0
     assert result.schema_violation_count == 0
     assert result.dominant_hypothesis_margin > 0
-    assert result.belief_revision_efficiency == 1.0
+    assert result.belief_revision_efficiency == pytest.approx(
+        result.dominant_hypothesis_margin / 2
+    )
 
 
 def test_benchmark_harness_counts_schema_violations_as_discarded_evidence():

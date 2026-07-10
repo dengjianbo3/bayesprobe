@@ -125,7 +125,7 @@ def test_synchronized_runner_processes_active_plus_passive_round():
     ]
     assert round_result.belief_state_projection.current_best_hypothesis == "H2"
     assert len(round_result.evidence_events) == 2
-    assert len(round_result.belief_updates) == 3
+    assert len(round_result.belief_updates) == 4
 
 
 def test_synchronized_runner_carries_projection_candidates_across_rounds():

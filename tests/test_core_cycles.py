@@ -251,6 +251,53 @@ def test_passive_projection_is_signal_not_direct_evidence():
     assert result.belief_updates
 
 
+def test_integrated_belief_state_rebuilds_current_summary():
+    core = BayesProbeCore()
+    cycle = CycleRecord(
+        cycle_id="cycle_summary",
+        run_id="run_1",
+        cycle_index=1,
+        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+    )
+    probe = ProbeDesign(
+        id="P_summary",
+        cycle_id=cycle.cycle_id,
+        target_hypotheses=["H1", "H2"],
+        inquiry_goal="Update and summarize the rival distribution.",
+        method="source_tracing",
+    )
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=ProbeSet(
+            probe_set_id="ps_summary",
+            cycle_id=cycle.cycle_id,
+            probes=[probe],
+            selection_reason="Belief summary fixture.",
+        ),
+        signals=[
+            ExternalSignal(
+                id="S_summary",
+                cycle_id="pending",
+                signal_kind=SignalKind.ACTIVE,
+                source_type="benchmark_stream",
+                source="fixture",
+                raw_content="SUPPORTS: The result supports H1.",
+                generated_by_probe=probe.id,
+                initial_target_hypotheses=["H1", "H2"],
+            )
+        ],
+    )
+
+    assert result.belief_state.belief_state_id == "run_1_bs_1"
+    assert result.belief_state.posterior_summary["top_hypothesis"] == "H1"
+    assert result.belief_state.posterior_summary[
+        "total_active_posterior"
+    ] == pytest.approx(1.0)
+    assert "no external signals" not in result.belief_state.uncertainty_summary
+
+
 def test_active_only_cycle_rejects_passive_signal():
     core = BayesProbeCore()
     cycle = CycleRecord(
@@ -889,7 +936,10 @@ def test_anomaly_triggers_hypothesis_evolution_before_next_probe():
     spawned = result.belief_state.hypotheses_by_id()["H_run_1_cycle_3_E1_spawned"]
     assert spawned.created_by == "spawned"
     assert spawned.prior == 0.12
-    assert spawned.posterior == 0.12
+    assert spawned.posterior != spawned.prior
+    assert sum(
+        hypothesis.posterior for hypothesis in result.belief_state.hypotheses
+    ) == pytest.approx(1.0)
     assert spawned.rivals == ["H1", "H2"]
     assert spawned.why_existing_hypotheses_failed == evolution.reason
     assert result.probe_candidates
@@ -939,8 +989,11 @@ def test_initial_target_hypotheses_limit_evidence_and_updates():
     assert event.target_hypotheses == ["H1"]
     assert set(event.likelihoods) == {"H1"}
     assert result.belief_state.hypotheses_by_id()["H1"].posterior > 0.5
-    assert result.belief_state.hypotheses_by_id()["H2"].posterior == 0.5
-    assert [update.hypothesis_id for update in result.belief_updates] == ["H1"]
+    assert result.belief_state.hypotheses_by_id()["H2"].posterior < 0.5
+    assert sum(
+        hypothesis.posterior for hypothesis in result.belief_state.hypotheses
+    ) == pytest.approx(1.0)
+    assert [update.hypothesis_id for update in result.belief_updates] == ["H1", "H2"]
 
 
 def test_probe_target_hypotheses_limit_evidence_when_signal_names_probe():
@@ -988,8 +1041,11 @@ def test_probe_target_hypotheses_limit_evidence_when_signal_names_probe():
     assert event.target_hypotheses == ["H1"]
     assert set(event.likelihoods) == {"H1"}
     assert result.belief_state.hypotheses_by_id()["H1"].posterior < 0.5
-    assert result.belief_state.hypotheses_by_id()["H2"].posterior == 0.5
-    assert [update.hypothesis_id for update in result.belief_updates] == ["H1"]
+    assert result.belief_state.hypotheses_by_id()["H2"].posterior > 0.5
+    assert sum(
+        hypothesis.posterior for hypothesis in result.belief_state.hypotheses
+    ) == pytest.approx(1.0)
+    assert [update.hypothesis_id for update in result.belief_updates] == ["H1", "H2"]
 
 
 def test_direct_signal_judgment_uses_model_gateway():

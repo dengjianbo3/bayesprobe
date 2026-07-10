@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from bayesprobe.belief import solve_updates
+from bayesprobe.belief import normalize_hypotheses, solve_updates, summarize_hypotheses
 from bayesprobe.evidence import EvidenceIntegrationGate, EvidenceIntegrationResult
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.inbox import SignalInbox
@@ -93,7 +93,7 @@ class BayesProbeCore:
             evidence_events=evidence_events,
             belief_updates=belief_updates,
         )
-        evolved_hypotheses = evolution_result.hypotheses
+        evolved_hypotheses = normalize_hypotheses(evolution_result.hypotheses)
         evolutions = evolution_result.evolutions
         probe_candidates = [
             *probe_candidates,
@@ -121,11 +121,17 @@ class BayesProbeCore:
             *existing_ledger_refs.get("probe_candidates", []),
             *(candidate.candidate_id for candidate in probe_candidates),
         ]
+        posterior_summary, uncertainty_summary = summarize_hypotheses(
+            evolved_hypotheses
+        )
         updated_state = belief_state.model_copy(
             update={
+                "belief_state_id": f"{cycle.run_id}_bs_{cycle.cycle_index}",
                 "cycle_id": cycle.cycle_id,
                 "cycle_index": cycle.cycle_index,
                 "hypotheses": evolved_hypotheses,
+                "posterior_summary": posterior_summary,
+                "uncertainty_summary": uncertainty_summary,
                 "ledger_refs": merged_ledger_refs,
             }
         )
