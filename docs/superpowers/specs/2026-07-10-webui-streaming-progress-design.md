@@ -315,6 +315,29 @@ Verification completed on 2026-07-10 after implementation.
   blocks scrolled internally. Progress-row overlap count was zero at both
   sizes, and the temporary viewport override was reset after verification.
 
+### Post-Review Hardening Verification
+
+Final review identified and closed observer aliasing, submit re-entry, bounded
+event-shape, late-failure/disconnect coverage, and provisional-answer labeling
+gaps. Verification was repeated on 2026-07-10 at commit `1f41db3`:
+
+- `pytest tests/test_question_runner.py tests/test_webui.py tests/test_public_api_and_config.py -q`:
+  `98 passed in 5.36s`.
+- `node --test tests/test_webui_stream.js`: `9 pass`, `0 fail`.
+- `pytest -q`: `383 passed, 2 skipped in 5.69s`.
+- The latest server was restarted at `http://127.0.0.1:8768` and returned
+  `200 OK`.
+- A deterministic two-cycle browser run completed with all 15 phase rows,
+  final answer D, normalized posterior mass `1.000`, and the Answer Projection
+  label `Final`. A non-secret page-held key survived the run and a provider
+  switch.
+- With a five-second delayed provider, the in-flight browser state showed
+  `Executing probes` as `Active`, Answer Projection as `Current`, and the run,
+  provider, and key controls disabled. Completion changed the label to `Final`,
+  restored all controls, retained the page-held key, and rendered answer D.
+- Whole-branch re-review reported no Critical or Important findings. Its only
+  Minor documentation inconsistency is resolved by this subsection.
+
 ## Acceptance Criteria
 
 1. A user can run multiple real-provider questions without re-entering the API
