@@ -6,7 +6,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +25,9 @@ from bayesprobe.openai_gateway import (
 )
 from bayesprobe.probe_executor import ModelBackedProbeToolGateway, ProbeExecutor
 from bayesprobe.question_runner import (
+    AutonomousQuestionCycleResult,
+    AutonomousQuestionProgress,
+    AutonomousQuestionProgressKind,
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunResult,
     AutonomousQuestionRunner,
@@ -58,45 +61,27 @@ class ProviderError(WebUIError):
     error_type = "provider_error"
 
 
+@dataclass(frozen=True)
+class _PreparedAutonomousRun:
+    runner: AutonomousQuestionRunner
+    input: InitializeRunInput
+    provider_kind: str
+
+
 def handle_autonomous_run_request(
     payload: Mapping[str, Any],
     *,
     client_factory: Callable[..., Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     try:
-        request = _parse_autonomous_request(payload)
-        provider_kind = _optional_string(
-            request["provider"].get("kind"),
-            "provider.kind",
-            default="deterministic",
-        )
-        gateway = _build_webui_model_gateway(
-            request["provider"], client_factory=client_factory
-        )
-        core = BayesProbeCore(model_gateway=gateway)
-        executor = None
-        if provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
-            executor = ProbeExecutor(
-                gateway=ModelBackedProbeToolGateway(gateway),
-                ledger=core.ledger,
-            )
-        runner = AutonomousQuestionRunner(
-            core=core,
-            executor=executor,
-            config=request["runner_config"],
-        )
-        run_id = _webui_run_id()
+        prepared = _prepare_autonomous_run(payload, client_factory=client_factory)
         try:
-            result = runner.run_question(
-                InitializeRunInput(
-                    run_id=run_id,
-                    problem=request["question"],
-                    context=request["context"],
-                )
-            )
+            result = prepared.runner.run_question(prepared.input)
         except Exception as error:
-            if provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
-                raise ProviderError(_provider_error_message(provider_kind)) from error
+            if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
+                raise ProviderError(
+                    _provider_error_message(prepared.provider_kind)
+                ) from error
             raise
         return HTTPStatus.OK, serialize_autonomous_run_result(result)
     except WebUIError as error:
@@ -105,6 +90,35 @@ def handle_autonomous_run_request(
         return int(HTTPStatus.INTERNAL_SERVER_ERROR), _error_payload(
             "server_error", _generic_server_error_message()
         )
+
+
+def handle_autonomous_stream_request(
+    payload: Mapping[str, Any],
+    *,
+    event_sink: Callable[[Mapping[str, Any]], None],
+    client_factory: Callable[..., Any] | None = None,
+) -> tuple[int, dict[str, Any] | None]:
+    emitter = _AutonomousProgressEventEmitter(event_sink)
+    try:
+        prepared = _prepare_autonomous_run(
+            payload,
+            client_factory=client_factory,
+            progress_observer=emitter.emit,
+        )
+    except WebUIError as error:
+        return int(error.status_code), _error_payload(error.error_type, error.message)
+
+    try:
+        prepared.runner.run_question(prepared.input)
+    except Exception:
+        if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
+            emitter.emit_failure(
+                "provider_error",
+                _provider_error_message(prepared.provider_kind),
+            )
+        else:
+            emitter.emit_failure("server_error", _generic_server_error_message())
+    return int(HTTPStatus.OK), None
 
 
 def serialize_autonomous_run_result(
@@ -118,23 +132,123 @@ def serialize_autonomous_run_result(
         "initial_belief_state": _dump_domain(result.initial_belief_state),
         "final_belief_state": _dump_domain(result.final_belief_state),
         "cycles": [
-            {
-                "cycle_id": cycle.cycle.cycle_id,
-                "signal_shape": cycle.cycle.signal_shape.value,
-                "cycle": _dump_domain(cycle.cycle),
-                "probes": _dump_domain(cycle.probe_set.probes),
-                "signals": _dump_domain(cycle.signals),
-                "evidence_events": _dump_domain(cycle.evidence_events),
-                "belief_updates": _dump_domain(cycle.belief_updates),
-                "hypothesis_evolutions": _dump_domain(cycle.hypothesis_evolutions),
-                "answer_projection": _dump_domain(cycle.answer_projection),
-            }
-            for cycle in result.cycle_results
+            serialize_autonomous_cycle_result(cycle) for cycle in result.cycle_results
         ],
     }
 
 
-def create_handler_class() -> type[BaseHTTPRequestHandler]:
+def serialize_autonomous_cycle_result(
+    cycle: AutonomousQuestionCycleResult,
+) -> dict[str, Any]:
+    return {
+        "cycle_id": cycle.cycle.cycle_id,
+        "signal_shape": cycle.cycle.signal_shape.value,
+        "cycle": _dump_domain(cycle.cycle),
+        "probes": _dump_domain(cycle.probe_set.probes),
+        "signals": _dump_domain(cycle.signals),
+        "belief_state": _dump_domain(cycle.belief_state),
+        "evidence_events": _dump_domain(cycle.evidence_events),
+        "belief_updates": _dump_domain(cycle.belief_updates),
+        "hypothesis_evolutions": _dump_domain(cycle.hypothesis_evolutions),
+        "answer_projection": _dump_domain(cycle.answer_projection),
+    }
+
+
+class _AutonomousProgressEventEmitter:
+    def __init__(self, sink: Callable[[Mapping[str, Any]], None]) -> None:
+        self._sink = sink
+        self.sequence = 0
+        self.run_id: str | None = None
+
+    @property
+    def started(self) -> bool:
+        return self.sequence > 0
+
+    def emit(self, progress: AutonomousQuestionProgress) -> None:
+        self.run_id = progress.run_id
+        self.sequence += 1
+        self._sink(
+            {
+                "event": progress.kind.value,
+                "sequence": self.sequence,
+                "timestamp": _webui_timestamp(),
+                "run_id": progress.run_id,
+                "cycle_id": progress.cycle_id,
+                "cycle_index": progress.cycle_index,
+                "data": _serialize_progress_data(progress),
+            }
+        )
+
+    def emit_failure(self, error_type: str, message: str) -> None:
+        self.sequence += 1
+        self._sink(
+            {
+                "event": "run_failed",
+                "sequence": self.sequence,
+                "timestamp": _webui_timestamp(),
+                "run_id": self.run_id,
+                "cycle_id": None,
+                "cycle_index": None,
+                "data": {
+                    "error": {
+                        "type": error_type,
+                        "message": _sanitize_error_message(message),
+                    }
+                },
+            }
+        )
+
+
+def _serialize_progress_data(progress: AutonomousQuestionProgress) -> dict[str, Any]:
+    if progress.kind == AutonomousQuestionProgressKind.RUN_STARTED:
+        return {}
+    if progress.kind == AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED:
+        return {
+            "run": _dump_domain(progress.run),
+            "belief_state": _dump_domain(progress.belief_state),
+        }
+    if progress.kind == AutonomousQuestionProgressKind.CYCLE_STARTED:
+        return {"belief_state": _dump_domain(progress.belief_state)}
+    if progress.kind == AutonomousQuestionProgressKind.PROBE_SET_PLANNED:
+        return {
+            "belief_state": _dump_domain(progress.belief_state),
+            "probes": _dump_domain(progress.probe_set),
+        }
+    if progress.kind == AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED:
+        return {
+            "belief_state": _dump_domain(progress.belief_state),
+            "probes": _dump_domain(progress.probe_set),
+        }
+    if progress.kind == AutonomousQuestionProgressKind.SIGNALS_COLLECTED:
+        return {
+            "belief_state": _dump_domain(progress.belief_state),
+            "probes": _dump_domain(progress.probe_set),
+            "signals": _dump_domain(progress.signals),
+        }
+    if progress.kind == AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED:
+        return {
+            "belief_state": _dump_domain(progress.belief_state),
+            "probes": _dump_domain(progress.probe_set),
+            "signals": _dump_domain(progress.signals),
+        }
+    if progress.kind == AutonomousQuestionProgressKind.CYCLE_INTEGRATED:
+        return (
+            serialize_autonomous_cycle_result(progress.cycle_result)
+            if progress.cycle_result is not None
+            else {}
+        )
+    if progress.kind == AutonomousQuestionProgressKind.RUN_COMPLETED:
+        return (
+            serialize_autonomous_run_result(progress.result)
+            if progress.result is not None
+            else {}
+        )
+    raise ValueError(f"unsupported progress kind: {progress.kind}")
+
+
+def create_handler_class(
+    *, client_factory: Callable[..., Any] | None = None
+) -> type[BaseHTTPRequestHandler]:
     class BayesProbeWebUIHandler(BaseHTTPRequestHandler):
         server_version = "BayesProbeWebUI/0.1"
 
@@ -143,6 +257,9 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             try:
+                if self.path == "/api/runs/autonomous/stream":
+                    self._handle_autonomous_stream_post()
+                    return
                 if self.path != "/api/runs/autonomous":
                     self._send_json(
                         HTTPStatus.NOT_FOUND,
@@ -150,7 +267,10 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
                     )
                     return
                 payload = self._read_json_body()
-                status, response = handle_autonomous_run_request(payload)
+                status, response = handle_autonomous_run_request(
+                    payload,
+                    client_factory=client_factory,
+                )
                 self._send_json(status, response)
             except WebUIError as error:
                 self._send_json(
@@ -162,6 +282,39 @@ def create_handler_class() -> type[BaseHTTPRequestHandler]:
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     _error_payload("server_error", _generic_server_error_message()),
                 )
+
+        def _handle_autonomous_stream_post(self) -> None:
+            payload = self._read_json_body()
+            headers_sent = False
+            disconnected = False
+
+            def emit_event(event: Mapping[str, Any]) -> None:
+                nonlocal disconnected, headers_sent
+                if disconnected:
+                    return
+                try:
+                    if not headers_sent:
+                        self.send_response(HTTPStatus.OK)
+                        self.send_header(
+                            "Content-Type", "application/x-ndjson; charset=utf-8"
+                        )
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        headers_sent = True
+                    self.wfile.write(
+                        json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n"
+                    )
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    disconnected = True
+
+            status, error = handle_autonomous_stream_request(
+                payload,
+                event_sink=emit_event,
+                client_factory=client_factory,
+            )
+            if error is not None and not headers_sent:
+                self._send_json(status, error)
 
         def do_GET(self) -> None:  # noqa: N802
             try:
@@ -259,6 +412,45 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.server_close()
     return 0
+
+
+def _prepare_autonomous_run(
+    payload: Mapping[str, Any],
+    *,
+    client_factory: Callable[..., Any] | None,
+    progress_observer: Callable[[AutonomousQuestionProgress], None] | None = None,
+) -> _PreparedAutonomousRun:
+    request = _parse_autonomous_request(payload)
+    provider_kind = _optional_string(
+        request["provider"].get("kind"),
+        "provider.kind",
+        default="deterministic",
+    )
+    assert provider_kind is not None
+    gateway = _build_webui_model_gateway(
+        request["provider"], client_factory=client_factory
+    )
+    core = BayesProbeCore(model_gateway=gateway)
+    executor = None
+    if provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
+        executor = ProbeExecutor(
+            gateway=ModelBackedProbeToolGateway(gateway),
+            ledger=core.ledger,
+        )
+    return _PreparedAutonomousRun(
+        runner=AutonomousQuestionRunner(
+            core=core,
+            executor=executor,
+            config=request["runner_config"],
+            progress_observer=progress_observer,
+        ),
+        input=InitializeRunInput(
+            run_id=_webui_run_id(),
+            problem=request["question"],
+            context=request["context"],
+        ),
+        provider_kind=provider_kind,
+    )
 
 
 def _parse_autonomous_request(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -456,6 +648,10 @@ def _webui_run_id() -> str:
     return f"webui_{int(time.time() * 1000)}"
 
 
+def _webui_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def _require_loopback_host(host: str) -> str:
     if host == "localhost":
         return host
@@ -509,6 +705,8 @@ if __name__ == "__main__":
 __all__ = [
     "create_handler_class",
     "handle_autonomous_run_request",
+    "handle_autonomous_stream_request",
     "main",
+    "serialize_autonomous_cycle_result",
     "serialize_autonomous_run_result",
 ]

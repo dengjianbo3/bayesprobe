@@ -3,7 +3,7 @@ import json
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 
 import pytest
 
@@ -11,6 +11,7 @@ import bayesprobe.webui as webui
 from bayesprobe.webui import (
     create_handler_class,
     handle_autonomous_run_request,
+    handle_autonomous_stream_request,
 )
 
 
@@ -18,8 +19,10 @@ STATIC_DIR = Path(__file__).resolve().parents[1] / "bayesprobe" / "webui_static"
 
 
 @contextmanager
-def serve_webui():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler_class())
+def serve_webui(client_factory=None):
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), create_handler_class(client_factory=client_factory)
+    )
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -30,8 +33,8 @@ def serve_webui():
         server.server_close()
 
 
-def request_http(method, path, body=None, headers=None):
-    with serve_webui() as address:
+def request_http(method, path, body=None, headers=None, client_factory=None):
+    with serve_webui(client_factory=client_factory) as address:
         connection = HTTPConnection(*address)
         try:
             connection.request(method, path, body=body, headers=headers or {})
@@ -42,8 +45,10 @@ def request_http(method, path, body=None, headers=None):
     return response.status, response.getheader("Content-Type"), payload
 
 
-def serve_test_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler_class())
+def serve_test_server(client_factory=None):
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), create_handler_class(client_factory=client_factory)
+    )
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread
@@ -103,6 +108,86 @@ def test_webui_deterministic_autonomous_run_returns_trace():
     assert cycle["evidence_events"]
     assert cycle["belief_updates"]
     assert cycle["answer_projection"]["current_best_hypothesis"] == "H1"
+
+
+def test_webui_stream_emits_ordered_cycle_and_terminal_events():
+    events = []
+    status, error = handle_autonomous_stream_request(
+        {
+            "question": "Does the stream expose a completed BayesProbe cycle?",
+            "context": "SUPPORTS: deterministic context favors H1.",
+            "provider": {"kind": "deterministic"},
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        event_sink=events.append,
+    )
+
+    assert status == 200
+    assert error is None
+    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
+    assert events[0]["event"] == "run_started"
+    assert events[-2]["event"] == "cycle_integrated"
+    assert events[-1]["event"] == "run_completed"
+    cycle = events[-2]["data"]
+    assert cycle["cycle"]["boundary_status"] == "integrated"
+    assert cycle["belief_state"]["posterior_summary"][
+        "total_active_posterior"
+    ] == pytest.approx(1.0)
+
+
+def test_webui_stream_redacts_provider_secret_from_events():
+    events = []
+    status, error = handle_autonomous_stream_request(
+        {
+            "question": "Can streaming use a Chat Completions provider?",
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "model": "provider-model",
+            },
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        event_sink=events.append,
+        client_factory=FakeWebUIChatOpenAI,
+    )
+
+    assert status == 200
+    assert error is None
+    assert "provider-secret-123" not in json.dumps(events)
+
+
+def test_webui_stream_returns_preflight_validation_as_http_error_payload():
+    events = []
+    status, error = handle_autonomous_stream_request(
+        {"question": ""},
+        event_sink=events.append,
+    )
+
+    assert status == 400
+    assert error["error"]["type"] == "validation_error"
+    assert events == []
+
+
+def test_webui_stream_emits_terminal_sanitized_provider_failure():
+    events = []
+    status, error = handle_autonomous_stream_request(
+        {
+            "question": "Will a streaming provider failure stay sanitized?",
+            "provider": {
+                "kind": "openai_responses",
+                "api_key": "sk-webui-secret",
+                "model": "gpt-5.5",
+            },
+        },
+        event_sink=events.append,
+        client_factory=FailingWebUIOpenAI,
+    )
+
+    assert status == 200
+    assert error is None
+    assert events[-1]["event"] == "run_failed"
+    assert events[-1]["data"]["error"]["type"] == "provider_error"
+    assert "sk-webui-secret" not in json.dumps(events)
 
 
 def test_webui_deterministic_inline_mcq_context_selects_explicit_choice():
@@ -278,10 +363,49 @@ def test_webui_http_server_handles_autonomous_run_post():
     assert response["cycles"][0]["evidence_events"]
 
 
+def test_webui_http_server_streams_valid_ndjson():
+    status, content_type, payload = request_http(
+        "POST",
+        "/api/runs/autonomous/stream",
+        body=json.dumps(
+            {
+                "question": "Does HTTP expose progress?",
+                "provider": {"kind": "deterministic"},
+                "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+
+    events = [json.loads(line) for line in payload.splitlines()]
+    assert status == 200
+    assert content_type == "application/x-ndjson; charset=utf-8"
+    assert events[0]["event"] == "run_started"
+    assert events[-1]["event"] == "run_completed"
+
+
 def test_webui_handler_returns_invalid_json_for_malformed_request_body():
     status, content_type, payload = request_http(
         "POST",
         "/api/runs/autonomous",
+        body=b"{",
+        headers={"Content-Length": "1", "Content-Type": "application/json"},
+    )
+
+    assert status == 400
+    assert content_type == "application/json; charset=utf-8"
+    assert json.loads(payload) == {
+        "error": {
+            "type": "invalid_json",
+            "message": "request body must be valid JSON",
+        }
+    }
+
+
+def test_webui_stream_handler_returns_invalid_json_for_malformed_request_body():
+    status, content_type, payload = request_http(
+        "POST",
+        "/api/runs/autonomous/stream",
         body=b"{",
         headers={"Content-Length": "1", "Content-Type": "application/json"},
     )
@@ -425,6 +549,79 @@ class FakeWebUIChatOpenAI:
             (),
             {"completions": FakeWebUIChatCompletions()},
         )()
+
+
+class BlockingWebUIChatCompletions:
+    provider_entered = Event()
+    release_provider = Event()
+
+    def create(self, **payload):
+        request = json.loads(payload["messages"][1]["content"])
+        if request["task"] == "execute_probe":
+            self.provider_entered.set()
+            assert self.release_provider.wait(timeout=5)
+            content = {"raw_content": "The provider completed the active probe."}
+        else:
+            content = {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "The provider judged the active probe.",
+                "quality_overrides": {},
+            }
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+
+class BlockingWebUIChatOpenAI:
+    def __init__(self, **kwargs):
+        del kwargs
+        self.chat = type(
+            "FakeChat",
+            (),
+            {"completions": BlockingWebUIChatCompletions()},
+        )()
+
+
+def test_webui_stream_flushes_first_event_before_provider_completion():
+    BlockingWebUIChatCompletions.provider_entered.clear()
+    BlockingWebUIChatCompletions.release_provider.clear()
+    server, thread = serve_test_server(client_factory=BlockingWebUIChatOpenAI)
+    connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    try:
+        connection.request(
+            "POST",
+            "/api/runs/autonomous/stream",
+            body=json.dumps(
+                {
+                    "question": "Does streaming flush before provider completion?",
+                    "provider": {
+                        "kind": "openai_chat_completions",
+                        "api_key": "provider-secret-123",
+                        "model": "provider-model",
+                    },
+                    "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        assert BlockingWebUIChatCompletions.provider_entered.wait(timeout=5)
+        first_event = json.loads(response.readline())
+        assert response.status == 200
+        assert first_event["event"] == "run_started"
+        assert not BlockingWebUIChatCompletions.release_provider.is_set()
+
+        BlockingWebUIChatCompletions.release_provider.set()
+        remaining_events = [json.loads(line) for line in response.read().splitlines()]
+        assert remaining_events[-1]["event"] == "run_completed"
+    finally:
+        BlockingWebUIChatCompletions.release_provider.set()
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 class FakeChoiceAwareChatCompletions:
