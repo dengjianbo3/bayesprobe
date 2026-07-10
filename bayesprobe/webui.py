@@ -112,6 +112,7 @@ def serialize_autonomous_run_result(
 ) -> dict[str, Any]:
     return {
         "run_id": result.run.run_id,
+        "run": _dump_domain(result.run),
         "stop_reason": result.stop_reason.value,
         "final_answer": _dump_domain(result.final_answer_projection),
         "initial_belief_state": _dump_domain(result.initial_belief_state),

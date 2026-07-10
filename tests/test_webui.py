@@ -76,12 +76,24 @@ def test_webui_deterministic_autonomous_run_returns_trace():
     assert status == 200
     assert payload["run_id"].startswith("webui_")
     assert payload["stop_reason"] == "max_cycles"
+    assert payload["run"]["status"] == "completed"
+    assert payload["run"]["regime"] == "autonomous"
+    assert payload["run"]["current_cycle_id"] == payload["cycles"][0]["cycle_id"]
     assert payload["final_answer"]["current_best_hypothesis"] == "H1"
     assert payload["initial_belief_state"]["cycle_id"] == "cycle_0"
     assert payload["final_belief_state"]["cycle_index"] == 1
+    assert payload["final_belief_state"]["posterior_summary"][
+        "total_active_posterior"
+    ] == pytest.approx(1.0)
+    assert "no external signals" not in payload["final_belief_state"][
+        "uncertainty_summary"
+    ]
     assert len(payload["cycles"]) == 1
     cycle = payload["cycles"][0]
     assert cycle["signal_shape"] == "active_plus_passive"
+    assert cycle["cycle"]["boundary_status"] == "integrated"
+    assert cycle["cycle"]["boundary_closed_at"] is not None
+    assert cycle["cycle"]["completed_at"] is not None
     assert [signal["signal_kind"] for signal in cycle["signals"]] == [
         "active",
         "passive",
@@ -160,6 +172,9 @@ def test_webui_static_assets_define_operational_workbench():
     assert "Responses-compatible providers only." in script
     assert "Check base URL, model, API key, and max output tokens." in script
     assert "Best answer / hypothesis" in script
+    assert "Posterior mass" in script
+    assert "Cycle lifecycle" in script
+    assert "boundary_status" in script
     assert "Chat Completions stays visible in v0.1 but is not supported." not in script
     assert 'provider.kind === "openai_chat_completions"' in script
     assert 'providerKind.value === "openai_chat_completions"' not in script

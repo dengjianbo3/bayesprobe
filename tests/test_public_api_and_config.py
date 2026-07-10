@@ -83,6 +83,38 @@ def test_public_sdk_exports_supported_names():
         "parse_openai_structured_response",
         "run_benchmark_experiment",
         "write_benchmark_report",
+        "AutonomousQuestionRunConfig",
+        "AutonomousQuestionRunResult",
+        "AutonomousQuestionRunner",
+        "AutonomousQuestionStopReason",
+        "BayesProbeCore",
+        "BayesProbeInitializer",
+        "InitializeRunInput",
+        "InitializationResult",
+        "HypothesisSeed",
+        "JsonlLedgerStore",
+        "ProbeExecutionContext",
+        "ProbeExecutionResult",
+        "ProbeExecutor",
+        "ProbeToolGateway",
+        "DeterministicProbeToolGateway",
+        "SynchronizedRoundInput",
+        "SynchronizedRoundResult",
+        "SynchronizedRoundRunner",
+        "SynchronizedRoundShape",
+        "SynchronizedRunInput",
+        "SynchronizedRunResult",
+        "RunRegime",
+        "RunStatus",
+        "CycleSignalShape",
+        "SignalKind",
+        "ExternalSignal",
+        "BeliefState",
+        "Hypothesis",
+        "ProbeDesign",
+        "ProbeSet",
+        "AnswerProjection",
+        "BeliefStateProjection",
     }
 
     assert expected_names.issubset(set(bayesprobe.__all__))
@@ -118,6 +150,29 @@ def test_public_sdk_exports_supported_names():
     assert parse_openai_structured_response is not None
     assert run_benchmark_experiment is not None
     assert write_benchmark_report is not None
+    for name in expected_names:
+        assert getattr(bayesprobe, name) is not None
+
+
+def test_public_sdk_runs_autonomous_question_without_internal_imports():
+    runner = bayesprobe.AutonomousQuestionRunner(
+        core=bayesprobe.BayesProbeCore(),
+        config=bayesprobe.AutonomousQuestionRunConfig(
+            max_cycles=1,
+            max_probes_per_cycle=1,
+        ),
+    )
+
+    result = runner.run_question(
+        bayesprobe.InitializeRunInput(
+            run_id="public_sdk_autonomous",
+            problem="Does the supported package-root interface run BayesProbe?",
+        )
+    )
+
+    assert result.run.status == bayesprobe.RunStatus.COMPLETED
+    assert result.run.regime == bayesprobe.RunRegime.AUTONOMOUS
+    assert result.final_answer_projection is not None
 
 
 def test_pyproject_declares_optional_openai_extra_without_required_dependency():

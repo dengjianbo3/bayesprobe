@@ -48,7 +48,10 @@ async function handleSubmit(event) {
     }
 
     renderRun(payload);
-    setStatus(`Stopped: ${payload.stop_reason}`, "ok");
+    setStatus(
+      `${payload.run?.status || "completed"}: ${payload.run?.regime || "autonomous"} / ${payload.stop_reason}`,
+      "ok"
+    );
   } catch (error) {
     clearRunOutput("failed");
     setStatus(error.message || "Run failed", "error");
@@ -155,6 +158,20 @@ function renderBeliefs(beliefState) {
     return;
   }
 
+  const summary = beliefState?.posterior_summary || {};
+  beliefPanel.appendChild(
+    kv("Posterior mass", formatNumber(summary.total_active_posterior))
+  );
+  beliefPanel.appendChild(
+    kv(
+      "Top / gap",
+      `${summary.top_hypothesis || "n/a"} / ${formatNumber(summary.posterior_gap)}`
+    )
+  );
+  beliefPanel.appendChild(
+    kv("Current uncertainty", beliefState?.uncertainty_summary || "")
+  );
+
   for (const hypothesis of hypotheses) {
     const row = document.createElement("div");
     row.className = "belief-row";
@@ -204,11 +221,20 @@ function renderCycle(cycle) {
   details.open = true;
 
   const summary = document.createElement("summary");
-  summary.textContent = `${cycle.cycle_id} (${cycle.signal_shape})`;
+  const boundaryStatus = cycle.cycle?.boundary_status || "unknown";
+  summary.textContent = `${cycle.cycle_id} (${cycle.signal_shape}) | ${boundaryStatus}`;
   details.appendChild(summary);
 
   const stack = document.createElement("div");
   stack.className = "trace-stack";
+  stack.appendChild(
+    block("Cycle lifecycle", {
+      boundary_status: cycle.cycle?.boundary_status,
+      started_at: cycle.cycle?.started_at,
+      boundary_closed_at: cycle.cycle?.boundary_closed_at,
+      completed_at: cycle.cycle?.completed_at,
+    })
+  );
   stack.appendChild(block("Probes", cycle.probes));
   stack.appendChild(block("Signals", cycle.signals));
   stack.appendChild(block("Evidence", cycle.evidence_events));
