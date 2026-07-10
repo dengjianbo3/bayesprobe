@@ -900,6 +900,10 @@ python3 -m bayesprobe.webui --host 127.0.0.1 --port 8766
 
 Verify `GET http://127.0.0.1:8766/` returns `200`.
 
+If port 8766 is occupied by a non-BayesProbe process, do not terminate that
+process. Use the next available local port, verify the corresponding URL, and
+record the deviation in the verification record.
+
 - [ ] **Step 6: Verify key retention and event rendering in a real browser**
 
 Using the browser DOM and stable locators:
@@ -960,4 +964,4 @@ git push origin main
 ```
 
 Confirm `git rev-parse HEAD origin/main` prints the same commit twice and leave
-the WebUI server running at `http://127.0.0.1:8766` for manual testing.
+the WebUI server running at the URL verified in Step 5 for manual testing.

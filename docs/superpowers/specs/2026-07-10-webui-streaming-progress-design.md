@@ -5,15 +5,16 @@ Status: Implemented and verified
 
 ## Context
 
-The autonomous WebUI currently sends one JSON request to
-`/api/runs/autonomous` and waits for the complete run result. During provider
-calls the only visible state is a generic running message, even though the
-runner is progressing through initialization, probe planning, probe execution,
+Before this change, the autonomous WebUI sent one JSON request to
+`/api/runs/autonomous` and waited for the complete run result. During provider
+calls, the only visible state was a generic running message, even though the
+runner progressed through initialization, probe planning, probe execution,
 signal collection, evidence integration, and posterior revision.
 
-The frontend also clears the API-key input immediately after building a request
-and again when the request finishes. This prevents consecutive runs in one page
-session and provides no additional protection against an already running page.
+The frontend also cleared the API-key input immediately after building a request
+and again when the request finished. This prevented consecutive runs in one
+page session and provided no additional protection against an already running
+page.
 
 This change adds truthful phase and per-cycle progress without changing the
 BayesProbe control flow. It also keeps the API key in the current DOM until the
