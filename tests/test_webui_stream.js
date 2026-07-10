@@ -94,41 +94,7 @@ class MockTextDecoder {
   }
 }
 
-class MockReader {
-  constructor(chunks) {
-    this.chunks = chunks;
-    this.index = 0;
-    this.cancelCalls = 0;
-    this.releaseLockCalls = 0;
-  }
-
-  async read() {
-    if (this.index < this.chunks.length) {
-      return { value: this.chunks[this.index++], done: false };
-    }
-    return { value: undefined, done: true };
-  }
-
-  async cancel() {
-    this.cancelCalls += 1;
-  }
-
-  releaseLock() {
-    this.releaseLockCalls += 1;
-  }
-}
-
-class MockReadableStream {
-  constructor(chunks) {
-    this.reader = new MockReader(chunks);
-  }
-
-  getReader() {
-    return this.reader;
-  }
-}
-
-function loadApp() {
+function loadApp({ fetch = () => Promise.reject(new Error("unexpected fetch")) } = {}) {
   const elements = new Map();
   const ids = [
     "run-form",
@@ -176,28 +142,46 @@ function loadApp() {
     Set,
     String,
     Number,
+    ReadableStream,
     TextDecoder: MockTextDecoder,
     Uint8Array,
+    fetch,
   });
 
-  vm.runInContext(fs.readFileSync(APP_PATH, "utf8"), context, {
-    filename: APP_PATH,
-  });
+  const source = `${fs.readFileSync(APP_PATH, "utf8")}
+globalThis.__webuiTestExports = { consumeRunStream, handleProgressEvent, handleSubmit };`;
+  vm.runInContext(source, context, { filename: APP_PATH });
   return {
-    api: vm.runInContext(
-      "({ consumeRunStream, handleProgressEvent })",
-      context
-    ),
+    api: context.__webuiTestExports,
     elements,
   };
 }
 
-function streamFromText(text, splitAt) {
+function streamFromText(
+  text,
+  splitAt,
+  { onCancel = () => {}, stayOpen = false } = {}
+) {
   const encoder = new MockTextEncoder();
   const chunks = splitAt == null
     ? [encoder.encode(text)]
     : [encoder.encode(text.slice(0, splitAt)), encoder.encode(text.slice(splitAt))];
-  return new MockReadableStream(chunks);
+  let chunkIndex = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (chunkIndex < chunks.length) {
+        controller.enqueue(chunks[chunkIndex++]);
+      } else if (stayOpen) {
+        return new Promise(() => {});
+      } else {
+        controller.close();
+      }
+    },
+    cancel(reason) {
+      onCancel(reason);
+    },
+  });
+  return stream;
 }
 
 function integratedCycleEvent() {
@@ -242,7 +226,7 @@ function integratedCycleEvent() {
   };
 }
 
-test("consumes split NDJSON chunks and releases a completed reader", async () => {
+test("consumes split NDJSON chunks and unlocks a completed stream", async () => {
   const { api } = loadApp();
   const events = [
     { event: "run_started", sequence: 1, run_id: "run-1", data: {} },
@@ -255,24 +239,28 @@ test("consumes split NDJSON chunks and releases a completed reader", async () =>
   await api.consumeRunStream({ body: stream }, (event) => received.push(event.event));
 
   assert.deepEqual(received, ["run_started", "run_completed"]);
-  assert.equal(stream.reader.cancelCalls, 0);
-  assert.equal(stream.reader.releaseLockCalls, 1);
+  assert.equal(stream.locked, false);
 });
 
-test("cancels and releases a reader after a malformed progress event", async () => {
+test("cancels and unlocks a stream after a malformed progress event", async () => {
   const { api } = loadApp();
-  const stream = streamFromText('{"event":"run_started"}\nnot-json\n');
+  let cancelCalls = 0;
+  const stream = streamFromText(
+    '{"event":"run_started"}\nnot-json\n',
+    undefined,
+    { onCancel: () => { cancelCalls += 1; }, stayOpen: true }
+  );
 
   await assert.rejects(
     api.consumeRunStream({ body: stream }, () => {}),
     /invalid progress event/
   );
 
-  assert.equal(stream.reader.cancelCalls, 1);
-  assert.equal(stream.reader.releaseLockCalls, 1);
+  assert.equal(cancelCalls, 1);
+  assert.equal(stream.locked, false);
 });
 
-test("rejects incomplete streams after releasing the reader", async () => {
+test("rejects incomplete streams after unlocking at EOF", async () => {
   const { api } = loadApp();
   const stream = streamFromText('{"event":"run_completed"');
 
@@ -281,8 +269,7 @@ test("rejects incomplete streams after releasing the reader", async () => {
     /incomplete event/
   );
 
-  assert.equal(stream.reader.cancelCalls, 0);
-  assert.equal(stream.reader.releaseLockCalls, 1);
+  assert.equal(stream.locked, false);
 });
 
 test("preserves an integrated cycle when a sanitized terminal failure arrives", async () => {
@@ -304,10 +291,50 @@ test("preserves an integrated cycle when a sanitized terminal failure arrives", 
     /provider request failed/
   );
 
-  assert.equal(stream.reader.cancelCalls, 0);
-  assert.equal(stream.reader.releaseLockCalls, 1);
+  assert.equal(stream.locked, false);
   assert.equal(elements.get("answer-panel").children.length, 5);
   assert.ok(elements.get("belief-panel").children.length > 0);
   assert.equal(elements.get("trace-pane").children.length, 1);
   assert.equal(elements.get("progress-list").children.at(-1).dataset.state, "failed");
+});
+
+test("handleSubmit preserves integrated output after a terminal stream failure", async () => {
+  const events = [
+    integratedCycleEvent(),
+    {
+      event: "run_failed",
+      sequence: 2,
+      data: { error: { message: "provider request failed" } },
+    },
+  ];
+  const stream = streamFromText(
+    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`
+  );
+  const requests = [];
+  const { api, elements } = loadApp({
+    fetch: async (...request) => {
+      requests.push(request);
+      return { ok: true, body: stream };
+    },
+  });
+  const apiKeyField = elements.get("api-key");
+  apiKeyField.value = "sk-session-only";
+  let prevented = false;
+
+  await api.handleSubmit({
+    preventDefault() {
+      prevented = true;
+    },
+  });
+
+  assert.equal(prevented, true);
+  assert.equal(requests[0][0], "/api/runs/autonomous/stream");
+  assert.equal(stream.locked, false);
+  assert.equal(elements.get("answer-panel").children.length, 5);
+  assert.ok(elements.get("belief-panel").children.length > 0);
+  assert.equal(elements.get("trace-pane").children.length, 1);
+  assert.equal(elements.get("status-banner").textContent, "provider request failed");
+  assert.equal(elements.get("run-button").disabled, false);
+  assert.equal(elements.get("run-button").textContent, "Run autonomous loop");
+  assert.equal(apiKeyField.value, "sk-session-only");
 });
