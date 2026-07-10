@@ -279,27 +279,31 @@ The full pytest suite must pass after focused tests.
 Verification completed on 2026-07-10 after implementation.
 
 - `pytest tests/test_question_runner.py tests/test_webui.py tests/test_public_api_and_config.py -q`:
-  `92 passed in 5.40s`.
+  `93 passed in 5.34s`.
 - `node --test tests/test_webui_stream.js`: `6 pass`, `0 fail`.
-- `pytest -q`: `377 passed, 2 skipped in 5.67s`.
-- Restarted `python3 -m bayesprobe.webui --host 127.0.0.1 --port 8766` and
-  confirmed `GET /` returns `200 OK`.
+- `pytest -q`: `378 passed, 2 skipped in 5.74s`.
+- Restarted `python3 -m bayesprobe.webui --host 127.0.0.1 --port 8768` because
+  port 8766 was already occupied by another local application, and confirmed
+  `GET /` returns `200 OK`.
 - Browser verification on the local WebUI confirmed that a non-secret test
-  value remains in the API-key field across a deterministic one-cycle run and
+  value remains in the API-key field across a deterministic two-cycle run and
   a switch back to Chat Completions, then is empty after reload. The A-E graph
   run rendered initialization, probe planning, probe execution, evidence
   integration, posterior update, and completion; it finished as `completed`,
-  its cycle was `integrated`, its best answer was `D`, and its posterior mass
-  was `1.000`.
-- A test-only delayed Chat Completions provider rendered `Executing probes`
-  before the request completed, then rendered the integrated cycle and
-  terminal completion on the same page.
-- At the default desktop viewport and at `390 x 844`, document scroll width
-  did not exceed client width and progress labels/statuses did not overlap.
-  The populated trace has a remaining layout concern: its JSON blocks expand
-  beyond the trace pane rather than fitting inside a constrained scrollable
-  block. This concern is recorded for follow-up and does not change the
-  streaming contract above.
+  both cycles were `integrated`, its best answer was `D`, and its posterior
+  mass was `1.000`.
+- A test-only Chat Completions provider delayed probe execution for five
+  seconds. Before it returned, the browser showed `Running`, completed phases
+  1-4, `Executing probes` as `Active`, a disabled run button, and the initial
+  belief state. The same page then rendered signal collection, evidence
+  integration, posterior update, the integrated cycle, and terminal answer D.
+- At the default desktop viewport, document client/scroll widths were
+  `1705/1705` and trace client/scroll widths were `1305/1305`. All 14 trace
+  blocks fit their parent; five long blocks scrolled internally. At `390 x
+  844`, document client/scroll widths were `375/375` and trace client/scroll
+  widths were `343/343`; all 14 trace blocks fit their parent and 12 long
+  blocks scrolled internally. Progress-row overlap count was zero at both
+  sizes, and the temporary viewport override was reset after verification.
 
 ## Acceptance Criteria
 
