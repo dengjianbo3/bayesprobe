@@ -424,3 +424,95 @@ def test_question_runner_ignores_progress_observer_exceptions():
     assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
     assert len(result.cycle_results) == 1
     assert result.cycle_results[0].cycle.boundary_status.value == "integrated"
+
+
+def test_question_runner_progress_observer_receives_detached_deep_snapshots():
+    observed_kinds = []
+    mutated_fields = set()
+
+    def hostile_observer(event):
+        observed_kinds.append(event.kind)
+        if event.run is not None:
+            event.run.metadata.clear()
+            event.run.metadata["stop_reason"] = "observer_mutation"
+            mutated_fields.add("run")
+        if event.belief_state is not None:
+            event.belief_state.posterior_summary.clear()
+            event.belief_state.hypotheses[0].posterior = 0.0
+            event.belief_state.hypotheses[0].rivals.clear()
+            mutated_fields.add("belief_state")
+        if event.probe_set is not None:
+            for probe in event.probe_set.probes:
+                probe.target_hypotheses.clear()
+                probe.support_condition.clear()
+            event.probe_set.probes.clear()
+            mutated_fields.add("probe_set")
+        if event.signals:
+            event.signals[0].raw_content = "observer mutation"
+            event.signals[0].initial_target_hypotheses.clear()
+            mutated_fields.add("signals")
+        if event.cycle_result is not None:
+            event.cycle_result.signals.clear()
+            event.cycle_result.evidence_events.clear()
+            event.cycle_result.belief_updates.clear()
+            event.cycle_result.hypothesis_evolutions.clear()
+            event.cycle_result.answer_projection.main_evidence_events.clear()
+            mutated_fields.add("cycle_result")
+        if event.result is not None:
+            event.result.cycle_results.clear()
+            event.result.final_belief_state.hypotheses.clear()
+            event.result.final_answer_projection.main_evidence_events.clear()
+            mutated_fields.add("result")
+
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        config=AutonomousQuestionRunConfig(max_cycles=2, max_probes_per_cycle=1),
+        progress_observer=hostile_observer,
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_question_hostile_progress_observer",
+            problem="Can observer mutation alter the autonomous lifecycle?",
+            context="SUPPORTS: Keep a passive signal in the first cycle.",
+        )
+    )
+
+    per_cycle = [
+        AutonomousQuestionProgressKind.CYCLE_STARTED,
+        AutonomousQuestionProgressKind.PROBE_SET_PLANNED,
+        AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED,
+        AutonomousQuestionProgressKind.SIGNALS_COLLECTED,
+        AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED,
+        AutonomousQuestionProgressKind.CYCLE_INTEGRATED,
+    ]
+    assert observed_kinds == [
+        AutonomousQuestionProgressKind.RUN_STARTED,
+        AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
+        *per_cycle,
+        *per_cycle,
+        AutonomousQuestionProgressKind.RUN_COMPLETED,
+    ]
+    assert mutated_fields == {
+        "run",
+        "belief_state",
+        "probe_set",
+        "signals",
+        "cycle_result",
+        "result",
+    }
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert result.run.metadata["stop_reason"] == "max_cycles"
+    assert len(result.cycle_results) == 2
+    assert all(cycle.probe_set.probes for cycle in result.cycle_results)
+    assert all(cycle.signals for cycle in result.cycle_results)
+    assert all(cycle.evidence_events for cycle in result.cycle_results)
+    assert all(cycle.belief_updates for cycle in result.cycle_results)
+    assert all(
+        signal.raw_content != "observer mutation"
+        for cycle in result.cycle_results
+        for signal in cycle.signals
+    )
+    assert sum(
+        hypothesis.posterior for hypothesis in result.final_belief_state.hypotheses
+    ) == pytest.approx(1.0)

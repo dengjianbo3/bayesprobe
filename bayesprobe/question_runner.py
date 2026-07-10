@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -440,17 +441,19 @@ class AutonomousQuestionRunner:
             return
         try:
             self.progress_observer(
-                AutonomousQuestionProgress(
-                    kind=kind,
-                    run_id=run_id,
-                    cycle_id=cycle_id,
-                    cycle_index=cycle_index,
-                    run=run,
-                    belief_state=belief_state,
-                    probe_set=probe_set,
-                    signals=signals,
-                    cycle_result=cycle_result,
-                    result=result,
+                deepcopy(
+                    AutonomousQuestionProgress(
+                        kind=kind,
+                        run_id=run_id,
+                        cycle_id=cycle_id,
+                        cycle_index=cycle_index,
+                        run=run,
+                        belief_state=belief_state,
+                        probe_set=probe_set,
+                        signals=signals,
+                        cycle_result=cycle_result,
+                        result=result,
+                    )
                 )
             )
         except Exception:

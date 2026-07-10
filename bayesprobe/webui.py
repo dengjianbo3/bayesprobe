@@ -159,6 +159,8 @@ class _AutonomousProgressEventEmitter:
         self._sink = sink
         self.sequence = 0
         self.run_id: str | None = None
+        self.cycle_id: str | None = None
+        self.cycle_index: int | None = None
 
     @property
     def started(self) -> bool:
@@ -166,6 +168,8 @@ class _AutonomousProgressEventEmitter:
 
     def emit(self, progress: AutonomousQuestionProgress) -> None:
         self.run_id = progress.run_id
+        self.cycle_id = progress.cycle_id
+        self.cycle_index = progress.cycle_index
         self.sequence += 1
         self._sink(
             {
@@ -187,8 +191,8 @@ class _AutonomousProgressEventEmitter:
                 "sequence": self.sequence,
                 "timestamp": _webui_timestamp(),
                 "run_id": self.run_id,
-                "cycle_id": None,
-                "cycle_index": None,
+                "cycle_id": self.cycle_id,
+                "cycle_index": self.cycle_index,
                 "data": {
                     "error": {
                         "type": error_type,
@@ -208,29 +212,27 @@ def _serialize_progress_data(progress: AutonomousQuestionProgress) -> dict[str, 
             "belief_state": _dump_domain(progress.belief_state),
         }
     if progress.kind == AutonomousQuestionProgressKind.CYCLE_STARTED:
-        return {"belief_state": _dump_domain(progress.belief_state)}
-    if progress.kind == AutonomousQuestionProgressKind.PROBE_SET_PLANNED:
+        belief_state = progress.belief_state
         return {
-            "belief_state": _dump_domain(progress.belief_state),
-            "probes": _dump_domain(progress.probe_set),
+            "belief_summary": {
+                "posterior_summary": _dump_domain(belief_state.posterior_summary),
+                "uncertainty_summary": belief_state.uncertainty_summary,
+            }
+            if belief_state is not None
+            else {}
         }
+    if progress.kind == AutonomousQuestionProgressKind.PROBE_SET_PLANNED:
+        return {"probe_set": _dump_domain(progress.probe_set)}
     if progress.kind == AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED:
         return {
-            "belief_state": _dump_domain(progress.belief_state),
-            "probes": _dump_domain(progress.probe_set),
+            "probe_count": len(progress.probe_set.probes)
+            if progress.probe_set is not None
+            else 0
         }
     if progress.kind == AutonomousQuestionProgressKind.SIGNALS_COLLECTED:
-        return {
-            "belief_state": _dump_domain(progress.belief_state),
-            "probes": _dump_domain(progress.probe_set),
-            "signals": _dump_domain(progress.signals),
-        }
+        return {"signals": _dump_domain(progress.signals)}
     if progress.kind == AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED:
-        return {
-            "belief_state": _dump_domain(progress.belief_state),
-            "probes": _dump_domain(progress.probe_set),
-            "signals": _dump_domain(progress.signals),
-        }
+        return {"signal_count": len(progress.signals)}
     if progress.kind == AutonomousQuestionProgressKind.CYCLE_INTEGRATED:
         return (
             serialize_autonomous_cycle_result(progress.cycle_result)
@@ -244,6 +246,32 @@ def _serialize_progress_data(progress: AutonomousQuestionProgress) -> dict[str, 
             else {}
         )
     raise ValueError(f"unsupported progress kind: {progress.kind}")
+
+
+class _NDJSONEventWriter:
+    def __init__(self, handler: BaseHTTPRequestHandler) -> None:
+        self._handler = handler
+        self.started = False
+        self.disconnected = False
+
+    def emit(self, event: Mapping[str, Any]) -> None:
+        if self.disconnected:
+            return
+        try:
+            if not self.started:
+                self._handler.send_response(HTTPStatus.OK)
+                self._handler.send_header(
+                    "Content-Type", "application/x-ndjson; charset=utf-8"
+                )
+                self._handler.send_header("Cache-Control", "no-store")
+                self._handler.end_headers()
+                self.started = True
+            self._handler.wfile.write(
+                json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n"
+            )
+            self._handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            self.disconnected = True
 
 
 def create_handler_class(
@@ -285,35 +313,14 @@ def create_handler_class(
 
         def _handle_autonomous_stream_post(self) -> None:
             payload = self._read_json_body()
-            headers_sent = False
-            disconnected = False
-
-            def emit_event(event: Mapping[str, Any]) -> None:
-                nonlocal disconnected, headers_sent
-                if disconnected:
-                    return
-                try:
-                    if not headers_sent:
-                        self.send_response(HTTPStatus.OK)
-                        self.send_header(
-                            "Content-Type", "application/x-ndjson; charset=utf-8"
-                        )
-                        self.send_header("Cache-Control", "no-store")
-                        self.end_headers()
-                        headers_sent = True
-                    self.wfile.write(
-                        json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n"
-                    )
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    disconnected = True
+            writer = _NDJSONEventWriter(self)
 
             status, error = handle_autonomous_stream_request(
                 payload,
-                event_sink=emit_event,
+                event_sink=writer.emit,
                 client_factory=client_factory,
             )
-            if error is not None and not headers_sent:
+            if error is not None and not writer.started:
                 self._send_json(status, error)
 
         def do_GET(self) -> None:  # noqa: N802

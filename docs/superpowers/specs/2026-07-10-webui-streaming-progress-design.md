@@ -147,19 +147,28 @@ Each response line has this envelope:
 The sequence starts at one and is strictly increasing within the connection.
 The adapter flushes after every complete line.
 
-Event data is deliberately bounded:
+Event data is deliberately bounded. Every envelope has exactly `event`,
+`sequence`, `timestamp`, `run_id`, `cycle_id`, `cycle_index`, and `data`. The
+`data` object has these exact top-level keys:
 
-- `run_started`: run id only;
-- `initialization_completed`: initial run and belief state;
-- `cycle_started`: cycle identity and current belief summary;
-- `probe_set_planned`: selected probe set;
-- `probe_execution_started`: probe count and cycle identity;
-- `signals_collected`: signals with their normal domain serialization;
-- `evidence_integration_started`: signal count and cycle identity;
-- `cycle_integrated`: serialized cycle result, including that cycle's belief
-  state and answer projection;
+- `run_started`: no keys; the run id is present once in the envelope;
+- `initialization_completed`: `run` and `belief_state`;
+- `cycle_started`: `belief_summary`, containing only `posterior_summary` and
+  `uncertainty_summary`; cycle identity remains in the envelope;
+- `probe_set_planned`: `probe_set` with the selected probe set;
+- `probe_execution_started`: `probe_count`; cycle identity remains in the
+  envelope;
+- `signals_collected`: `signals` with their normal domain serialization;
+- `evidence_integration_started`: `signal_count`; cycle identity remains in the
+  envelope;
+- `cycle_integrated`: the serialized cycle result, including that cycle's
+  belief state and answer projection;
 - `run_completed`: the same complete result shape used by the synchronous API;
-- `run_failed`: sanitized error type and message.
+- `run_failed`: `error`, containing only sanitized `type` and `message` fields.
+
+A late `run_failed` envelope retains the most recent real `cycle_id` and
+`cycle_index`. It never fabricates a `cycle_integrated` event for the failed
+cycle.
 
 Request validation and provider configuration errors detected before response
 streaming retain their normal HTTP status and JSON error body. Once a `200`

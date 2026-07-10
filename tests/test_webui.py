@@ -138,6 +138,80 @@ def test_webui_stream_emits_ordered_cycle_and_terminal_events():
     ] == pytest.approx(1.0)
 
 
+def test_webui_stream_phase_payloads_match_bounded_contract():
+    events = []
+    status, error = handle_autonomous_stream_request(
+        {
+            "question": "Does each phase expose only its bounded payload?",
+            "context": "SUPPORTS: Include one passive signal.",
+            "provider": {"kind": "deterministic"},
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        event_sink=events.append,
+    )
+
+    assert status == 200
+    assert error is None
+    assert all(
+        set(event)
+        == {
+            "event",
+            "sequence",
+            "timestamp",
+            "run_id",
+            "cycle_id",
+            "cycle_index",
+            "data",
+        }
+        for event in events
+    )
+    event_by_name = {event["event"]: event for event in events}
+    assert set(event_by_name["run_started"]["data"]) == set()
+    assert set(event_by_name["initialization_completed"]["data"]) == {
+        "run",
+        "belief_state",
+    }
+    assert set(event_by_name["cycle_started"]["data"]) == {"belief_summary"}
+    assert set(event_by_name["cycle_started"]["data"]["belief_summary"]) == {
+        "posterior_summary",
+        "uncertainty_summary",
+    }
+    assert set(event_by_name["probe_set_planned"]["data"]) == {"probe_set"}
+    assert set(event_by_name["probe_execution_started"]["data"]) == {
+        "probe_count"
+    }
+    assert event_by_name["probe_execution_started"]["data"]["probe_count"] == 1
+    assert set(event_by_name["signals_collected"]["data"]) == {"signals"}
+    assert len(event_by_name["signals_collected"]["data"]["signals"]) == 2
+    assert set(event_by_name["evidence_integration_started"]["data"]) == {
+        "signal_count"
+    }
+    assert event_by_name["evidence_integration_started"]["data"][
+        "signal_count"
+    ] == 2
+    assert set(event_by_name["cycle_integrated"]["data"]) == {
+        "cycle_id",
+        "signal_shape",
+        "cycle",
+        "probes",
+        "signals",
+        "belief_state",
+        "evidence_events",
+        "belief_updates",
+        "hypothesis_evolutions",
+        "answer_projection",
+    }
+    assert set(event_by_name["run_completed"]["data"]) == {
+        "run_id",
+        "run",
+        "stop_reason",
+        "final_answer",
+        "initial_belief_state",
+        "final_belief_state",
+        "cycles",
+    }
+
+
 def test_webui_stream_redacts_provider_secret_from_events():
     events = []
     status, error = handle_autonomous_stream_request(
@@ -287,6 +361,7 @@ def test_webui_static_assets_define_operational_workbench():
     assert "trace-pane" in index
     assert 'id="progress-panel"' in index
     assert 'id="progress-list"' in index
+    assert 'id="answer-projection-state"' in index
     assert 'id="context" placeholder="Optional external information"' in index
     assert "SUPPORTS: The local deterministic signal supports H1." not in index
     assert "localStorage" not in script
@@ -439,6 +514,59 @@ def test_webui_http_server_streams_valid_ndjson():
     assert content_type == "application/x-ndjson; charset=utf-8"
     assert events[0]["event"] == "run_started"
     assert events[-1]["event"] == "run_completed"
+
+
+@pytest.mark.parametrize("disconnect_error", [BrokenPipeError, ConnectionResetError])
+def test_webui_ndjson_writer_contains_client_disconnects(disconnect_error):
+    class DisconnectingStream:
+        def __init__(self):
+            self.write_calls = 0
+            self.flush_calls = 0
+
+        def write(self, payload):
+            del payload
+            self.write_calls += 1
+            raise disconnect_error("client disconnected")
+
+        def flush(self):
+            self.flush_calls += 1
+
+    class RecordingHandler:
+        def __init__(self):
+            self.wfile = DisconnectingStream()
+            self.responses = []
+            self.headers = []
+            self.headers_ended = 0
+
+        def send_response(self, status):
+            self.responses.append(status)
+
+        def send_header(self, name, value):
+            self.headers.append((name, value))
+
+        def end_headers(self):
+            self.headers_ended += 1
+
+    handler = RecordingHandler()
+    writer = webui._NDJSONEventWriter(handler)
+
+    status, error = handle_autonomous_stream_request(
+        {
+            "question": "Does a disconnected client leave the runner intact?",
+            "provider": {"kind": "deterministic"},
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        event_sink=writer.emit,
+    )
+
+    assert status == 200
+    assert error is None
+    assert writer.started is True
+    assert writer.disconnected is True
+    assert handler.responses == [200]
+    assert handler.headers_ended == 1
+    assert handler.wfile.write_calls == 1
+    assert handler.wfile.flush_calls == 0
 
 
 def test_webui_handler_returns_invalid_json_for_malformed_request_body():
@@ -606,6 +734,69 @@ class FakeWebUIChatOpenAI:
             (),
             {"completions": FakeWebUIChatCompletions()},
         )()
+
+
+class FailDuringSecondCycleWebUIChatCompletions(FakeWebUIChatCompletions):
+    def __init__(self):
+        super().__init__()
+        self.tasks = []
+        self.execute_calls = 0
+
+    def create(self, **payload):
+        request = json.loads(payload["messages"][1]["content"])
+        self.tasks.append(request["task"])
+        if request["task"] == "execute_probe":
+            self.execute_calls += 1
+            if self.execute_calls == 2:
+                raise RuntimeError("cycle two provider failure")
+        return super().create(**payload)
+
+
+class FailDuringSecondCycleWebUIChatOpenAI:
+    completions = None
+
+    def __init__(self, **kwargs):
+        del kwargs
+        completions = FailDuringSecondCycleWebUIChatCompletions()
+        self.__class__.completions = completions
+        self.chat = type("FakeChat", (), {"completions": completions})()
+
+
+def test_webui_stream_preserves_real_first_cycle_before_second_cycle_failure():
+    events = []
+    status, error = handle_autonomous_stream_request(
+        {
+            "question": "Can a genuine first cycle survive a cycle two failure?",
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "model": "provider-model",
+            },
+            "runner": {"max_cycles": 2, "max_probes_per_cycle": 1},
+        },
+        event_sink=events.append,
+        client_factory=FailDuringSecondCycleWebUIChatOpenAI,
+    )
+
+    integrated = [event for event in events if event["event"] == "cycle_integrated"]
+    failures = [event for event in events if event["event"] == "run_failed"]
+    assert status == 200
+    assert error is None
+    assert FailDuringSecondCycleWebUIChatOpenAI.completions.tasks == [
+        "execute_probe",
+        "judge_evidence",
+        "execute_probe",
+    ]
+    assert len(integrated) == 1
+    assert integrated[0]["cycle_index"] == 1
+    assert integrated[0]["data"]["cycle"]["boundary_status"] == "integrated"
+    assert len(failures) == 1
+    assert failures[0]["cycle_index"] == 2
+    assert failures[0]["cycle_id"].endswith("_cycle_2")
+    assert set(failures[0]["data"]) == {"error"}
+    assert set(failures[0]["data"]["error"]) == {"type", "message"}
+    assert events[-1] == failures[0]
+    assert all(event["event"] != "run_completed" for event in events)
 
 
 class BlockingWebUIChatCompletions:

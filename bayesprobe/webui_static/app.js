@@ -6,6 +6,7 @@ const statusBanner = document.querySelector("#status-banner");
 const progressList = document.querySelector("#progress-list");
 const progressState = document.querySelector("#progress-state");
 const answerPanel = document.querySelector("#answer-panel");
+const answerProjectionState = document.querySelector("#answer-projection-state");
 const beliefPanel = document.querySelector("#belief-panel");
 const tracePane = document.querySelector("#trace-pane");
 const runId = document.querySelector("#run-id");
@@ -34,7 +35,16 @@ const PROGRESS_LABEL_BY_EVENT = {
   run_completed: "Run completed",
   run_failed: "Run failed",
 };
+const providerControls = [
+  providerKind,
+  document.querySelector("#api-key"),
+  document.querySelector("#base-url"),
+  document.querySelector("#model-name"),
+  document.querySelector("#timeout-seconds"),
+  document.querySelector("#max-output-tokens"),
+];
 const streamedCycles = [];
+let runInFlight = false;
 
 providerKind.addEventListener("change", syncProviderControls);
 form.addEventListener("submit", handleSubmit);
@@ -43,6 +53,9 @@ syncProviderControls();
 
 async function handleSubmit(event) {
   event.preventDefault();
+  if (runInFlight) return;
+
+  runInFlight = true;
   setStatus("Running autonomous loop...", "busy");
   setBusy(true);
   clearRunOutput("running");
@@ -72,6 +85,7 @@ async function handleSubmit(event) {
     }
     setStatus(error.message || "Run failed", "error");
   } finally {
+    runInFlight = false;
     setBusy(false);
   }
 }
@@ -81,7 +95,10 @@ function syncProviderControls() {
     providerKind.value
   );
   providerAuth.hidden = !usesRemoteProvider;
-  runButton.disabled = false;
+  runButton.disabled = runInFlight;
+  for (const control of providerControls) {
+    control.disabled = runInFlight;
+  }
   providerNote.textContent = PROVIDER_NOTE_BY_KIND[providerKind.value] || "";
   providerNote.classList.toggle("is-warning", false);
 }
@@ -204,22 +221,30 @@ function handleProgressEvent(event) {
 
   if (eventName === "run_started") {
     runId.textContent = event.run_id || "Run started";
+    answerProjectionState.textContent = "Current";
   }
   if (eventName === "initialization_completed") {
     renderBeliefs(event.data?.belief_state);
   }
   if (eventName === "cycle_integrated") {
     upsertStreamedCycle(event.data);
+    answerProjectionState.textContent = "Current";
     renderAnswer(event.data?.answer_projection);
     renderBeliefs(event.data?.belief_state);
     renderTrace(streamedCycles);
   }
   if (eventName === "run_completed") {
+    answerProjectionState.textContent = "Final";
     renderRun(event.data || {});
     setStatus(
       `${event.data?.run?.status || "completed"}: ${event.data?.run?.regime || "autonomous"} / ${event.data?.stop_reason || "completed"}`,
       "ok"
     );
+  }
+  if (eventName === "run_failed") {
+    answerProjectionState.textContent = streamedCycles.length
+      ? "Current"
+      : "Unavailable";
   }
 }
 
@@ -227,6 +252,7 @@ function resetRunProgress() {
   streamedCycles.length = 0;
   progressList.innerHTML = "";
   progressState.textContent = "Running";
+  answerProjectionState.textContent = "Current";
 }
 
 function markProgressFailed() {
@@ -237,6 +263,9 @@ function markProgressFailed() {
   if (activeItem) {
     setProgressItemState(activeItem, "failed");
   }
+  answerProjectionState.textContent = streamedCycles.length
+    ? "Current"
+    : "Unavailable";
 }
 
 function renderProgressEvent(event) {
@@ -481,8 +510,8 @@ function formatNumber(value) {
 }
 
 function setBusy(isBusy) {
-  runButton.disabled = isBusy;
   runButton.textContent = isBusy ? "Running..." : "Run autonomous loop";
+  syncProviderControls();
 }
 
 function setStatus(message, tone) {

@@ -118,6 +118,7 @@ function loadApp({ fetch = () => Promise.reject(new Error("unexpected fetch")) }
     "progress-list",
     "progress-state",
     "answer-panel",
+    "answer-projection-state",
     "belief-panel",
     "trace-pane",
     "run-id",
@@ -162,7 +163,7 @@ function loadApp({ fetch = () => Promise.reject(new Error("unexpected fetch")) }
   });
 
   const source = `${fs.readFileSync(APP_PATH, "utf8")}
-globalThis.__webuiTestExports = { consumeRunStream, handleProgressEvent, handleSubmit };`;
+globalThis.__webuiTestExports = { consumeRunStream, handleProgressEvent, handleSubmit, syncProviderControls };`;
   vm.runInContext(source, context, { filename: APP_PATH });
   return {
     api: context.__webuiTestExports,
@@ -349,6 +350,8 @@ test("handleSubmit preserves integrated output after a terminal stream failure",
   assert.equal(elements.get("status-banner").textContent, "provider request failed");
   assert.equal(elements.get("run-button").disabled, false);
   assert.equal(elements.get("run-button").textContent, "Run autonomous loop");
+  assert.equal(elements.get("provider-kind").disabled, false);
+  assert.equal(elements.get("api-key").disabled, false);
   assert.equal(apiKeyField.value, "sk-session-only");
 });
 
@@ -374,5 +377,86 @@ test("handleSubmit marks malformed stream progress as failed", async () => {
   );
   assert.equal(elements.get("status-banner").classList.contains("error"), true);
   assert.equal(elements.get("run-button").disabled, false);
+  assert.equal(elements.get("provider-kind").disabled, false);
+  assert.equal(elements.get("api-key").disabled, false);
   assert.equal(apiKeyField.value, "sk-session-only");
+});
+
+test("pending submit blocks re-entry and provider controls stay disabled", async () => {
+  const pendingFetches = [];
+  const { api, elements } = loadApp({
+    fetch: (...request) => new Promise((resolve) => {
+      pendingFetches.push({ request, resolve });
+    }),
+  });
+
+  const firstSubmit = api.handleSubmit({ preventDefault() {} });
+  await Promise.resolve();
+  const secondSubmit = api.handleSubmit({ preventDefault() {} });
+  elements.get("provider-kind").value = "openai_chat_completions";
+  api.syncProviderControls();
+
+  const activeState = {
+    fetchCount: pendingFetches.length,
+    runDisabled: elements.get("run-button").disabled,
+    providerDisabled: elements.get("provider-kind").disabled,
+    apiKeyDisabled: elements.get("api-key").disabled,
+  };
+  for (const pending of pendingFetches) {
+    pending.resolve({
+      ok: true,
+      body: streamFromText('{"event":"run_completed","sequence":1,"data":{}}\n'),
+    });
+  }
+  await Promise.all([firstSubmit, secondSubmit]);
+
+  assert.equal(activeState.fetchCount, 1);
+  assert.equal(activeState.runDisabled, true);
+  assert.equal(activeState.providerDisabled, true);
+  assert.equal(activeState.apiKeyDisabled, true);
+  assert.equal(elements.get("run-button").disabled, false);
+  assert.equal(elements.get("provider-kind").disabled, false);
+  assert.equal(elements.get("api-key").disabled, false);
+});
+
+test("answer projection is current until run completion marks it final", () => {
+  const { api, elements } = loadApp();
+
+  api.handleProgressEvent({
+    event: "run_started",
+    sequence: 1,
+    run_id: "run-1",
+    data: {},
+  });
+  assert.equal(elements.get("answer-projection-state").textContent, "Current");
+
+  api.handleProgressEvent(integratedCycleEvent());
+  assert.equal(elements.get("answer-projection-state").textContent, "Current");
+
+  api.handleProgressEvent({
+    event: "run_completed",
+    sequence: 3,
+    data: {},
+  });
+  assert.equal(elements.get("answer-projection-state").textContent, "Final");
+});
+
+test("preflight HTTP failure restores controls and retains the API key", async () => {
+  const { api, elements } = loadApp({
+    fetch: async () => ({
+      ok: false,
+      async text() {
+        return JSON.stringify({ error: { message: "question must not be empty" } });
+      },
+    }),
+  });
+  elements.get("api-key").value = "sk-session-only";
+
+  await api.handleSubmit({ preventDefault() {} });
+
+  assert.equal(elements.get("status-banner").textContent, "question must not be empty");
+  assert.equal(elements.get("run-button").disabled, false);
+  assert.equal(elements.get("provider-kind").disabled, false);
+  assert.equal(elements.get("api-key").disabled, false);
+  assert.equal(elements.get("api-key").value, "sk-session-only");
 });
