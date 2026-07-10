@@ -22,10 +22,23 @@ class Element {
     this.checked = false;
     this.open = false;
     this._innerHTML = "";
+    const classes = new Set();
     this.classList = {
-      add() {},
-      remove() {},
-      toggle() {},
+      add(...names) {
+        names.forEach((name) => classes.add(name));
+      },
+      remove(...names) {
+        names.forEach((name) => classes.delete(name));
+      },
+      toggle(name, force) {
+        const enabled = force === undefined ? !classes.has(name) : force;
+        if (enabled) classes.add(name);
+        else classes.delete(name);
+        return enabled;
+      },
+      contains(name) {
+        return classes.has(name);
+      },
     };
   }
 
@@ -336,5 +349,30 @@ test("handleSubmit preserves integrated output after a terminal stream failure",
   assert.equal(elements.get("status-banner").textContent, "provider request failed");
   assert.equal(elements.get("run-button").disabled, false);
   assert.equal(elements.get("run-button").textContent, "Run autonomous loop");
+  assert.equal(apiKeyField.value, "sk-session-only");
+});
+
+test("handleSubmit marks malformed stream progress as failed", async () => {
+  const stream = streamFromText(
+    '{"event":"run_started","sequence":1,"run_id":"run-1","data":{}}\nnot-json\n',
+    undefined,
+    { stayOpen: true }
+  );
+  const { api, elements } = loadApp({
+    fetch: async () => ({ ok: true, body: stream }),
+  });
+  const apiKeyField = elements.get("api-key");
+  apiKeyField.value = "sk-session-only";
+
+  await api.handleSubmit({ preventDefault() {} });
+
+  assert.equal(elements.get("progress-state").textContent, "Failed");
+  assert.equal(elements.get("progress-list").children.at(-1).dataset.state, "failed");
+  assert.equal(
+    elements.get("status-banner").textContent,
+    "Server returned an invalid progress event"
+  );
+  assert.equal(elements.get("status-banner").classList.contains("error"), true);
+  assert.equal(elements.get("run-button").disabled, false);
   assert.equal(apiKeyField.value, "sk-session-only");
 });

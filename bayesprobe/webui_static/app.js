@@ -66,6 +66,7 @@ async function handleSubmit(event) {
     }
     await consumeRunStream(response);
   } catch (error) {
+    markProgressFailed();
     if (streamedCycles.length === 0) {
       clearRunOutput("failed");
     }
@@ -226,6 +227,16 @@ function resetRunProgress() {
   streamedCycles.length = 0;
   progressList.innerHTML = "";
   progressState.textContent = "Running";
+}
+
+function markProgressFailed() {
+  progressState.textContent = "Failed";
+  const activeItem = progressList.querySelector(
+    '.progress-item[data-state="active"]'
+  );
+  if (activeItem) {
+    setProgressItemState(activeItem, "failed");
+  }
 }
 
 function renderProgressEvent(event) {
