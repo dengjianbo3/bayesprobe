@@ -82,9 +82,16 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
                         "evidence_type": "supporting",
                         "likelihoods": {
                             "H1": "moderately_confirming",
-                            "H2": "moderately_disconfirming",
                         },
                         "interpretation": "Scripted artifact judgment.",
+                    },
+                    "repair_evidence_judgment": {
+                        "evidence_type": "supporting",
+                        "likelihoods": {
+                            "H1": "moderately_confirming",
+                            "H2": "moderately_disconfirming",
+                        },
+                        "interpretation": "Scripted artifact repair judgment.",
                     }
                 },
             },
@@ -131,7 +138,10 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     assert manifest["sample_count"] == 3
     assert manifest["metadata"] == {"suite": "offline", "nested": {"safe": "kept"}}
     assert manifest["model_gateway"]["kind"] == "scripted"
-    assert manifest["model_gateway"]["scripted_response_tasks"] == ["judge_evidence"]
+    assert manifest["model_gateway"]["scripted_response_tasks"] == [
+        "judge_evidence",
+        "repair_evidence_judgment",
+    ]
     assert "responses" not in manifest["model_gateway"]
     assert config_snapshot["artifact_dir"] == str(artifact_dir)
     assert config_snapshot["ledger_path"] == str(ledger_path)
@@ -165,11 +175,22 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
             "prompt_version": "v0.1",
             "schema_name": "EvidenceJudgment",
             "schema_version": "v0.1",
-            "repair_attempt_index": None,
-            "metadata": {},
-            "occurrence_count": 4,
-        }
-    ]
+                "repair_attempt_index": None,
+                "metadata": {},
+                "occurrence_count": 2,
+            },
+            {
+                "task": "repair_evidence_judgment",
+                "adapter_kind": "scripted",
+                "prompt_id": "evidence_judgment_repair",
+                "prompt_version": "v0.1",
+                "schema_name": "EvidenceJudgment",
+                "schema_version": "v0.1",
+                "repair_attempt_index": 1,
+                "metadata": {},
+                "occurrence_count": 2,
+            }
+        ]
     assert model_invocations == {
         "artifact_version": "0.1",
         "invocation_count": 4,
@@ -265,7 +286,7 @@ def test_run_benchmark_experiment_uses_model_gateway_config(tmp_path: Path):
                 "responses": {
                     "judge_evidence": {
                         "evidence_type": "boundary_condition",
-                        "likelihoods": {"H1": "weakly_disconfirming", "H2": "neutral"},
+                        "likelihoods": {"H1": "weakly_disconfirming"},
                         "interpretation": "Experiment configured scripted judgment.",
                         "quality_overrides": {"reliability": 0.62},
                     }
@@ -297,14 +318,13 @@ def test_run_benchmark_experiment_uses_judgment_repair_policy_config(tmp_path: P
                 "responses": {
                     "judge_evidence": {
                         "evidence_type": "not_a_type",
-                        "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                        "likelihoods": {"H1": "neutral"},
                         "interpretation": "Invalid evidence type.",
                     },
                     "repair_evidence_judgment": {
                         "evidence_type": "supporting",
                         "likelihoods": {
                             "H1": "moderately_confirming",
-                            "H2": "moderately_disconfirming",
                         },
                         "interpretation": "Experiment repaired judgment.",
                     },
@@ -374,6 +394,7 @@ def test_experiment_runner_runs_v0_2_dataset_with_recorded_gateway(tmp_path: Pat
             "kind": "recorded",
             "fixture_path": "fixtures/providers/deepseek_chat_evidence_v0_1.json",
         },
+        judgment_repair_policy={"max_attempts": 1},
         max_cycles=1,
         max_probes_per_cycle=1,
     )
@@ -386,6 +407,39 @@ def test_experiment_runner_runs_v0_2_dataset_with_recorded_gateway(tmp_path: Pat
     assert result.ledger_path.exists()
     assert result.suite_result.final_accuracy >= 0.5
     assert result.suite_result.update_direction_accuracy is not None
+
+    evidence_events = [
+        record["payload"]
+        for record in JsonlLedgerStore(result.ledger_path).read_all("evidence_event")
+    ]
+    projection_events = [
+        event
+        for event in evidence_events
+        if event["derived_from_signal"] == "S_v02_agent_projection"
+    ]
+    repair_events = [
+        event
+        for event in evidence_events
+        if event["derived_from_signal"] == "S_v02_schema_repair_passive"
+    ]
+
+    assert {event["evidence_type"] for event in projection_events} == {
+        "sender_judgment",
+        "source_claim",
+    }
+    assert len(repair_events) == 1
+    assert repair_events[0]["discard_reason"] is None
+    assert repair_events[0]["model_trace"]["task"] == "repair_evidence_judgment"
+    assert repair_events[0]["model_trace"]["repair_attempt_index"] == 1
+    probe_candidates = [
+        record["payload"]
+        for record in JsonlLedgerStore(result.ledger_path).read_all("probe_candidate")
+    ]
+    assert any(
+        candidate["source"] == "passive_signal"
+        and "S_v02_agent_projection" in candidate["candidate_probe"]["inquiry_goal"]
+        for candidate in probe_candidates
+    )
 
 
 @pytest.mark.parametrize(

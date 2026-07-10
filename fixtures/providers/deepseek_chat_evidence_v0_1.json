@@ -109,7 +109,20 @@
       },
       "response": {
         "evidence_type": "supporting",
-        "interpretation": "The provider-shaped recorded judgment supplies the repaired schema form and supports H1.",
+        "interpretation": "Malformed recorded provider judgment intentionally omits H2 so the repair path is exercised.",
+        "likelihoods": {
+          "H1": "moderately_confirming"
+        },
+        "quality_overrides": {}
+      }
+    },
+    {
+      "match": {
+        "task": "repair_evidence_judgment"
+      },
+      "response": {
+        "evidence_type": "supporting",
+        "interpretation": "The repaired provider judgment covers both requested rivals and supports H1.",
         "likelihoods": {
           "H1": "moderately_confirming",
           "H2": "weakly_disconfirming"
@@ -147,8 +160,7 @@
         "evidence_type": "supporting",
         "interpretation": "Generic recorded judgment for deterministic active probe output supporting H1.",
         "likelihoods": {
-          "H1": "moderately_confirming",
-          "H2": "moderately_disconfirming"
+          "H1": "moderately_confirming"
         },
         "quality_overrides": {
           "relevance": 0.7,

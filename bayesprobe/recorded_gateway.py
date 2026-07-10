@@ -8,7 +8,6 @@ from typing import Any
 from bayesprobe.model_gateway import (
     ModelGatewayValidationError,
     StructuredModelRequest,
-    evidence_judgment_from_mapping,
 )
 
 _SECRET_KEY_PARTS = ("api_key", "apikey", "authorization", "token", "secret")
@@ -89,7 +88,6 @@ def _validate_entry(entry: Any) -> None:
     response = entry.get("response")
     if not isinstance(response, Mapping):
         raise ValueError("recorded model response must be an object")
-    evidence_judgment_from_mapping(dict(response))
 
 
 def _reject_secrets(value: Any) -> None:

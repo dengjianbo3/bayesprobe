@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -211,6 +212,16 @@ class EvidenceJudgment:
     quality_overrides: dict[str, float] = field(default_factory=dict)
 
 
+_QUALITY_OVERRIDE_METRICS = {
+    "reliability",
+    "independence",
+    "relevance",
+    "novelty",
+    "specificity",
+    "verifiability",
+}
+
+
 def evidence_judgment_from_mapping(payload: dict[str, Any]) -> EvidenceJudgment:
     if not isinstance(payload, Mapping):
         raise ModelGatewayValidationError("evidence judgment payload must be an object")
@@ -244,12 +255,22 @@ def evidence_judgment_from_mapping(payload: dict[str, Any]) -> EvidenceJudgment:
 
     quality_overrides: dict[str, float] = {}
     for metric, value in quality_overrides_payload.items():
+        metric_name = str(metric)
+        if metric_name not in _QUALITY_OVERRIDE_METRICS:
+            raise ModelGatewayValidationError(
+                f"unsupported quality override metric: {metric_name}"
+            )
         try:
-            quality_overrides[str(metric)] = float(value)
+            parsed_value = float(value)
         except (TypeError, ValueError) as error:
             raise ModelGatewayValidationError(
                 f"invalid quality override for {metric}: {value}"
             ) from error
+        if not math.isfinite(parsed_value) or not 0 <= parsed_value <= 1:
+            raise ModelGatewayValidationError(
+                f"quality override {metric_name} must be finite and between 0 and 1"
+            )
+        quality_overrides[metric_name] = parsed_value
 
     return EvidenceJudgment(
         evidence_type=evidence_type,

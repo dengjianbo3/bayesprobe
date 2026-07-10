@@ -1204,6 +1204,86 @@ def test_direct_signal_judgment_uses_model_gateway():
     assert request.input["probe_ids"] == []
 
 
+@pytest.mark.parametrize(
+    "likelihoods",
+    [
+        {"H1": "moderately_confirming"},
+        {
+            "H1": "moderately_confirming",
+            "H2": "moderately_disconfirming",
+            "H3": "neutral",
+        },
+    ],
+)
+def test_provider_judgment_targets_must_match_requested_hypotheses(likelihoods):
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "supporting",
+                "likelihoods": likelihoods,
+                "interpretation": "Target mismatch fixture.",
+                "quality_overrides": {},
+            }
+        }
+    )
+    core = BayesProbeCore(model_gateway=gateway)
+    cycle = make_cycle("cycle_target_contract")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    assert event.discard_reason is not None
+    assert event.discard_reason.startswith("schema_violation:")
+    assert result.belief_updates == []
+    assert [
+        hypothesis.posterior for hypothesis in result.belief_state.hypotheses
+    ] == [0.5, 0.5]
+
+
+def test_target_mismatch_can_be_repaired_against_original_request():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "supporting",
+                "likelihoods": {"H1": "moderately_confirming"},
+                "interpretation": "H2 was omitted.",
+            },
+            "repair_evidence_judgment": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "Targets repaired.",
+                "quality_overrides": {},
+            },
+        }
+    )
+    core = BayesProbeCore(
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
+    )
+    cycle = make_cycle("cycle_target_repair")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    assert event.discard_reason is None
+    assert event.model_trace["task"] == "repair_evidence_judgment"
+    assert event.model_trace["repair_attempt_index"] == 1
+    assert {update.hypothesis_id for update in result.belief_updates} == {"H1", "H2"}
+
+
 def test_direct_signal_schema_violation_becomes_discarded_evidence():
     gateway = ScriptedModelGateway(
         responses={
@@ -1771,6 +1851,56 @@ def test_model_probe_signal_uses_conservative_quality_baseline():
                 source_type="model_probe_gateway",
                 source="model_gateway:scripted",
                 raw_content="SUPPORTS: Internal model reasoning favors H1.",
+            )
+        ],
+    )
+
+    event = result.evidence_events[0]
+    assert event.reliability == 0.55
+    assert event.independence == 0.35
+    assert event.relevance == 0.85
+    assert event.novelty == 0.55
+    assert event.specificity == 0.65
+    assert event.verifiability == 0.3
+
+
+def test_model_probe_quality_overrides_cannot_inflate_its_baseline():
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "Self-judged model probe fixture.",
+                "quality_overrides": {
+                    "reliability": 1.0,
+                    "independence": 1.0,
+                    "relevance": 1.0,
+                    "novelty": 1.0,
+                    "specificity": 1.0,
+                    "verifiability": 1.0,
+                },
+            }
+        }
+    )
+    core = BayesProbeCore(model_gateway=gateway)
+    cycle = make_cycle("cycle_model_probe_caps")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[
+            ExternalSignal(
+                id="S_model_probe_caps",
+                cycle_id="pending",
+                signal_kind=SignalKind.ACTIVE,
+                source_type="model_probe_gateway",
+                source="model_gateway:scripted",
+                raw_content="SUPPORTS: Self-generated model signal.",
+                initial_target_hypotheses=["H1", "H2"],
             )
         ],
     )

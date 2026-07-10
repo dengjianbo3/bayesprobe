@@ -505,6 +505,26 @@ def test_evidence_judgment_repair_policy_rejects_invalid_config(config, expected
             {"evidence_type": "neutral", "quality_overrides": {"reliability": "high"}},
             "invalid quality override for reliability",
         ),
+        (
+            {"evidence_type": "neutral", "quality_overrides": {"authority": 0.5}},
+            "unsupported quality override metric: authority",
+        ),
+        (
+            {"evidence_type": "neutral", "quality_overrides": {"reliability": -0.1}},
+            "quality override reliability must be finite and between 0 and 1",
+        ),
+        (
+            {"evidence_type": "neutral", "quality_overrides": {"reliability": 1.1}},
+            "quality override reliability must be finite and between 0 and 1",
+        ),
+        (
+            {"evidence_type": "neutral", "quality_overrides": {"reliability": float("inf")}},
+            "quality override reliability must be finite and between 0 and 1",
+        ),
+        (
+            {"evidence_type": "neutral", "quality_overrides": {"reliability": float("nan")}},
+            "quality override reliability must be finite and between 0 and 1",
+        ),
     ],
 )
 def test_evidence_judgment_from_mapping_raises_validation_error(payload, expected_message):

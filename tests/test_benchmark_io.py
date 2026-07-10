@@ -240,4 +240,8 @@ def test_v0_2_methodology_fixture_covers_required_scenarios():
         for sample in dataset.samples
         for signal in sample.passive_signals
     }
-    assert {"system_log", "agent_projection", "noisy_stream"} <= source_types
+    assert {
+        "system_log",
+        "external_agent_projection",
+        "noisy_stream",
+    } <= source_types

@@ -7,9 +7,11 @@ from bayesprobe.benchmark import (
     BenchmarkSample,
     BenchmarkSignal,
     BenchmarkSignalShape,
+    _update_direction_accuracy,
 )
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ScriptedModelGateway
+from bayesprobe.schemas import BeliefUpdate, UpdateDirection
 
 
 def passive_refutation_signal(signal_id: str = "S_passive_refute") -> BenchmarkSignal:
@@ -20,6 +22,36 @@ def passive_refutation_signal(signal_id: str = "S_passive_refute") -> BenchmarkS
         raw_content="REFUTES: Benchmark passage contradicts H1 and supports H2.",
         target_hypotheses=["H1", "H2"],
     )
+
+
+def test_update_direction_accuracy_scores_net_movement_not_transient_match():
+    updates = [
+        BeliefUpdate(
+            update_id="U1",
+            cycle_id="cycle_1",
+            evidence_id="E1",
+            hypothesis_id="H1",
+            prior=0.5,
+            posterior=0.6,
+            direction=UpdateDirection.STRENGTHENED,
+            reason="Transient support.",
+        ),
+        BeliefUpdate(
+            update_id="U2",
+            cycle_id="cycle_1",
+            evidence_id="E2",
+            hypothesis_id="H1",
+            prior=0.6,
+            posterior=0.4,
+            direction=UpdateDirection.WEAKENED,
+            reason="Final counterevidence.",
+        ),
+    ]
+
+    assert _update_direction_accuracy(
+        belief_updates=updates,
+        gold_update_directions={"H1": "strengthened"},
+    ) == 0.0
 
 
 def test_benchmark_harness_runs_active_only_sample():

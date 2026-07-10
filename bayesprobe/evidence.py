@@ -338,7 +338,10 @@ class EvidenceIntegrationGate:
         except ModelGatewayValidationError as error:
             raise _EvidenceJudgmentFailure(error=error, model_trace=model_trace) from error
         try:
-            return evidence_judgment_from_mapping(payload), model_trace
+            return self._validated_evidence_judgment(
+                payload=payload,
+                original_request=request,
+            ), model_trace
         except ModelGatewayValidationError as error:
             if self._judgment_repair_policy.max_attempts == 0:
                 raise _EvidenceJudgmentFailure(error=error, model_trace=model_trace) from error
@@ -393,7 +396,10 @@ class EvidenceIntegrationGate:
                 latest_trace = repair_trace
                 continue
             try:
-                return evidence_judgment_from_mapping(repair_payload), repair_trace
+                return self._validated_evidence_judgment(
+                    payload=repair_payload,
+                    original_request=original_request,
+                ), repair_trace
             except ModelGatewayValidationError as error:
                 latest_invalid_payload = _repair_payload_from(repair_payload)
                 latest_error = error
@@ -403,6 +409,28 @@ class EvidenceIntegrationGate:
             f"repair failed after {max_attempts} attempt(s): {latest_error}"
         )
         raise _EvidenceJudgmentFailure(error=failure, model_trace=latest_trace) from latest_error
+
+    def _validated_evidence_judgment(
+        self,
+        *,
+        payload: dict[str, Any],
+        original_request: StructuredModelRequest,
+    ) -> EvidenceJudgment:
+        judgment = evidence_judgment_from_mapping(payload)
+        expected_targets = {
+            str(hypothesis_id)
+            for hypothesis_id in original_request.input.get(
+                "target_hypotheses",
+                [],
+            )
+        }
+        actual_targets = set(judgment.likelihoods)
+        if actual_targets != expected_targets:
+            raise ModelGatewayValidationError(
+                "evidence judgment likelihood targets must equal "
+                f"{sorted(expected_targets)}; got {sorted(actual_targets)}"
+            )
+        return judgment
 
     def _schema_violation_event(
         self,
@@ -503,7 +531,16 @@ class EvidenceIntegrationGate:
             is_duplicate=is_duplicate,
         )
         if quality_overrides:
-            quality = _apply_quality_overrides(quality=quality, overrides=quality_overrides)
+            effective_overrides = quality_overrides
+            if signal.source_type == "model_probe_gateway":
+                effective_overrides = {
+                    metric: min(value, getattr(quality, metric))
+                    for metric, value in quality_overrides.items()
+                }
+            quality = _apply_quality_overrides(
+                quality=quality,
+                overrides=effective_overrides,
+            )
         return EvidenceEvent(
             id=event_id,
             derived_from_signal=signal.id,

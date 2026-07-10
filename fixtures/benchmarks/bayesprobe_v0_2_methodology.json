@@ -112,7 +112,7 @@
           "raw_content": "Peer agent projection: current_best_hypothesis=H2; confidence=0.62; main_uncertainty=source independence. Treat this as an external signal, not imported belief.",
           "signal_id": "S_v02_agent_projection",
           "source": "peer_agent_alpha",
-          "source_type": "agent_projection",
+          "source_type": "external_agent_projection",
           "target_hypotheses": [
             "H1",
             "H2"

@@ -28,6 +28,7 @@ from bayesprobe.schemas import (
     EvidenceEvent,
     ExternalSignal,
     SignalKind,
+    UpdateDirection,
 )
 
 
@@ -407,16 +408,29 @@ def _update_direction_accuracy(
 ) -> float | None:
     if not gold_update_directions:
         return None
-    observed_by_hypothesis: dict[str, set[str]] = {}
+    observed_by_hypothesis: dict[str, list[BeliefUpdate]] = {}
     for update in belief_updates:
-        observed_by_hypothesis.setdefault(update.hypothesis_id, set()).add(update.direction.value)
+        observed_by_hypothesis.setdefault(update.hypothesis_id, []).append(update)
 
     correct = 0
     for hypothesis_id, expected_direction in gold_update_directions.items():
-        observed_directions = observed_by_hypothesis.get(hypothesis_id, set())
-        if expected_direction in observed_directions:
+        hypothesis_updates = observed_by_hypothesis.get(hypothesis_id, [])
+        if not hypothesis_updates:
+            continue
+        initial = hypothesis_updates[0].prior
+        final = hypothesis_updates[-1].posterior
+        observed_direction = _net_update_direction(initial=initial, final=final)
+        if expected_direction == observed_direction.value:
             correct += 1
     return round(correct / len(gold_update_directions), 6)
+
+
+def _net_update_direction(*, initial: float, final: float) -> UpdateDirection:
+    if final > initial + 0.01:
+        return UpdateDirection.STRENGTHENED
+    if final < initial - 0.01:
+        return UpdateDirection.WEAKENED
+    return UpdateDirection.NEUTRAL
 
 
 def _top_hypothesis_id(belief_state: BeliefState) -> str:

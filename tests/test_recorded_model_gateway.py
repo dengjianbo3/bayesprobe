@@ -96,14 +96,14 @@ def test_recorded_model_gateway_rejects_fixture_with_api_key(tmp_path: Path):
         RecordedModelGateway.from_json(path)
 
 
-def test_recorded_model_gateway_validates_recorded_response(tmp_path: Path):
+def test_recorded_model_gateway_replays_malformed_response_for_gate_validation(
+    tmp_path: Path,
+):
     path = tmp_path / "invalid.json"
     payload = recorded_fixture_payload()
     payload["responses"][0]["response"] = {"likelihoods": {}}
     write_fixture(path, payload)
 
-    with pytest.raises(
-        ModelGatewayValidationError,
-        match="evidence judgment missing field: evidence_type",
-    ):
-        RecordedModelGateway.from_json(path)
+    gateway = RecordedModelGateway.from_json(path)
+
+    assert gateway.complete_structured(make_request()) == {"likelihoods": {}}
