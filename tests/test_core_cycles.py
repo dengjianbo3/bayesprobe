@@ -12,6 +12,7 @@ from bayesprobe.model_gateway import (
 )
 from bayesprobe.schemas import (
     BeliefState,
+    BoundaryStatus,
     CycleRecord,
     CycleSignalShape,
     EvidenceEvent,
@@ -296,6 +297,47 @@ def test_integrated_belief_state_rebuilds_current_summary():
         "total_active_posterior"
     ] == pytest.approx(1.0)
     assert "no external signals" not in result.belief_state.uncertainty_summary
+
+
+def test_core_returns_integrated_cycle_with_terminal_timestamps():
+    core = BayesProbeCore()
+    cycle = CycleRecord(
+        cycle_id="cycle_lifecycle",
+        run_id="run_1",
+        cycle_index=1,
+        signal_shape=CycleSignalShape.PASSIVE_ONLY,
+    )
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=ProbeSet(
+            probe_set_id="ps_lifecycle",
+            cycle_id=cycle.cycle_id,
+            probes=[],
+            selection_reason="Cycle lifecycle fixture.",
+            may_be_empty=True,
+        ),
+        signals=[
+            ExternalSignal(
+                id="S_lifecycle",
+                cycle_id="pending",
+                signal_kind=SignalKind.PASSIVE,
+                source_type="user_feedback",
+                source="user",
+                raw_content="SUPPORTS: Lifecycle fixture signal.",
+            )
+        ],
+    )
+
+    assert result.cycle.boundary_status == BoundaryStatus.INTEGRATED
+    assert result.cycle.boundary_closed_at is not None
+    assert result.cycle.completed_at is not None
+    assert (
+        result.cycle.started_at
+        <= result.cycle.boundary_closed_at
+        <= result.cycle.completed_at
+    )
 
 
 def test_active_only_cycle_rejects_passive_signal():
@@ -811,13 +853,62 @@ def test_active_plus_passive_cycle_accepts_mixed_signal_kinds():
     ]
 
 
+@pytest.mark.parametrize(
+    ("shape", "signals", "message"),
+    [
+        (CycleSignalShape.ACTIVE_ONLY, [], "at least one active signal"),
+        (CycleSignalShape.PASSIVE_ONLY, [], "at least one passive signal"),
+        (
+            CycleSignalShape.ACTIVE_PLUS_PASSIVE,
+            [
+                ExternalSignal(
+                    id="S_shape_only_active",
+                    cycle_id="pending",
+                    signal_kind=SignalKind.ACTIVE,
+                    source_type="benchmark_stream",
+                    source="fixture",
+                    raw_content="SUPPORTS: Active signal without passive peer.",
+                )
+            ],
+            "both active and passive signals",
+        ),
+    ],
+)
+def test_cycle_signal_shape_requires_its_declared_signal_composition(
+    shape,
+    signals,
+    message,
+):
+    core = BayesProbeCore()
+    cycle = CycleRecord(
+        cycle_id=f"cycle_required_{shape.value}",
+        run_id="run_1",
+        cycle_index=1,
+        signal_shape=shape,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=make_belief_state(cycle_id="cycle_0"),
+            probe_set=ProbeSet(
+                probe_set_id=f"ps_required_{shape.value}",
+                cycle_id=cycle.cycle_id,
+                probes=[],
+                selection_reason="Exact shape validation fixture.",
+                may_be_empty=True,
+            ),
+            signals=signals,
+        )
+
+
 def test_previous_cycle_belief_state_advances_to_current_cycle():
     core = BayesProbeCore()
     cycle = CycleRecord(
         cycle_id="current_cycle",
         run_id="run_1",
         cycle_index=1,
-        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+        signal_shape=CycleSignalShape.PASSIVE_ONLY,
     )
 
     result = core.integrate_cycle(
@@ -830,7 +921,16 @@ def test_previous_cycle_belief_state_advances_to_current_cycle():
             selection_reason="Advance from previous cycle.",
             may_be_empty=True,
         ),
-        signals=[],
+        signals=[
+            ExternalSignal(
+                id="S_advance",
+                cycle_id="pending",
+                signal_kind=SignalKind.PASSIVE,
+                source_type="system_log",
+                source="fixture",
+                raw_content="NEUTRAL: Advance with an auditable passive signal.",
+            )
+        ],
     )
 
     assert result.belief_state.cycle_id == "current_cycle"
@@ -1475,7 +1575,7 @@ def test_existing_ledger_refs_are_preserved_and_appended():
         cycle_id="cycle_7",
         run_id="run_1",
         cycle_index=7,
-        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+        signal_shape=CycleSignalShape.PASSIVE_ONLY,
     )
     belief_state = make_belief_state(cycle_id="cycle_6").model_copy(
         update={
@@ -1499,12 +1599,28 @@ def test_existing_ledger_refs_are_preserved_and_appended():
             selection_reason="Append ledger refs.",
             may_be_empty=True,
         ),
-        signals=[],
+        signals=[
+            ExternalSignal(
+                id="S_ledger_refs",
+                cycle_id="pending",
+                signal_kind=SignalKind.PASSIVE,
+                source_type="system_log",
+                source="fixture",
+                raw_content="NEUTRAL: Preserve and append ledger references.",
+            )
+        ],
     )
 
     assert result.belief_state.ledger_refs["probe_sets"] == ["ps_prior", "ps_7"]
-    assert result.belief_state.ledger_refs["evidence_events"] == ["E_prior"]
-    assert result.belief_state.ledger_refs["belief_updates"] == ["U_prior"]
+    assert result.belief_state.ledger_refs["evidence_events"] == [
+        "E_prior",
+        "run_1_cycle_7_E1",
+    ]
+    assert result.belief_state.ledger_refs["belief_updates"] == [
+        "U_prior",
+        "run_1_cycle_7_U1_H1",
+        "run_1_cycle_7_U1_H2",
+    ]
     assert result.belief_state.ledger_refs["hypothesis_evolutions"] == ["HE_prior"]
     assert result.belief_state.ledger_refs["custom_audit"] == ["keep_me"]
 

@@ -12,7 +12,13 @@ from bayesprobe.question_runner import (
     AutonomousQuestionRunner,
     AutonomousQuestionStopReason,
 )
-from bayesprobe.schemas import CycleSignalShape, ProbeSet, SignalKind
+from bayesprobe.schemas import (
+    CycleSignalShape,
+    ProbeSet,
+    RunRegime,
+    RunStatus,
+    SignalKind,
+)
 
 
 class EmptyPlanner:
@@ -64,6 +70,10 @@ def test_question_runner_executes_one_end_to_end_cycle():
     cycle_result = result.cycle_results[0]
     assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
     assert result.run.run_id == "run_question_1"
+    assert result.run.regime == RunRegime.AUTONOMOUS
+    assert result.run.status == RunStatus.COMPLETED
+    assert result.run.current_cycle_id == result.final_belief_state.cycle_id
+    assert result.run.metadata["stop_reason"] == result.stop_reason.value
     assert result.initial_belief_state.cycle_id == "cycle_0"
     assert result.final_belief_state == cycle_result.belief_state
     assert result.final_answer_projection == cycle_result.answer_projection

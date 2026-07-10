@@ -29,7 +29,9 @@ from bayesprobe.schemas import (
     ProbeCandidate,
     ProbeSet,
     RunRecord,
+    RunStatus,
     SignalKind,
+    utc_now,
 )
 
 
@@ -295,8 +297,21 @@ class AutonomousQuestionRunner:
         final_answer_projection: AnswerProjection | None,
         stop_reason: AutonomousQuestionStopReason,
     ) -> AutonomousQuestionRunResult:
+        completed_run = run.model_copy(
+            update={
+                "status": RunStatus.COMPLETED,
+                "current_cycle_id": final_belief_state.cycle_id,
+                "updated_at": utc_now(),
+                "metadata": {
+                    **run.metadata,
+                    "stop_reason": stop_reason.value,
+                },
+            }
+        )
+        if self.core.ledger is not None:
+            self.core.ledger.append("run", completed_run)
         return AutonomousQuestionRunResult(
-            run=run,
+            run=completed_run,
             initial_belief_state=initial_belief_state,
             final_belief_state=final_belief_state,
             cycle_results=list(cycle_results),

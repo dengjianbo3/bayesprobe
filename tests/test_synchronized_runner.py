@@ -5,7 +5,12 @@ import pytest
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.schemas import ExternalSignal, SignalKind
+from bayesprobe.schemas import (
+    ExternalSignal,
+    RunRegime,
+    RunStatus,
+    SignalKind,
+)
 from bayesprobe.synchronized_runner import (
     SynchronizedRoundInput,
     SynchronizedRoundRunner,
@@ -47,6 +52,9 @@ def test_synchronized_runner_processes_new_run_passive_only_round():
 
     round_result = result.round_results[0]
     assert result.run.run_id == "sync_passive_new"
+    assert result.run.regime == RunRegime.SYNCHRONIZED
+    assert result.run.status == RunStatus.COMPLETED
+    assert result.run.current_cycle_id == result.final_belief_state.cycle_id
     assert result.initial_belief_state.cycle_id == "cycle_0"
     assert result.final_belief_state == round_result.belief_state
     assert result.final_belief_state_projection == round_result.belief_state_projection
@@ -171,6 +179,7 @@ def test_synchronized_runner_accepts_existing_run_state():
         InitializeRunInput(
             run_id="sync_existing",
             problem="Can synchronized runner resume from existing run state?",
+            regime=RunRegime.SYNCHRONIZED,
         )
     )
     runner = SynchronizedRoundRunner(core=BayesProbeCore())
@@ -190,7 +199,9 @@ def test_synchronized_runner_accepts_existing_run_state():
         )
     )
 
-    assert result.run == initialization.run
+    assert result.run.run_id == initialization.run.run_id
+    assert result.run.regime == RunRegime.SYNCHRONIZED
+    assert result.run.status == RunStatus.COMPLETED
     assert result.initial_belief_state == initialization.belief_state
     assert result.round_results[0].cycle.run_id == "sync_existing"
     assert result.round_results[0].active_signal_count == 1

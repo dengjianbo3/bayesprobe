@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -29,7 +29,10 @@ from bayesprobe.schemas import (
     ProbeCandidate,
     ProbeSet,
     RunRecord,
+    RunRegime,
+    RunStatus,
     SignalKind,
+    utc_now,
 )
 
 
@@ -93,6 +96,8 @@ class SynchronizedRunInput:
         if self.run is not None and self.belief_state is not None:
             if self.run.run_id != self.belief_state.run_id:
                 raise ValueError("run and belief_state must have the same run_id")
+            if self.run.regime != RunRegime.SYNCHRONIZED:
+                raise ValueError("existing synchronized run must use synchronized regime")
 
 
 @dataclass(frozen=True)
@@ -165,8 +170,22 @@ class SynchronizedRoundRunner:
             current_belief_state = round_result.belief_state
             candidate_pool = list(round_result.remaining_probe_candidates)
 
+        completed_run = run.model_copy(
+            update={
+                "status": RunStatus.COMPLETED,
+                "current_cycle_id": current_belief_state.cycle_id,
+                "updated_at": utc_now(),
+                "metadata": {
+                    **run.metadata,
+                    "stop_reason": "fixed_rounds_completed",
+                    "completed_round_count": len(round_results),
+                },
+            }
+        )
+        if self.core.ledger is not None:
+            self.core.ledger.append("run", completed_run)
         return SynchronizedRunResult(
-            run=run,
+            run=completed_run,
             initial_belief_state=initial_belief_state,
             final_belief_state=current_belief_state,
             round_results=list(round_results),
@@ -179,7 +198,12 @@ class SynchronizedRoundRunner:
         input: SynchronizedRunInput,
     ) -> tuple[RunRecord, BeliefState, list[ProbeCandidate]]:
         if input.initialize_input is not None:
-            initialization = self.initializer.initialize(input.initialize_input)
+            initialization = self.initializer.initialize(
+                replace(
+                    input.initialize_input,
+                    regime=RunRegime.SYNCHRONIZED,
+                )
+            )
             return (
                 initialization.run,
                 initialization.belief_state,

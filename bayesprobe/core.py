@@ -11,6 +11,7 @@ from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGateway
 from bayesprobe.schemas import (
     BeliefState,
     BeliefUpdate,
+    BoundaryStatus,
     CycleRecord,
     CycleSignalShape,
     EvidenceEvent,
@@ -19,6 +20,7 @@ from bayesprobe.schemas import (
     ProbeCandidate,
     ProbeSet,
     SignalKind,
+    utc_now,
 )
 
 
@@ -69,10 +71,16 @@ class BayesProbeCore:
         for signal in signals:
             inbox.add(signal)
         normalized_signals = inbox.close()
-        self._validate_signal_shape(cycle=cycle, signals=normalized_signals)
+        closed_cycle = cycle.model_copy(
+            update={
+                "boundary_status": BoundaryStatus.CLOSED,
+                "boundary_closed_at": utc_now(),
+            }
+        )
+        self._validate_signal_shape(cycle=closed_cycle, signals=normalized_signals)
         integration = self._normalize_evidence_integration(
             self._evidence_gate.integrate(
-                cycle=cycle,
+                cycle=closed_cycle,
                 belief_state=belief_state,
                 probe_set=probe_set,
                 signals=normalized_signals,
@@ -87,7 +95,7 @@ class BayesProbeCore:
             events=evidence_events,
         )
         evolution_result = self._evolution_policy.evolve(
-            cycle=cycle,
+            cycle=closed_cycle,
             previous_belief_state=belief_state,
             updated_hypotheses=updated_hypotheses,
             evidence_events=evidence_events,
@@ -135,8 +143,14 @@ class BayesProbeCore:
                 "ledger_refs": merged_ledger_refs,
             }
         )
+        integrated_cycle = closed_cycle.model_copy(
+            update={
+                "boundary_status": BoundaryStatus.INTEGRATED,
+                "completed_at": utc_now(),
+            }
+        )
         self._append_ledger_records(
-            cycle=cycle,
+            cycle=integrated_cycle,
             signals=normalized_signals,
             probe_set=probe_set,
             evidence_events=evidence_events,
@@ -146,7 +160,7 @@ class BayesProbeCore:
             belief_state=updated_state,
         )
         return CycleResult(
-            cycle=cycle,
+            cycle=integrated_cycle,
             belief_state=updated_state,
             evidence_events=evidence_events,
             belief_updates=belief_updates,
@@ -178,15 +192,30 @@ class BayesProbeCore:
         )
 
     def _validate_signal_shape(self, *, cycle: CycleRecord, signals: list[ExternalSignal]) -> None:
+        active_count = sum(
+            1 for signal in signals if signal.signal_kind == SignalKind.ACTIVE
+        )
+        passive_count = sum(
+            1 for signal in signals if signal.signal_kind == SignalKind.PASSIVE
+        )
         if cycle.signal_shape == CycleSignalShape.ACTIVE_ONLY:
             invalid = [signal.id for signal in signals if signal.signal_kind != SignalKind.ACTIVE]
             if invalid:
                 raise ValueError("active_only cycles accept only active signals")
+            if active_count == 0:
+                raise ValueError("active_only cycles require at least one active signal")
             return
         if cycle.signal_shape == CycleSignalShape.PASSIVE_ONLY:
             invalid = [signal.id for signal in signals if signal.signal_kind != SignalKind.PASSIVE]
             if invalid:
                 raise ValueError("passive_only cycles accept only passive signals")
+            if passive_count == 0:
+                raise ValueError("passive_only cycles require at least one passive signal")
+            return
+        if active_count == 0 or passive_count == 0:
+            raise ValueError(
+                "active_plus_passive cycles require both active and passive signals"
+            )
 
     def _append_ledger_records(
         self,
@@ -223,6 +252,8 @@ class BayesProbeCore:
         belief_state: BeliefState,
         probe_set: ProbeSet,
     ) -> None:
+        if cycle.boundary_status != BoundaryStatus.OPEN:
+            raise ValueError("cycle must be open before integration")
         if probe_set.cycle_id != cycle.cycle_id:
             raise ValueError("probe set must be frozen to the current cycle")
         if belief_state.run_id != cycle.run_id:
