@@ -308,7 +308,7 @@ def test_executor_normalizes_gateway_signals_without_mutating_originals():
     assert original_signal.initial_target_hypotheses == ["stale"]
 
 
-def test_executor_writes_only_execution_and_signal_records_to_ledger(tmp_path: Path):
+def test_executor_writes_only_execution_diagnostics_to_ledger(tmp_path: Path):
     ledger = JsonlLedgerStore(tmp_path / "executor-ledger.jsonl")
     probe_set = make_probe_set([make_probe("P1", ["H1"])])
 
@@ -318,7 +318,8 @@ def test_executor_writes_only_execution_and_signal_records_to_ledger(tmp_path: P
     )
 
     record_types = [record["record_type"] for record in ledger.read_all()]
-    assert record_types == ["probe_execution", "external_signal"]
+    assert record_types == ["probe_execution"]
+    assert "external_signal" not in record_types
     assert "evidence_event" not in record_types
     assert "belief_update" not in record_types
     assert "hypothesis_evolution" not in record_types

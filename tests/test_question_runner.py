@@ -305,3 +305,7 @@ def test_question_runner_does_not_duplicate_core_integration(tmp_path: Path):
     record_types = [record["record_type"] for record in ledger.read_all()]
     assert record_types.count("cycle") == 1
     assert record_types.count("answer_projection") == 1
+    assert record_types.count("probe_planning") == 1
+    assert record_types.count("probe_execution") == 1
+    assert record_types.count("probe_set") == 1
+    assert record_types.count("external_signal") == 1

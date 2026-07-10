@@ -224,7 +224,7 @@ def test_planner_rejects_invalid_config_values(config_kwargs):
         ProbePlanningConfig(**config_kwargs)
 
 
-def test_planner_writes_only_probe_set_to_ledger(tmp_path: Path):
+def test_planner_writes_only_planning_diagnostics_to_ledger(tmp_path: Path):
     ledger = JsonlLedgerStore(tmp_path / "planner-ledger.jsonl")
 
     ProbePlanner(ledger=ledger).design_probe_set(
@@ -236,7 +236,12 @@ def test_planner_writes_only_probe_set_to_ledger(tmp_path: Path):
     )
 
     record_types = [record["record_type"] for record in ledger.read_all()]
-    assert record_types == ["probe_set"]
+    assert record_types == ["probe_planning"]
+    payload = ledger.read_all()[0]["payload"]
+    assert payload["run_id"] == "run_plan"
+    assert payload["cycle_id"] == "run_plan_cycle_1"
+    assert payload["selected_candidate_ids"] == ["c_valid"]
+    assert "probe_set" not in record_types
     assert "external_signal" not in record_types
     assert "evidence_event" not in record_types
     assert "belief_update" not in record_types

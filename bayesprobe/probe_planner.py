@@ -75,7 +75,11 @@ class ProbePlanner:
                 rejected_candidates=rejected_candidates,
                 config=planning_config,
             )
-            self._append_probe_set(result.probe_set)
+            self._append_planning(
+                run_id=clean_run_id,
+                cycle_id=clean_cycle_id,
+                result=result,
+            )
             return result
 
         ranked_candidates = sorted(
@@ -129,7 +133,11 @@ class ProbePlanner:
             selected_candidates=selected_candidates,
             rejected_candidates=rejected_candidates,
         )
-        self._append_probe_set(probe_set)
+        self._append_planning(
+            run_id=clean_run_id,
+            cycle_id=clean_cycle_id,
+            result=result,
+        )
         return result
 
     def _empty_result(
@@ -159,10 +167,31 @@ class ProbePlanner:
             rejected_candidates=rejected_candidates,
         )
 
-    def _append_probe_set(self, probe_set: ProbeSet) -> None:
+    def _append_planning(
+        self,
+        *,
+        run_id: str,
+        cycle_id: str,
+        result: ProbePlanningResult,
+    ) -> None:
         if self._ledger is None:
             return
-        self._ledger.append("probe_set", probe_set)
+        self._ledger.append(
+            "probe_planning",
+            {
+                "run_id": run_id,
+                "cycle_id": cycle_id,
+                "probe_set_id": result.probe_set.probe_set_id,
+                "selected_candidate_ids": [
+                    candidate.candidate_id
+                    for candidate in result.selected_candidates
+                ],
+                "rejected_candidate_ids": [
+                    rejected.candidate.candidate_id
+                    for rejected in result.rejected_candidates
+                ],
+            },
+        )
 
 
 def _clean_required(value: str, field_name: str) -> str:

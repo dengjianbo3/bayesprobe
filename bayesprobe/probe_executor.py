@@ -194,8 +194,6 @@ class ProbeExecutor:
                 "signal_ids": [signal.id for signal in result.signals],
             },
         )
-        for signal in result.signals:
-            self._ledger.append("external_signal", signal)
 
 
 def _clean_required(value: str, field_name: str) -> str:
