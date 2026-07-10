@@ -3,6 +3,8 @@ import json
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+import shutil
+import subprocess
 from threading import Event, Thread
 
 import pytest
@@ -16,6 +18,7 @@ from bayesprobe.webui import (
 
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "bayesprobe" / "webui_static"
+STREAM_BEHAVIOR_TEST = Path(__file__).with_name("test_webui_stream.js")
 
 
 @contextmanager
@@ -334,6 +337,21 @@ def test_webui_static_script_preserves_streamed_output_after_a_late_failure():
     assert "Run failed. No answer projection." in script
     assert "Run failed. No belief state." in script
     assert "Run failed. Cycle trace unavailable." in script
+
+
+def test_webui_frontend_stream_behavior():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not available for frontend stream behavior tests")
+
+    result = subprocess.run(
+        [node, "--test", str(STREAM_BEHAVIOR_TEST)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(

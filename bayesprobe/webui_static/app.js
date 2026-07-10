@@ -125,38 +125,74 @@ async function parseJsonResponse(response) {
   }
 }
 
-async function consumeRunStream(response) {
+async function consumeRunStream(response, eventHandler = handleProgressEvent) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let terminalEventSeen = false;
+  let terminalFailure = null;
+  let streamError = null;
+  let cancelReader = false;
+  let streamEnded = false;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch (error) {
-        throw new Error("Server returned an invalid progress event");
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch (error) {
+          throw new Error("Server returned an invalid progress event");
+        }
+        const isTerminalEvent = ["run_completed", "run_failed"].includes(
+          event.event
+        );
+        if (isTerminalEvent) {
+          terminalEventSeen = true;
+          if (event.event === "run_failed") {
+            terminalFailure = new Error(progressFailureMessage(event));
+          }
+        }
+        eventHandler(event);
       }
-      handleProgressEvent(event);
-      terminalEventSeen ||= ["run_completed", "run_failed"].includes(event.event);
+
+      if (done) {
+        streamEnded = true;
+        break;
+      }
     }
 
-    if (done) break;
+    if (buffer.trim()) {
+      throw new Error("Progress stream ended with an incomplete event");
+    }
+    if (!terminalEventSeen) {
+      throw new Error("Progress stream ended before the run completed");
+    }
+  } catch (error) {
+    streamError = error;
+    cancelReader = !streamEnded;
+  } finally {
+    if (cancelReader) {
+      try {
+        await reader.cancel();
+      } catch (error) {
+        streamError ||= error;
+      }
+    }
+    reader.releaseLock();
   }
 
-  if (buffer.trim()) {
-    throw new Error("Progress stream ended with an incomplete event");
+  if (streamError) {
+    throw streamError;
   }
-  if (!terminalEventSeen) {
-    throw new Error("Progress stream ended before the run completed");
+  if (terminalFailure) {
+    throw terminalFailure;
   }
 }
 
@@ -183,9 +219,6 @@ function handleProgressEvent(event) {
       `${event.data?.run?.status || "completed"}: ${event.data?.run?.regime || "autonomous"} / ${event.data?.stop_reason || "completed"}`,
       "ok"
     );
-  }
-  if (eventName === "run_failed") {
-    throw new Error(progressFailureMessage(event));
   }
 }
 

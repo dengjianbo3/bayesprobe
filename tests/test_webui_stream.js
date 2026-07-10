@@ -1,0 +1,313 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const { TextDecoder: NativeTextDecoder, TextEncoder: NativeTextEncoder } = require("node:util");
+const fs = require("node:fs");
+const path = require("node:path");
+const test = require("node:test");
+const vm = require("node:vm");
+
+const APP_PATH = path.join(__dirname, "..", "bayesprobe", "webui_static", "app.js");
+
+class Element {
+  constructor(tagName) {
+    this.tagName = tagName;
+    this.children = [];
+    this.className = "";
+    this.dataset = {};
+    this.disabled = false;
+    this.hidden = false;
+    this.textContent = "";
+    this.value = "";
+    this.checked = false;
+    this.open = false;
+    this._innerHTML = "";
+    this.classList = {
+      add() {},
+      remove() {},
+      toggle() {},
+    };
+  }
+
+  get innerHTML() {
+    return this._innerHTML;
+  }
+
+  set innerHTML(value) {
+    this._innerHTML = String(value);
+    this.children = [];
+  }
+
+  append(...children) {
+    children.forEach((child) => this.appendChild(child));
+  }
+
+  appendChild(child) {
+    this.children.push(child);
+    return child;
+  }
+
+  querySelector(selector) {
+    return findDescendant(this, selector);
+  }
+
+  addEventListener() {}
+}
+
+function findDescendant(root, selector) {
+  for (const child of root.children) {
+    if (
+      selector === '.progress-item[data-state="active"]' &&
+      child.className === "progress-item" &&
+      child.dataset.state === "active"
+    ) {
+      return child;
+    }
+    if (selector === ".progress-status" && child.className === "progress-status") {
+      return child;
+    }
+    const match = findDescendant(child, selector);
+    if (match) return match;
+  }
+  return null;
+}
+
+class MockTextEncoder {
+  constructor() {
+    this.encoder = new NativeTextEncoder();
+  }
+
+  encode(value) {
+    return this.encoder.encode(value);
+  }
+}
+
+class MockTextDecoder {
+  constructor() {
+    this.decoder = new NativeTextDecoder();
+    this.calls = [];
+  }
+
+  decode(value, options) {
+    this.calls.push({ value, options });
+    return this.decoder.decode(value, options);
+  }
+}
+
+class MockReader {
+  constructor(chunks) {
+    this.chunks = chunks;
+    this.index = 0;
+    this.cancelCalls = 0;
+    this.releaseLockCalls = 0;
+  }
+
+  async read() {
+    if (this.index < this.chunks.length) {
+      return { value: this.chunks[this.index++], done: false };
+    }
+    return { value: undefined, done: true };
+  }
+
+  async cancel() {
+    this.cancelCalls += 1;
+  }
+
+  releaseLock() {
+    this.releaseLockCalls += 1;
+  }
+}
+
+class MockReadableStream {
+  constructor(chunks) {
+    this.reader = new MockReader(chunks);
+  }
+
+  getReader() {
+    return this.reader;
+  }
+}
+
+function loadApp() {
+  const elements = new Map();
+  const ids = [
+    "run-form",
+    "provider-kind",
+    "provider-auth",
+    "provider-note",
+    "status-banner",
+    "progress-list",
+    "progress-state",
+    "answer-panel",
+    "belief-panel",
+    "trace-pane",
+    "run-id",
+    "run-button",
+    "api-key",
+    "base-url",
+    "model-name",
+    "timeout-seconds",
+    "max-output-tokens",
+    "question",
+    "context",
+    "max-cycles",
+    "max-probes",
+    "stop-on-no-probes",
+    "confidence-threshold",
+    "posterior-delta-threshold",
+  ];
+  for (const id of ids) {
+    elements.set(id, new Element("div"));
+  }
+  elements.get("provider-kind").value = "deterministic";
+
+  const document = {
+    createElement(tagName) {
+      return new Element(tagName);
+    },
+    querySelector(selector) {
+      return elements.get(selector.replace(/^#/, "")) || null;
+    },
+  };
+  const context = vm.createContext({
+    document,
+    Error,
+    JSON,
+    Set,
+    String,
+    Number,
+    TextDecoder: MockTextDecoder,
+    Uint8Array,
+  });
+
+  vm.runInContext(fs.readFileSync(APP_PATH, "utf8"), context, {
+    filename: APP_PATH,
+  });
+  return {
+    api: vm.runInContext(
+      "({ consumeRunStream, handleProgressEvent })",
+      context
+    ),
+    elements,
+  };
+}
+
+function streamFromText(text, splitAt) {
+  const encoder = new MockTextEncoder();
+  const chunks = splitAt == null
+    ? [encoder.encode(text)]
+    : [encoder.encode(text.slice(0, splitAt)), encoder.encode(text.slice(splitAt))];
+  return new MockReadableStream(chunks);
+}
+
+function integratedCycleEvent() {
+  return {
+    event: "cycle_integrated",
+    sequence: 1,
+    cycle_id: "cycle-1",
+    cycle_index: 1,
+    data: {
+      cycle_id: "cycle-1",
+      signal_shape: "active_plus_passive",
+      cycle: { boundary_status: "integrated" },
+      probes: [],
+      signals: [],
+      evidence_events: [],
+      belief_updates: [],
+      hypothesis_evolutions: [],
+      belief_state: {
+        hypotheses: [
+          {
+            id: "H1",
+            prior: 0.5,
+            posterior: 0.75,
+            statement: "H1 remains supported.",
+          },
+        ],
+        posterior_summary: {
+          total_active_posterior: 1,
+          top_hypothesis: "H1",
+          posterior_gap: 0.5,
+        },
+        uncertainty_summary: "More evidence may change the ranking.",
+      },
+      answer_projection: {
+        current_best_hypothesis: "H1",
+        answer: "H1 is currently favored.",
+        posterior_summary: "H1=0.750",
+        main_uncertainty: "More evidence may change the ranking.",
+        weakest_assumption: "The evidence remains reliable.",
+      },
+    },
+  };
+}
+
+test("consumes split NDJSON chunks and releases a completed reader", async () => {
+  const { api } = loadApp();
+  const events = [
+    { event: "run_started", sequence: 1, run_id: "run-1", data: {} },
+    { event: "run_completed", sequence: 2, data: {} },
+  ];
+  const payload = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  const stream = streamFromText(payload, payload.indexOf("run_completed") + 5);
+  const received = [];
+
+  await api.consumeRunStream({ body: stream }, (event) => received.push(event.event));
+
+  assert.deepEqual(received, ["run_started", "run_completed"]);
+  assert.equal(stream.reader.cancelCalls, 0);
+  assert.equal(stream.reader.releaseLockCalls, 1);
+});
+
+test("cancels and releases a reader after a malformed progress event", async () => {
+  const { api } = loadApp();
+  const stream = streamFromText('{"event":"run_started"}\nnot-json\n');
+
+  await assert.rejects(
+    api.consumeRunStream({ body: stream }, () => {}),
+    /invalid progress event/
+  );
+
+  assert.equal(stream.reader.cancelCalls, 1);
+  assert.equal(stream.reader.releaseLockCalls, 1);
+});
+
+test("rejects incomplete streams after releasing the reader", async () => {
+  const { api } = loadApp();
+  const stream = streamFromText('{"event":"run_completed"');
+
+  await assert.rejects(
+    api.consumeRunStream({ body: stream }, () => {}),
+    /incomplete event/
+  );
+
+  assert.equal(stream.reader.cancelCalls, 0);
+  assert.equal(stream.reader.releaseLockCalls, 1);
+});
+
+test("preserves an integrated cycle when a sanitized terminal failure arrives", async () => {
+  const { api, elements } = loadApp();
+  const events = [
+    integratedCycleEvent(),
+    {
+      event: "run_failed",
+      sequence: 2,
+      data: { error: { message: "provider request failed" } },
+    },
+  ];
+  const stream = streamFromText(
+    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`
+  );
+
+  await assert.rejects(
+    api.consumeRunStream({ body: stream }),
+    /provider request failed/
+  );
+
+  assert.equal(stream.reader.cancelCalls, 0);
+  assert.equal(stream.reader.releaseLockCalls, 1);
+  assert.equal(elements.get("answer-panel").children.length, 5);
+  assert.ok(elements.get("belief-panel").children.length > 0);
+  assert.equal(elements.get("trace-pane").children.length, 1);
+  assert.equal(elements.get("progress-list").children.at(-1).dataset.state, "failed");
+});
