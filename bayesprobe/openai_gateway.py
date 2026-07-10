@@ -49,6 +49,15 @@ EVIDENCE_JUDGMENT_JSON_SCHEMA: dict[str, Any] = {
     },
 }
 
+PROBE_SIGNAL_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["raw_content"],
+    "properties": {
+        "raw_content": {"type": "string"},
+    },
+}
+
 ENVIRONMENT_VARIABLE_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 EVIDENCE_JUDGMENT_SCHEMA_KEYS = frozenset(
     {"evidence_type", "likelihoods", "interpretation", "quality_overrides"}
@@ -173,6 +182,7 @@ def build_openai_request_payload(
     model: str,
     max_output_tokens: int | None = None,
 ) -> dict[str, Any]:
+    schema_name, schema = _structured_output_for_task(request.task)
     payload: dict[str, Any] = {
         "model": model,
         "input": [
@@ -192,9 +202,9 @@ def build_openai_request_payload(
         "text": {
             "format": {
                 "type": "json_schema",
-                "name": "EvidenceJudgment",
+                "name": schema_name,
                 "strict": True,
-                "schema": EVIDENCE_JUDGMENT_JSON_SCHEMA,
+                "schema": schema,
             }
         },
     }
@@ -245,7 +255,7 @@ def parse_openai_structured_response(response: Any) -> dict[str, Any]:
         text = _extract_text_from_output(response)
         if text is not None:
             return _parse_json_object(text)
-        if _looks_like_evidence_judgment_payload(response):
+        if _looks_like_structured_task_payload(response):
             return dict(response)
         raise ModelGatewayValidationError("openai structured response text was missing")
     if isinstance(response, str):
@@ -272,6 +282,13 @@ def parse_openai_chat_completions_response(response: Any) -> dict[str, Any]:
 
 
 def _instruction_for_task(task: str) -> str:
+    if task == "execute_probe":
+        return (
+            "You are the active probe executor inside BayesProbe. Perform the supplied "
+            "inquiry against the problem, current hypotheses, and initial context. "
+            "Return a raw informational signal only; do not assign posterior probabilities "
+            "or claim access to external sources that were not supplied."
+        )
     if task == "judge_evidence":
         return (
             "You are the evidence judgment component inside BayesProbe. "
@@ -287,8 +304,21 @@ def _instruction_for_task(task: str) -> str:
     raise ValueError(f"unsupported openai model task: {task}")
 
 
+def _structured_output_for_task(task: str) -> tuple[str, dict[str, Any]]:
+    if task == "execute_probe":
+        return "ProbeSignal", PROBE_SIGNAL_JSON_SCHEMA
+    if task in {"judge_evidence", "repair_evidence_judgment"}:
+        return "EvidenceJudgment", EVIDENCE_JUDGMENT_JSON_SCHEMA
+    raise ValueError(f"unsupported openai model task: {task}")
+
+
 def _chat_instruction_for_task(task: str) -> str:
     base_instruction = _instruction_for_task(task)
+    if task == "execute_probe":
+        return (
+            f"{base_instruction} Return only one JSON object with exactly one "
+            "top-level key: raw_content. Do not include markdown."
+        )
     if task == "judge_evidence":
         return (
             f"{base_instruction} Return only one JSON object with exactly these "
@@ -307,6 +337,16 @@ def _chat_instruction_for_task(task: str) -> str:
 
 
 def _required_output_for_task(task: str) -> dict[str, Any]:
+    if task == "execute_probe":
+        return {
+            "type": "ProbeSignal",
+            "required_keys": ["raw_content"],
+            "json_schema": PROBE_SIGNAL_JSON_SCHEMA,
+            "notes": [
+                "raw_content must report the inquiry result without posterior updates",
+                "do not claim external retrieval or verification unless supplied in the input",
+            ],
+        }
     if task in {"judge_evidence", "repair_evidence_judgment"}:
         return {
             "type": "EvidenceJudgment",
@@ -405,8 +445,10 @@ def _chat_message_content(response: Any) -> str | None:
     return None
 
 
-def _looks_like_evidence_judgment_payload(response: Mapping[str, Any]) -> bool:
-    return any(key in response for key in EVIDENCE_JUDGMENT_SCHEMA_KEYS)
+def _looks_like_structured_task_payload(response: Mapping[str, Any]) -> bool:
+    return "raw_content" in response or any(
+        key in response for key in EVIDENCE_JUDGMENT_SCHEMA_KEYS
+    )
 
 
 def _optional_request_api_key(api_key: str | None) -> str | None:
@@ -536,6 +578,7 @@ def _sanitize_provider_error(message: str, api_key: str) -> str:
 
 __all__ = [
     "EVIDENCE_JUDGMENT_JSON_SCHEMA",
+    "PROBE_SIGNAL_JSON_SCHEMA",
     "OpenAIChatCompletionsModelGateway",
     "OpenAIModelGatewayConfig",
     "OpenAIResponsesModelGateway",

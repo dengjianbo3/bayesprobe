@@ -1572,6 +1572,46 @@ def test_low_reliability_signal_caps_quality_scores():
     assert event.relevance == 0.9
 
 
+def test_model_probe_signal_uses_conservative_quality_baseline():
+    core = BayesProbeCore()
+    cycle = CycleRecord(
+        cycle_id="cycle_model_probe",
+        run_id="run_1",
+        cycle_index=1,
+        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+    )
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=ProbeSet(
+            probe_set_id="ps_model_probe",
+            cycle_id="cycle_model_probe",
+            probes=[],
+            selection_reason="Model probe quality fixture.",
+            may_be_empty=True,
+        ),
+        signals=[
+            ExternalSignal(
+                id="S_model_probe",
+                cycle_id="pending",
+                signal_kind=SignalKind.ACTIVE,
+                source_type="model_probe_gateway",
+                source="model_gateway:scripted",
+                raw_content="SUPPORTS: Internal model reasoning favors H1.",
+            )
+        ],
+    )
+
+    event = result.evidence_events[0]
+    assert event.reliability == 0.55
+    assert event.independence == 0.35
+    assert event.relevance == 0.85
+    assert event.novelty == 0.55
+    assert event.specificity == 0.65
+    assert event.verifiability == 0.3
+
+
 def test_duplicate_signals_downweight_later_event_independence_and_novelty():
     core = BayesProbeCore()
     cycle = CycleRecord(

@@ -130,6 +130,11 @@ BayesProbe supports three first-class cycle shapes:
 
 All three shapes must close a boundary and pass through the same core path.
 
+For autonomous question runs, non-empty `InitializeRunInput.context` is converted
+to one first-cycle passive `ExternalSignal`. It is integrated once, together with
+active probe returns when present. If no probe is available, the context still
+forms a legal `passive_only` cycle before the runner stops.
+
 ### 3.4 Projection-As-Signal Rule
 
 A `BeliefStateProjection` received from another human or agent enters as a
@@ -325,6 +330,13 @@ Responsibilities:
 Current adapters:
 
 - `DeterministicProbeToolGateway`.
+- `ModelBackedProbeToolGateway`, which converts the structured `execute_probe`
+  result from a `ModelGateway` into an active `ExternalSignal`.
+
+`ModelBackedProbeToolGateway` is an internal-deliberation adapter, not a claim of
+web search or source verification. Its signals use a conservative quality
+baseline (`reliability=0.55`, `independence=0.35`, `verifiability=0.30`) and keep
+`source_type=model_probe_gateway` in the trace.
 
 Future adapters:
 
@@ -350,6 +362,8 @@ class ModelGateway(Protocol):
 Current tasks:
 
 - `judge_evidence`.
+- `execute_probe` for structured `ProbeSignal` generation behind the
+  `ProbeToolGateway` seam.
 
 Current adapters:
 
@@ -497,6 +511,8 @@ Responsibilities:
 - serve the local autonomous workbench;
 - validate local WebUI requests;
 - build request-scoped provider gateways;
+- use provider-backed gateways for separate `execute_probe` and
+  `judge_evidence` calls;
 - run `AutonomousQuestionRunner`;
 - serialize final answer, belief state, cycle, signal, evidence, update, and
   evolution traces.
@@ -526,13 +542,13 @@ Current limitations:
 | Belief update | Good MVP | Deterministic update rules and discarded-evidence skip. |
 | Hypothesis evolution | Good MVP | Anomaly spawn, weakening/reframing/retirement style evolution exists. |
 | Probe planning | Good MVP | Candidate ranking and bounded probe-set design exist. |
-| Probe execution/tool seam | Good MVP | `ProbeToolGateway` seam exists; only deterministic adapter implemented. |
+| Probe execution/tool seam | Good MVP | Deterministic and model-backed adapters exist; search/retrieval/tool adapters remain future work. |
 | Autonomous question loop | Good MVP | End-to-end question runner exists with stop conditions. |
 | Synchronized round loop | Good MVP | Fixed-round runner supports passive-only, active-only, and mixed rounds. |
 | Ledger/audit | Good MVP | JSONL audit path exists. |
 | Benchmark harness | Good MVP | Toy and v0.2 methodology fixtures, suite/report flow, and belief-quality metrics exist. |
 | Config/CLI/SDK | Good MVP | JSON experiment config, CLI, package exports exist. |
-| Autonomous WebUI | MVP | Local deterministic/OpenAI Responses/OpenAI-compatible Chat Completions workbench for autonomous runs and trace inspection. |
+| Autonomous WebUI | Good MVP | Local deterministic/OpenAI Responses/OpenAI-compatible Chat Completions workbench executes active probes, integrates optional context as passive signal, and exposes full traces. |
 | Model gateway | Good MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Provider observability remains future work. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
@@ -547,14 +563,14 @@ Using the final target as:
 > configurable, experiment-ready, provider-backed, tool-backed, multi-agent-ready
 > BayesProbe agent engineering kernel
 
-the current implementation is approximately **72%-75% complete**.
+the current implementation is approximately **76%-79% complete**.
 
 Using the narrower provider-backed MVP target as:
 
 > deterministic/scripted/provider-backed BayesProbe loop with benchmark,
 > config, SDK, and local WebUI support
 
-the current implementation is approximately **94%-96% complete**.
+the current implementation is approximately **97%-98% complete**.
 
 The remaining work is mostly depth and robustness rather than direction:
 
@@ -574,6 +590,7 @@ The architecture should expose variation through a small number of deep seams.
 Use for model-shaped structured decisions:
 
 - evidence judgment;
+- structured model-backed probe execution behind `ProbeToolGateway`;
 - future judgment repair;
 - future hypothesis evolution assistance;
 - future projection writing or compression;
@@ -599,6 +616,11 @@ Use for active external information gathering:
 - simulation.
 
 Tool output returns as `ExternalSignal`, not `EvidenceEvent`.
+
+The current model-backed adapter is useful for closed-book autonomous reasoning,
+but it remains lower-verifiability than future search, retrieval, code, skill,
+and simulation adapters. Provider output still passes through the same Evidence
+Integration Gate before it can affect belief.
 
 ### 7.3 LedgerStore
 

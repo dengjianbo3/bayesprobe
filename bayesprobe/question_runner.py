@@ -29,6 +29,7 @@ from bayesprobe.schemas import (
     ProbeCandidate,
     ProbeSet,
     RunRecord,
+    SignalKind,
 )
 
 
@@ -121,7 +122,17 @@ class AutonomousQuestionRunner:
                 belief_state=current_belief_state,
                 candidate_pool=candidate_pool,
             )
-            if not planning.probe_set.probes:
+            passive_signals = (
+                _initial_context_signals(
+                    input=input,
+                    cycle_id=cycle_id,
+                    belief_state=current_belief_state,
+                )
+                if not cycle_results
+                else []
+            )
+            no_probes_selected = not planning.probe_set.probes
+            if no_probes_selected and not passive_signals:
                 return self._result(
                     run=run,
                     initial_belief_state=initial_belief_state,
@@ -137,19 +148,24 @@ class AutonomousQuestionRunner:
                     run_id=run.run_id,
                     cycle_id=cycle_id,
                     belief_state=current_belief_state,
+                    metadata={
+                        "problem": run.problem,
+                        "initial_context": input.context.strip(),
+                    },
                 ),
             )
+            signals = [*execution.signals, *passive_signals]
             cycle = CycleRecord(
                 cycle_id=cycle_id,
                 run_id=run.run_id,
                 cycle_index=current_belief_state.cycle_index + 1,
-                signal_shape=CycleSignalShape.ACTIVE_ONLY,
+                signal_shape=_cycle_signal_shape(signals),
             )
             core_result = self.core.integrate_cycle(
                 cycle=cycle,
                 belief_state=current_belief_state,
                 probe_set=planning.probe_set,
-                signals=execution.signals,
+                signals=signals,
             )
             answer_projection = build_answer_projection(
                 cycle_id,
@@ -164,7 +180,7 @@ class AutonomousQuestionRunner:
                 planning_result=planning,
                 execution_result=execution,
                 probe_set=planning.probe_set,
-                signals=execution.signals,
+                signals=signals,
                 belief_state=core_result.belief_state,
                 evidence_events=core_result.evidence_events,
                 belief_updates=core_result.belief_updates,
@@ -179,6 +195,16 @@ class AutonomousQuestionRunner:
                 selected_candidates=planning.selected_candidates,
                 answer_projection=answer_projection,
             )
+
+            if no_probes_selected:
+                return self._result(
+                    run=run,
+                    initial_belief_state=initial_belief_state,
+                    final_belief_state=current_belief_state,
+                    cycle_results=cycle_results,
+                    final_answer_projection=previous_answer,
+                    stop_reason=AutonomousQuestionStopReason.NO_PROBES,
+                )
 
             if self._confidence_reached(current_belief_state):
                 return self._result(
@@ -281,6 +307,40 @@ class AutonomousQuestionRunner:
 
 def _top_hypothesis(belief_state: BeliefState) -> Hypothesis:
     return max(belief_state.hypotheses, key=lambda hypothesis: hypothesis.posterior)
+
+
+def _initial_context_signals(
+    *,
+    input: InitializeRunInput,
+    cycle_id: str,
+    belief_state: BeliefState,
+) -> list[ExternalSignal]:
+    context = input.context.strip()
+    if not context:
+        return []
+    return [
+        ExternalSignal(
+            id=f"S_{cycle_id}_initial_context",
+            cycle_id=cycle_id,
+            signal_kind=SignalKind.PASSIVE,
+            source_type="initial_context",
+            source="user_context",
+            raw_content=context,
+            initial_target_hypotheses=[
+                hypothesis.id for hypothesis in belief_state.hypotheses
+            ],
+        )
+    ]
+
+
+def _cycle_signal_shape(signals: list[ExternalSignal]) -> CycleSignalShape:
+    has_active = any(signal.signal_kind == SignalKind.ACTIVE for signal in signals)
+    has_passive = any(signal.signal_kind == SignalKind.PASSIVE for signal in signals)
+    if has_active and has_passive:
+        return CycleSignalShape.ACTIVE_PLUS_PASSIVE
+    if has_passive:
+        return CycleSignalShape.PASSIVE_ONLY
+    return CycleSignalShape.ACTIVE_ONLY
 
 
 def _posterior_delta_is_stable(

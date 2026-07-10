@@ -4,6 +4,12 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from bayesprobe.ledger import JsonlLedgerStore
+from bayesprobe.model_gateway import (
+    ModelGateway,
+    ModelGatewayValidationError,
+    StructuredModelRequest,
+    model_gateway_adapter_kind,
+)
 from bayesprobe.schemas import (
     BeliefState,
     ExternalSignal,
@@ -58,6 +64,68 @@ class DeterministicProbeToolGateway:
                     f"{cue}: Deterministic probe result for {probe.id}; "
                     f"goal={probe.inquiry_goal}; targets={targets}."
                 ),
+                generated_by_probe=probe.id,
+                initial_target_hypotheses=list(probe.target_hypotheses),
+            )
+        ]
+
+
+class ModelBackedProbeToolGateway:
+    def __init__(self, model_gateway: ModelGateway) -> None:
+        self._model_gateway = model_gateway
+
+    def execute_probe(
+        self,
+        *,
+        probe: ProbeDesign,
+        context: ProbeExecutionContext,
+    ) -> list[ExternalSignal]:
+        request = StructuredModelRequest(
+            task="execute_probe",
+            input={
+                "problem": _metadata_text(context, "problem"),
+                "initial_context": _metadata_text(context, "initial_context"),
+                "probe": {
+                    "id": probe.id,
+                    "inquiry_goal": probe.inquiry_goal,
+                    "method": probe.method,
+                    "target_hypotheses": list(probe.target_hypotheses),
+                    "support_condition": dict(probe.support_condition),
+                    "weaken_condition": dict(probe.weaken_condition),
+                },
+                "hypotheses": [
+                    {
+                        "id": hypothesis.id,
+                        "statement": hypothesis.statement,
+                        "scope": hypothesis.scope,
+                        "posterior": hypothesis.posterior,
+                        "predictions": list(hypothesis.predictions),
+                        "falsifiers": list(hypothesis.falsifiers),
+                    }
+                    for hypothesis in context.belief_state.hypotheses
+                ],
+            },
+            prompt_id="probe_execution",
+            prompt_version="v0.1",
+            schema_name="ProbeSignal",
+            schema_version="v0.1",
+            metadata={
+                "run_id": context.run_id,
+                "cycle_id": context.cycle_id,
+                "probe_id": probe.id,
+            },
+        )
+        payload = self._model_gateway.complete_structured(request)
+        raw_content = _probe_raw_content(payload)
+        adapter_kind = model_gateway_adapter_kind(self._model_gateway)
+        return [
+            ExternalSignal(
+                id=f"S_{context.cycle_id}_{probe.id}",
+                cycle_id=context.cycle_id,
+                signal_kind=SignalKind.ACTIVE,
+                source_type="model_probe_gateway",
+                source=f"model_gateway:{adapter_kind}",
+                raw_content=raw_content,
                 generated_by_probe=probe.id,
                 initial_target_hypotheses=list(probe.target_hypotheses),
             )
@@ -173,8 +241,25 @@ def _deterministic_content_cue(method: str) -> str:
     return "NEUTRAL"
 
 
+def _metadata_text(context: ProbeExecutionContext, key: str) -> str:
+    value = context.metadata.get(key, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _probe_raw_content(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        raise ModelGatewayValidationError("probe signal payload must be an object")
+    raw_content = payload.get("raw_content")
+    if not isinstance(raw_content, str) or not raw_content.strip():
+        raise ModelGatewayValidationError(
+            "probe signal payload raw_content must not be empty"
+        )
+    return raw_content.strip()
+
+
 __all__ = [
     "DeterministicProbeToolGateway",
+    "ModelBackedProbeToolGateway",
     "ProbeExecutionContext",
     "ProbeExecutionResult",
     "ProbeExecutor",

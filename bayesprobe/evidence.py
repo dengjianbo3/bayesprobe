@@ -75,6 +75,15 @@ class SignalQualityAssessor:
                 specificity=0.6,
                 verifiability=0.65,
             )
+        elif signal.source_type == "model_probe_gateway":
+            quality = SignalQuality(
+                reliability=0.55,
+                independence=0.35,
+                relevance=0.85,
+                novelty=0.55,
+                specificity=0.65,
+                verifiability=0.3,
+            )
         elif signal.source_type == "external_agent_projection":
             quality = SignalQuality(
                 reliability=0.55,

@@ -81,7 +81,11 @@ def test_webui_deterministic_autonomous_run_returns_trace():
     assert payload["final_belief_state"]["cycle_index"] == 1
     assert len(payload["cycles"]) == 1
     cycle = payload["cycles"][0]
-    assert cycle["signal_shape"] == "active_only"
+    assert cycle["signal_shape"] == "active_plus_passive"
+    assert [signal["signal_kind"] for signal in cycle["signals"]] == [
+        "active",
+        "passive",
+    ]
     assert cycle["probes"]
     assert cycle["signals"]
     assert cycle["evidence_events"]
@@ -149,6 +153,8 @@ def test_webui_static_assets_define_operational_workbench():
     assert 'value="deepseek-v4-flash"' in index
     assert "max-cycles" in index
     assert "trace-pane" in index
+    assert 'id="context" placeholder="Optional external information"' in index
+    assert "SUPPORTS: The local deterministic signal supports H1." not in index
     assert "localStorage" not in script
     assert "fetch('/api/runs/autonomous'" in script
     assert "Responses-compatible providers only." in script
@@ -304,8 +310,13 @@ class FakeWebUIResponses:
 
     def create(self, **payload):
         self.calls.append(payload)
-        return json.dumps(
-            {
+        request = json.loads(payload["input"][1]["content"])
+        if request["task"] == "execute_probe":
+            response = {
+                "raw_content": "The model executed the requested active probe."
+            }
+        else:
+            response = {
                 "evidence_type": "supporting",
                 "likelihoods": {
                     "H1": "moderately_confirming",
@@ -314,7 +325,7 @@ class FakeWebUIResponses:
                 "interpretation": "WebUI fake OpenAI response.",
                 "quality_overrides": {},
             }
-        )
+        return json.dumps(response)
 
 
 class FakeWebUIOpenAI:
@@ -331,21 +342,26 @@ class FakeWebUIChatCompletions:
 
     def create(self, **payload):
         self.calls.append(payload)
+        request = json.loads(payload["messages"][1]["content"])
+        if request["task"] == "execute_probe":
+            content = {
+                "raw_content": "The chat model executed the requested active probe."
+            }
+        else:
+            content = {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "H1": "moderately_confirming",
+                    "H2": "moderately_disconfirming",
+                },
+                "interpretation": "WebUI fake chat response.",
+                "quality_overrides": {},
+            }
         return {
             "choices": [
                 {
                     "message": {
-                        "content": json.dumps(
-                            {
-                                "evidence_type": "supporting",
-                                "likelihoods": {
-                                    "H1": "moderately_confirming",
-                                    "H2": "moderately_disconfirming",
-                                },
-                                "interpretation": "WebUI fake chat response.",
-                                "quality_overrides": {},
-                            }
-                        )
+                        "content": json.dumps(content)
                     }
                 }
             ]
@@ -368,6 +384,23 @@ class FakeChoiceAwareChatCompletions:
     def create(self, **payload):
         user_content = payload["messages"][1]["content"]
         request = json.loads(user_content)
+        if request["task"] == "execute_probe":
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "raw_content": (
+                                        "Connected non-bipartite graphs make the chain "
+                                        "irreducible and aperiodic, so D is correct."
+                                    )
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
         targets = request["input"]["target_hypotheses"]
         likelihoods = {
             target: (
@@ -402,6 +435,87 @@ class FakeChoiceAwareChatOpenAI:
             (),
             {"completions": FakeChoiceAwareChatCompletions()},
         )()
+
+
+class FakeProbeAwareChatCompletions:
+    def __init__(self):
+        self.tasks = []
+
+    def create(self, **payload):
+        request = json.loads(payload["messages"][1]["content"])
+        task = request["task"]
+        self.tasks.append(task)
+        if task == "execute_probe":
+            content = {
+                "raw_content": (
+                    "Comparing irreducibility and aperiodicity across the choices "
+                    "supports D and rules out the bipartite classes."
+                )
+            }
+        else:
+            targets = request["input"]["target_hypotheses"]
+            content = {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    target: (
+                        "strongly_confirming"
+                        if target == "D"
+                        else "moderately_disconfirming"
+                    )
+                    for target in targets
+                },
+                "interpretation": "The model-generated probe signal favors D.",
+                "quality_overrides": {},
+            }
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+
+class FakeProbeAwareChatOpenAI:
+    completions = None
+
+    def __init__(self, **kwargs):
+        del kwargs
+        completions = FakeProbeAwareChatCompletions()
+        self.__class__.completions = completions
+        self.chat = type("FakeChat", (), {"completions": completions})()
+
+
+def test_webui_provider_executes_active_probe_before_judging_evidence():
+    question = """Which option follows from the graph-chain conditions?
+
+Answer Choices:
+A. Regularity alone
+B. Connectedness alone
+C. Bipartiteness
+D. Connectedness and non-bipartiteness
+E. Cubicity alone"""
+
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": question,
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "base_url": "https://provider.example/v1",
+                "model": "provider-model",
+            },
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        client_factory=FakeProbeAwareChatOpenAI,
+    )
+
+    assert status == 200
+    assert FakeProbeAwareChatOpenAI.completions.tasks == [
+        "execute_probe",
+        "judge_evidence",
+    ]
+    assert payload["cycles"][0]["signals"][0]["source_type"] == (
+        "model_probe_gateway"
+    )
+    assert payload["cycles"][0]["signals"][0]["raw_content"].startswith(
+        "Comparing irreducibility"
+    )
+    assert payload["final_answer"]["current_best_hypothesis"] == "D"
 
 
 def test_webui_openai_responses_provider_uses_request_key_and_redacts_response():

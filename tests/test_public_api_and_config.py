@@ -20,6 +20,7 @@ from bayesprobe import (
     ExperimentRunConfig,
     ExperimentRunResult,
     ModelGateway,
+    ModelBackedProbeToolGateway,
     ModelGatewayConfig,
     ModelGatewayValidationError,
     ModelInvocationTrace,
@@ -64,6 +65,7 @@ def test_public_sdk_exports_supported_names():
         "ExperimentRunConfig",
         "ExperimentRunResult",
         "ModelGateway",
+        "ModelBackedProbeToolGateway",
         "ModelGatewayConfig",
         "ModelGatewayValidationError",
         "ModelInvocationTrace",
@@ -98,6 +100,7 @@ def test_public_sdk_exports_supported_names():
     assert ExperimentRunConfig is not None
     assert ExperimentRunResult is not None
     assert ModelGateway is not None
+    assert ModelBackedProbeToolGateway is not None
     assert ModelGatewayConfig is not None
     assert ModelGatewayValidationError is not None
     assert ModelInvocationTrace is not None

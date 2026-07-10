@@ -5,8 +5,10 @@ import pytest
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
+from bayesprobe.model_gateway import ScriptedModelGateway
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
+    ModelBackedProbeToolGateway,
     ProbeExecutionContext,
     ProbeExecutor,
 )
@@ -151,6 +153,55 @@ def test_executor_turns_probe_set_into_active_signals():
     assert all(signal.cycle_id == "run_exec_cycle_1" for signal in result.signals)
     assert "SUPPORTS" in result.signals[0].raw_content
     assert "REFUTES" in result.signals[1].raw_content
+
+
+def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
+    model_gateway = ScriptedModelGateway(
+        responses={
+            "execute_probe": {
+                "raw_content": (
+                    "A direct comparison supports H1 and rules out H2."
+                )
+            }
+        }
+    )
+    probe = make_probe(
+        "P_choice",
+        ["H1", "H2"],
+        method="answer_choice_discrimination",
+    )
+    context = ProbeExecutionContext(
+        run_id="run_exec",
+        cycle_id="run_exec_cycle_1",
+        belief_state=make_belief_state(),
+        metadata={
+            "problem": "Which answer choice is correct?",
+            "initial_context": "Use graph-chain irreducibility and aperiodicity.",
+        },
+    )
+
+    result = ProbeExecutor(
+        ModelBackedProbeToolGateway(model_gateway)
+    ).execute_probe_set(
+        probe_set=make_probe_set([probe]),
+        context=context,
+    )
+
+    signal = result.signals[0]
+    request = model_gateway.requests[0]
+    assert request.task == "execute_probe"
+    assert request.prompt_id == "probe_execution"
+    assert request.schema_name == "ProbeSignal"
+    assert request.input["problem"] == "Which answer choice is correct?"
+    assert request.input["initial_context"] == (
+        "Use graph-chain irreducibility and aperiodicity."
+    )
+    assert request.input["probe"]["target_hypotheses"] == ["H1", "H2"]
+    assert request.input["hypotheses"][0]["statement"] == "The claim is supported."
+    assert signal.signal_kind == SignalKind.ACTIVE
+    assert signal.source_type == "model_probe_gateway"
+    assert signal.source == "model_gateway:scripted"
+    assert signal.raw_content.startswith("A direct comparison")
 
 
 def test_executor_preserves_probe_and_signal_order():

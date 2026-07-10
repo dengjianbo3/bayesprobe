@@ -7,6 +7,7 @@ import pytest
 from bayesprobe.model_gateway import ModelGatewayValidationError, StructuredModelRequest
 from bayesprobe.openai_gateway import (
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
+    PROBE_SIGNAL_JSON_SCHEMA,
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
@@ -32,6 +33,30 @@ def make_judge_request() -> StructuredModelRequest:
         schema_name="EvidenceJudgment",
         schema_version="v0.1",
         metadata={"run_id": "run_1"},
+    )
+
+
+def make_probe_request() -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task="execute_probe",
+        input={
+            "problem": "Which answer choice is correct?",
+            "initial_context": "Use the supplied theorem definitions.",
+            "probe": {
+                "id": "P1",
+                "inquiry_goal": "Discriminate all answer choices.",
+                "method": "answer_choice_discrimination",
+                "target_hypotheses": ["A", "B"],
+            },
+            "hypotheses": [
+                {"id": "A", "statement": "Choice A is correct.", "posterior": 0.5},
+                {"id": "B", "statement": "Choice B is correct.", "posterior": 0.5},
+            ],
+        },
+        prompt_id="probe_execution",
+        prompt_version="v0.1",
+        schema_name="ProbeSignal",
+        schema_version="v0.1",
     )
 
 
@@ -159,6 +184,25 @@ def test_build_openai_request_payload_for_judge_evidence():
     assert user_payload["input"]["signal_id"] == "S1"
 
 
+def test_build_openai_request_payload_for_execute_probe():
+    payload = build_openai_request_payload(
+        make_probe_request(),
+        model="gpt-5.5",
+        max_output_tokens=512,
+    )
+
+    assert payload["text"]["format"] == {
+        "type": "json_schema",
+        "name": "ProbeSignal",
+        "strict": True,
+        "schema": PROBE_SIGNAL_JSON_SCHEMA,
+    }
+    assert "active probe executor" in payload["input"][0]["content"]
+    user_payload = json.loads(payload["input"][1]["content"])
+    assert user_payload["task"] == "execute_probe"
+    assert user_payload["input"]["problem"] == "Which answer choice is correct?"
+
+
 def test_build_openai_request_payload_for_repair_evidence_judgment():
     request = StructuredModelRequest(
         task="repair_evidence_judgment",
@@ -219,6 +263,27 @@ def test_build_openai_chat_completions_payload_uses_common_json_object_shape():
     ]
 
 
+def test_build_openai_chat_completions_payload_for_execute_probe():
+    payload = build_openai_chat_completions_payload(
+        make_probe_request(),
+        model="provider-model",
+        max_output_tokens=512,
+    )
+
+    assert "active probe executor" in payload["messages"][0]["content"]
+    assert "raw_content" in payload["messages"][0]["content"]
+    user_payload = json.loads(payload["messages"][1]["content"])
+    assert user_payload["required_output"] == {
+        "type": "ProbeSignal",
+        "required_keys": ["raw_content"],
+        "json_schema": PROBE_SIGNAL_JSON_SCHEMA,
+        "notes": [
+            "raw_content must report the inquiry result without posterior updates",
+            "do not claim external retrieval or verification unless supplied in the input",
+        ],
+    }
+
+
 def valid_payload() -> dict[str, object]:
     return {
         "evidence_type": "supporting",
@@ -230,6 +295,12 @@ def valid_payload() -> dict[str, object]:
 
 def test_parse_openai_structured_response_accepts_direct_dict():
     assert parse_openai_structured_response(valid_payload()) == valid_payload()
+
+
+def test_parse_openai_structured_response_accepts_direct_probe_signal_dict():
+    payload = {"raw_content": "A structured probe signal."}
+
+    assert parse_openai_structured_response(payload) == payload
 
 
 def test_parse_openai_structured_response_accepts_json_string():

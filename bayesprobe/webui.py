@@ -23,6 +23,7 @@ from bayesprobe.openai_gateway import (
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
 )
+from bayesprobe.probe_executor import ModelBackedProbeToolGateway, ProbeExecutor
 from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunResult,
@@ -73,8 +74,15 @@ def handle_autonomous_run_request(
             request["provider"], client_factory=client_factory
         )
         core = BayesProbeCore(model_gateway=gateway)
+        executor = None
+        if provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
+            executor = ProbeExecutor(
+                gateway=ModelBackedProbeToolGateway(gateway),
+                ledger=core.ledger,
+            )
         runner = AutonomousQuestionRunner(
             core=core,
+            executor=executor,
             config=request["runner_config"],
         )
         run_id = _webui_run_id()

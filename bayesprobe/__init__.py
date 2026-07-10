@@ -40,6 +40,7 @@ from bayesprobe.openai_gateway import (
     build_openai_request_payload,
     parse_openai_structured_response,
 )
+from bayesprobe.probe_executor import ModelBackedProbeToolGateway
 from bayesprobe.recorded_gateway import RecordedModelGateway
 
 __all__ = [
@@ -57,6 +58,7 @@ __all__ = [
     "ExperimentRunConfig",
     "ExperimentRunResult",
     "ModelGateway",
+    "ModelBackedProbeToolGateway",
     "ModelGatewayConfig",
     "ModelGatewayValidationError",
     "ModelInvocationTrace",
