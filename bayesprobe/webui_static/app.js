@@ -2,8 +2,9 @@ const form = document.querySelector("#run-form");
 const providerKind = document.querySelector("#provider-kind");
 const providerAuth = document.querySelector("#provider-auth");
 const providerNote = document.querySelector("#provider-note");
-const apiKeyField = document.querySelector("#api-key");
 const statusBanner = document.querySelector("#status-banner");
+const progressList = document.querySelector("#progress-list");
+const progressState = document.querySelector("#progress-state");
 const answerPanel = document.querySelector("#answer-panel");
 const beliefPanel = document.querySelector("#belief-panel");
 const tracePane = document.querySelector("#trace-pane");
@@ -21,6 +22,19 @@ const OPENAI_COMPATIBLE_PROVIDER_KINDS = new Set([
   "openai_responses",
   "openai_chat_completions",
 ]);
+const PROGRESS_LABEL_BY_EVENT = {
+  run_started: "Run started",
+  initialization_completed: "Belief initialized",
+  cycle_started: "Cycle started",
+  probe_set_planned: "Probes planned",
+  probe_execution_started: "Executing probes",
+  signals_collected: "Signals collected",
+  evidence_integration_started: "Integrating evidence",
+  cycle_integrated: "Posterior updated",
+  run_completed: "Run completed",
+  run_failed: "Run failed",
+};
+const streamedCycles = [];
 
 providerKind.addEventListener("change", syncProviderControls);
 form.addEventListener("submit", handleSubmit);
@@ -32,31 +46,31 @@ async function handleSubmit(event) {
   setStatus("Running autonomous loop...", "busy");
   setBusy(true);
   clearRunOutput("running");
+  resetRunProgress();
 
   try {
     const requestPayload = buildPayload();
-    clearApiKey();
-    const response = await fetch('/api/runs/autonomous', {
+    const response = await fetch('/api/runs/autonomous/stream', {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requestPayload),
     });
-    const payload = await parseJsonResponse(response);
 
     if (!response.ok) {
+      const payload = await parseJsonResponse(response);
       throw new Error(payload.error?.message || "Run failed");
     }
 
-    renderRun(payload);
-    setStatus(
-      `${payload.run?.status || "completed"}: ${payload.run?.regime || "autonomous"} / ${payload.stop_reason}`,
-      "ok"
-    );
+    if (!response.body) {
+      throw new Error("Server did not return a progress stream");
+    }
+    await consumeRunStream(response);
   } catch (error) {
-    clearRunOutput("failed");
+    if (streamedCycles.length === 0) {
+      clearRunOutput("failed");
+    }
     setStatus(error.message || "Run failed", "error");
   } finally {
-    clearApiKey();
     setBusy(false);
   }
 }
@@ -69,9 +83,6 @@ function syncProviderControls() {
   runButton.disabled = false;
   providerNote.textContent = PROVIDER_NOTE_BY_KIND[providerKind.value] || "";
   providerNote.classList.toggle("is-warning", false);
-  if (!usesRemoteProvider) {
-    clearApiKey();
-  }
 }
 
 function buildPayload() {
@@ -112,6 +123,145 @@ async function parseJsonResponse(response) {
   } catch (error) {
     throw new Error("Server returned invalid JSON");
   }
+}
+
+async function consumeRunStream(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let terminalEventSeen = false;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch (error) {
+        throw new Error("Server returned an invalid progress event");
+      }
+      handleProgressEvent(event);
+      terminalEventSeen ||= ["run_completed", "run_failed"].includes(event.event);
+    }
+
+    if (done) break;
+  }
+
+  if (buffer.trim()) {
+    throw new Error("Progress stream ended with an incomplete event");
+  }
+  if (!terminalEventSeen) {
+    throw new Error("Progress stream ended before the run completed");
+  }
+}
+
+function handleProgressEvent(event) {
+  const eventName = event.event;
+
+  renderProgressEvent(event);
+
+  if (eventName === "run_started") {
+    runId.textContent = event.run_id || "Run started";
+  }
+  if (eventName === "initialization_completed") {
+    renderBeliefs(event.data?.belief_state);
+  }
+  if (eventName === "cycle_integrated") {
+    upsertStreamedCycle(event.data);
+    renderAnswer(event.data?.answer_projection);
+    renderBeliefs(event.data?.belief_state);
+    renderTrace(streamedCycles);
+  }
+  if (eventName === "run_completed") {
+    renderRun(event.data || {});
+    setStatus(
+      `${event.data?.run?.status || "completed"}: ${event.data?.run?.regime || "autonomous"} / ${event.data?.stop_reason || "completed"}`,
+      "ok"
+    );
+  }
+  if (eventName === "run_failed") {
+    throw new Error(progressFailureMessage(event));
+  }
+}
+
+function resetRunProgress() {
+  streamedCycles.length = 0;
+  progressList.innerHTML = "";
+  progressState.textContent = "Running";
+}
+
+function renderProgressEvent(event) {
+  const activeItem = progressList.querySelector(
+    '.progress-item[data-state="active"]'
+  );
+  if (activeItem) {
+    setProgressItemState(activeItem, "complete");
+  }
+
+  const eventName = event.event;
+  const terminalState = eventName === "run_failed" ? "failed" :
+    eventName === "run_completed" ? "complete" : "active";
+  const item = document.createElement("li");
+  item.className = "progress-item";
+  item.dataset.state = terminalState;
+
+  const sequence = document.createElement("span");
+  sequence.className = "progress-sequence";
+  sequence.textContent = String(event.sequence ?? "-");
+
+  const meta = document.createElement("span");
+  meta.className = "progress-meta";
+  const cycle = event.cycle_index != null ? ` | Cycle ${event.cycle_index}` : "";
+  meta.textContent = `${PROGRESS_LABEL_BY_EVENT[eventName] || "Run update"}${cycle}`;
+
+  const status = document.createElement("span");
+  status.className = "progress-status";
+  status.textContent = progressStatusLabel(terminalState);
+
+  item.append(sequence, meta, status);
+  progressList.appendChild(item);
+
+  if (eventName === "run_completed") {
+    progressState.textContent = "Completed";
+  } else if (eventName === "run_failed") {
+    progressState.textContent = "Failed";
+  } else {
+    progressState.textContent = "Running";
+  }
+}
+
+function setProgressItemState(item, state) {
+  item.dataset.state = state;
+  item.querySelector(".progress-status").textContent = progressStatusLabel(state);
+}
+
+function progressStatusLabel(state) {
+  if (state === "complete") return "Complete";
+  if (state === "failed") return "Failed";
+  return "Active";
+}
+
+function upsertStreamedCycle(cycle) {
+  if (!cycle?.cycle_id) return;
+
+  const existingIndex = streamedCycles.findIndex(
+    (existing) => existing.cycle_id === cycle.cycle_id
+  );
+  if (existingIndex === -1) {
+    streamedCycles.push(cycle);
+  } else {
+    streamedCycles[existingIndex] = cycle;
+  }
+}
+
+function progressFailureMessage(event) {
+  const message = event.data?.error?.message;
+  return typeof message === "string" && message.trim() ? message : "Run failed";
 }
 
 function renderRun(payload) {
@@ -297,8 +447,4 @@ function setStatus(message, tone) {
   if (tone) {
     statusBanner.classList.add(tone);
   }
-}
-
-function clearApiKey() {
-  apiKeyField.value = "";
 }

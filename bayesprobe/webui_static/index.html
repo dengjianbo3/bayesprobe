@@ -144,6 +144,20 @@
           Ready for a local run.
         </section>
 
+        <section
+          id="progress-panel"
+          class="progress-panel"
+          aria-labelledby="progress-heading"
+        >
+          <div class="section-head">
+            <h2 id="progress-heading">Run Progress</h2>
+            <span id="progress-state" class="eyebrow">Idle</span>
+          </div>
+          <ol id="progress-list" class="progress-list" aria-live="polite">
+            <li class="empty-state">No active run.</li>
+          </ol>
+        </section>
+
         <section class="result-grid" aria-label="Run outputs">
           <article class="result-panel">
             <div class="section-head">

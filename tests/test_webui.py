@@ -282,10 +282,22 @@ def test_webui_static_assets_define_operational_workbench():
     assert 'value="deepseek-v4-flash"' in index
     assert "max-cycles" in index
     assert "trace-pane" in index
+    assert 'id="progress-panel"' in index
+    assert 'id="progress-list"' in index
     assert 'id="context" placeholder="Optional external information"' in index
     assert "SUPPORTS: The local deterministic signal supports H1." not in index
     assert "localStorage" not in script
-    assert "fetch('/api/runs/autonomous'" in script
+    assert "sessionStorage" not in script
+    assert "document.cookie" not in script
+    assert "clearApiKey" not in script
+    assert 'apiKeyField.value = ""' not in script
+    assert "fetch('/api/runs/autonomous/stream'" in script
+    assert "response.body.getReader()" in script
+    assert "new TextDecoder()" in script
+    assert "function handleProgressEvent(" in script
+    assert "cycle_integrated" in script
+    assert "run_completed" in script
+    assert "run_failed" in script
     assert "Responses-compatible providers only." in script
     assert "Check base URL, model, API key, and max output tokens." in script
     assert "Best answer / hypothesis" in script
@@ -296,6 +308,8 @@ def test_webui_static_assets_define_operational_workbench():
     assert 'provider.kind === "openai_chat_completions"' in script
     assert 'providerKind.value === "openai_chat_completions"' not in script
     assert ".trace-item" in styles
+    assert ".progress-list" in styles
+    assert ".progress-item" in styles
     assert "@media" in styles
 
 
@@ -306,17 +320,15 @@ def test_webui_static_index_declares_inline_favicon_to_avoid_browser_404():
     assert 'href="data:,"' in index
 
 
-def test_webui_static_script_clears_stale_run_output_on_submit_and_failure():
+def test_webui_static_script_preserves_streamed_output_after_a_late_failure():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
     assert "function clearRunOutput(" in script
     assert 'clearRunOutput("running");' in script
+    assert "streamedCycles.length === 0" in script
     assert 'clearRunOutput("failed");' in script
-    assert script.index('clearRunOutput("running");') < script.index(
-        "const response = await fetch('/api/runs/autonomous',"
-    )
-    assert script.index('clearRunOutput("failed");') < script.index(
-        'setStatus(error.message || "Run failed", "error");'
+    assert script.index("streamedCycles.length === 0") < script.index(
+        'clearRunOutput("failed");'
     )
     assert 'runId.textContent = failed ? "Last run failed." : "Run pending.";' in script
     assert "Run failed. No answer projection." in script
@@ -326,10 +338,14 @@ def test_webui_static_script_clears_stale_run_output_on_submit_and_failure():
 
 @pytest.mark.parametrize(
     ("path", "content_type", "expected_body"),
-    [
-        ("/styles.css", "text/css; charset=utf-8", ".trace-item"),
-        ("/app.js", "text/javascript; charset=utf-8", "fetch('/api/runs/autonomous'"),
-    ],
+        [
+            ("/styles.css", "text/css; charset=utf-8", ".trace-item"),
+            (
+                "/app.js",
+                "text/javascript; charset=utf-8",
+                "fetch('/api/runs/autonomous/stream'",
+            ),
+        ],
 )
 def test_webui_http_server_serves_static_assets(path, content_type, expected_body):
     status, response_content_type, payload = request_http("GET", path)
