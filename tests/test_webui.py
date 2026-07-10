@@ -358,6 +358,7 @@ def test_webui_static_assets_define_operational_workbench():
     assert "model-name" in index
     assert 'value="deepseek-v4-flash"' in index
     assert 'id="timeout-seconds" type="number" min="360" value="360"' in index
+    assert 'id="max-output-tokens" type="number" min="1" value="32768"' in index
     assert "max-cycles" in index
     assert "trace-pane" in index
     assert 'id="progress-panel"' in index
@@ -1114,6 +1115,46 @@ def test_webui_provider_timeout_has_360_second_floor(
     ]
 
 
+@pytest.mark.parametrize(
+    ("requested_tokens", "expected_tokens"),
+    [(None, 32768), (8196, 32768), (65536, 65536)],
+)
+def test_webui_official_deepseek_v4_has_32768_output_token_floor(
+    requested_tokens,
+    expected_tokens,
+):
+    provider = {
+        "kind": "openai_chat_completions",
+        "api_key": "provider-secret-123",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+    }
+    if requested_tokens is not None:
+        provider["max_output_tokens"] = requested_tokens
+
+    gateway = webui._build_webui_model_gateway(
+        provider,
+        client_factory=FakeWebUIChatOpenAI,
+    )
+
+    assert gateway.config.max_output_tokens == expected_tokens
+
+
+def test_webui_generic_chat_provider_preserves_lower_output_token_budget():
+    gateway = webui._build_webui_model_gateway(
+        {
+            "kind": "openai_chat_completions",
+            "api_key": "provider-secret-123",
+            "base_url": "https://provider.example/v1",
+            "model": "provider-model",
+            "max_output_tokens": 8196,
+        },
+        client_factory=FakeWebUIChatOpenAI,
+    )
+
+    assert gateway.config.max_output_tokens == 8196
+
+
 def test_webui_multiple_choice_question_returns_answer_choice_projection():
     question = """Which graph class is well-behaved?
 
@@ -1303,6 +1344,65 @@ class FailingChatWebUIOpenAI:
 
     def create(self, **payload):
         raise RuntimeError("provider rejected max token value provider-secret-123")
+
+
+class LengthExhaustedChatWebUIOpenAI:
+    def __init__(self, **kwargs):
+        del kwargs
+        self.chat = type("Chat", (), {"completions": self})()
+
+    def create(self, **payload):
+        del payload
+        return {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {
+                        "content": "",
+                        "reasoning_content": "reasoning used the output budget",
+                    },
+                }
+            ]
+        }
+
+
+def test_webui_reports_exhausted_output_budget_without_leaking_provider_data():
+    request = {
+        "question": "Will an exhausted reasoning budget be diagnosed?",
+        "provider": {
+            "kind": "openai_chat_completions",
+            "api_key": "provider-secret-123",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com",
+            "max_output_tokens": 8196,
+        },
+        "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+    }
+
+    status, payload = handle_autonomous_run_request(
+        request,
+        client_factory=LengthExhaustedChatWebUIOpenAI,
+    )
+    events = []
+    stream_status, stream_error = handle_autonomous_stream_request(
+        request,
+        event_sink=events.append,
+        client_factory=LengthExhaustedChatWebUIOpenAI,
+    )
+
+    expected_message = (
+        "provider exhausted max output tokens before producing structured "
+        "content. Increase max output tokens and retry."
+    )
+    assert status == 502
+    assert payload == {
+        "error": {"type": "provider_error", "message": expected_message}
+    }
+    assert stream_status == 200
+    assert stream_error is None
+    assert events[-1]["event"] == "run_failed"
+    assert events[-1]["data"]["error"]["message"] == expected_message
+    assert "provider-secret-123" not in json.dumps([payload, events])
 
 
 def test_webui_chat_completions_provider_failures_return_safe_diagnostic_hint():

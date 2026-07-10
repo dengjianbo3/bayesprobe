@@ -377,6 +377,26 @@ def test_parse_openai_chat_completions_response_extracts_object_message_content(
     assert parse_openai_chat_completions_response(FakeChatResponse()) == valid_payload()
 
 
+def test_parse_openai_chat_completions_response_reports_exhausted_output_budget():
+    response = {
+        "choices": [
+            {
+                "finish_reason": "length",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "reasoning consumed the entire budget",
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ModelGatewayValidationError,
+        match="exhausted max_tokens before producing structured content",
+    ):
+        parse_openai_chat_completions_response(response)
+
+
 def test_parse_openai_structured_response_rejects_provider_envelope_without_text():
     response = {
         "id": "resp_123",

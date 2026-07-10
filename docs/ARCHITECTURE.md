@@ -533,6 +533,11 @@ Responsibilities:
 - enforce a 360-second timeout floor for provider calls initiated by the
   WebUI, while leaving the reusable SDK gateway timeout explicitly
   configurable;
+- enforce a 32768-token output floor for official DeepSeek V4 Chat Completions
+  requests initiated by the WebUI, leaving generic OpenAI-compatible providers
+  and the reusable SDK gateway configurable;
+- report output-budget exhaustion separately from connection and credential
+  failures without exposing raw provider responses;
 - use provider-backed gateways for separate `execute_probe` and
   `judge_evidence` calls;
 - run `AutonomousQuestionRunner`;

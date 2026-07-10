@@ -12,12 +12,17 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import InitializeRunInput
-from bayesprobe.model_gateway import DeterministicModelGateway, ModelGateway
+from bayesprobe.model_gateway import (
+    DeterministicModelGateway,
+    ModelGateway,
+    ModelGatewayValidationError,
+)
 from bayesprobe.openai_gateway import (
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
@@ -38,6 +43,7 @@ STATIC_DIR = Path(__file__).with_name("webui_static")
 OPENAI_COMPATIBLE_PROVIDER_KINDS = {"openai_responses", "openai_chat_completions"}
 SUPPORTED_PROVIDER_KINDS = {"deterministic"} | OPENAI_COMPATIBLE_PROVIDER_KINDS
 WEBUI_MIN_PROVIDER_TIMEOUT_SECONDS = 360.0
+WEBUI_DEEPSEEK_V4_MIN_OUTPUT_TOKENS = 32768
 
 
 class WebUIError(Exception):
@@ -81,7 +87,10 @@ def handle_autonomous_run_request(
         except Exception as error:
             if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
                 raise ProviderError(
-                    _provider_error_message(prepared.provider_kind)
+                    _provider_runtime_error_message(
+                        error,
+                        prepared.provider_kind,
+                    )
                 ) from error
             raise
         return HTTPStatus.OK, serialize_autonomous_run_result(result)
@@ -111,11 +120,14 @@ def handle_autonomous_stream_request(
 
     try:
         prepared.runner.run_question(prepared.input)
-    except Exception:
+    except Exception as error:
         if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
             emitter.emit_failure(
                 "provider_error",
-                _provider_error_message(prepared.provider_kind),
+                _provider_runtime_error_message(
+                    error,
+                    prepared.provider_kind,
+                ),
             )
         else:
             emitter.emit_failure("server_error", _generic_server_error_message())
@@ -526,6 +538,13 @@ def _build_webui_model_gateway(
                     config,
                     timeout_seconds=WEBUI_MIN_PROVIDER_TIMEOUT_SECONDS,
                 )
+            if _is_official_deepseek_v4_chat(kind, config):
+                requested_tokens = config.max_output_tokens or 0
+                if requested_tokens < WEBUI_DEEPSEEK_V4_MIN_OUTPUT_TOKENS:
+                    config = replace(
+                        config,
+                        max_output_tokens=WEBUI_DEEPSEEK_V4_MIN_OUTPUT_TOKENS,
+                    )
         except ValueError as error:
             raise WebUIError(str(error)) from error
         client = None
@@ -697,6 +716,40 @@ def _generic_server_error_message() -> str:
 
 def _generic_provider_error_message() -> str:
     return "provider request failed"
+
+
+def _is_official_deepseek_v4_chat(
+    provider_kind: str,
+    config: OpenAIModelGatewayConfig,
+) -> bool:
+    if provider_kind != "openai_chat_completions" or config.base_url is None:
+        return False
+    try:
+        hostname = urlparse(config.base_url).hostname
+    except ValueError:
+        return False
+    return hostname == "api.deepseek.com" and config.model.lower().startswith(
+        "deepseek-v4-"
+    )
+
+
+def _provider_runtime_error_message(
+    error: Exception,
+    provider_kind: str,
+) -> str:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ModelGatewayValidationError) and (
+            "exhausted max_tokens before producing structured content" in str(current)
+        ):
+            return (
+                "provider exhausted max output tokens before producing structured "
+                "content. Increase max output tokens and retry."
+            )
+        current = current.__cause__ or current.__context__
+    return _provider_error_message(provider_kind)
 
 
 def _provider_error_message(provider_kind: str) -> str:

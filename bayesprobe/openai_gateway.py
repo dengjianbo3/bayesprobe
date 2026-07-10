@@ -276,6 +276,12 @@ def parse_openai_structured_response(response: Any) -> dict[str, Any]:
 
 def parse_openai_chat_completions_response(response: Any) -> dict[str, Any]:
     content = _chat_message_content(response)
+    content_missing = content is None or not content.strip()
+    if content_missing and _chat_finish_reason(response) == "length":
+        raise ModelGatewayValidationError(
+            "openai chat completion exhausted max_tokens before producing "
+            "structured content"
+        )
     if content is None:
         raise ModelGatewayValidationError("openai chat completion content was missing")
     return _parse_json_object(content)
@@ -442,6 +448,21 @@ def _chat_message_content(response: Any) -> str | None:
         content = message.get("content")
     if isinstance(content, str):
         return content
+    return None
+
+
+def _chat_finish_reason(response: Any) -> str | None:
+    choices = getattr(response, "choices", None)
+    if choices is None and isinstance(response, Mapping):
+        choices = response.get("choices")
+    if not isinstance(choices, list | tuple) or not choices:
+        return None
+    choice = choices[0]
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason is None and isinstance(choice, Mapping):
+        finish_reason = choice.get("finish_reason")
+    if isinstance(finish_reason, str):
+        return finish_reason
     return None
 
 
