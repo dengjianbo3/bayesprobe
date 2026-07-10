@@ -358,6 +358,19 @@ button:disabled {
   margin-top: 0.9rem;
 }
 
+.trace-pane,
+.trace-item {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.trace-stack,
+.trace-stack > section,
+pre {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .trace-item {
   border: 1px solid var(--line);
   background: var(--panel);
@@ -376,6 +389,7 @@ button:disabled {
 }
 
 pre {
+  width: 100%;
   max-width: 100%;
   margin: 0;
   overflow: auto;

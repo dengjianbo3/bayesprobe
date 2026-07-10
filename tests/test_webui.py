@@ -316,6 +316,29 @@ def test_webui_static_assets_define_operational_workbench():
     assert "@media" in styles
 
 
+def test_webui_trace_css_contains_long_json_within_each_pre():
+    styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+
+    assert (
+        ".trace-pane,\n"
+        ".trace-item {\n"
+        "  min-width: 0;\n"
+        "  max-width: 100%;\n"
+        "}" in styles
+    )
+    assert (
+        ".trace-stack,\n"
+        ".trace-stack > section,\n"
+        "pre {\n"
+        "  min-width: 0;\n"
+        "  max-width: 100%;\n"
+        "}" in styles
+    )
+    pre_styles = styles[styles.index("pre {") :]
+    assert "  width: 100%;\n" in pre_styles
+    assert "  overflow: auto;\n" in pre_styles
+
+
 def test_webui_static_index_declares_inline_favicon_to_avoid_browser_404():
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
