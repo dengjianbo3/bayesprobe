@@ -1,7 +1,7 @@
 # Kernel Semantic Freeze and WebUI Validation Design
 
 Date: 2026-07-10
-Status: Approved for implementation
+Status: Implemented and verified
 
 ## Context
 
@@ -214,3 +214,15 @@ the in-app browser.
 - No canonical signal or probe set is duplicated in a one-cycle ledger.
 - The architecture capability matrix no longer overstates fixture, SDK, or
   lifecycle completeness.
+
+## Verification Record
+
+Completed on 2026-07-10:
+
+- the full suite passed with 365 tests and 2 opt-in live-provider tests skipped;
+- a deterministic WebUI A-E run selected D, produced posterior mass `1.000`,
+  returned a completed autonomous run, and displayed an integrated cycle;
+- desktop and 390 px mobile layouts were checked for global overflow and panel
+  overlap;
+- OpenAI-compatible success/error behavior remains covered through request
+  adapter and WebUI integration tests without persisting a live API key.

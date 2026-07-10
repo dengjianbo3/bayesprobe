@@ -213,7 +213,8 @@ Responsibilities:
 - hold cycle-local signals before boundary closure;
 - normalize signal cycle ids;
 - reject signals after closure;
-- make boundary closure explicit.
+- make boundary closure explicit;
+- support the core's terminal `open -> closed -> integrated` cycle lifecycle.
 
 The inbox is not a belief state and does not interpret signals.
 
@@ -236,7 +237,6 @@ Current limitations:
 
 - quality assessment remains heuristic;
 - projection decomposition is cue-based;
-- direct evidence judgment uses deterministic/scripted gateway behavior;
 - schema repair/retry is opt-in through `EvidenceJudgmentRepairPolicy`.
 
 ### 4.4 Belief Solver
@@ -248,7 +248,12 @@ Responsibilities:
 - map `EvidenceEvent`s into posterior changes;
 - skip discarded evidence events;
 - preserve belief-neutral handling for schema violations;
-- produce auditable `BeliefUpdate`s.
+- maintain one normalized categorical distribution across active rival
+  hypotheses;
+- apply complexity and ad-hoc penalties during normalization;
+- refresh posterior, uncertainty, entropy, and top-gap summaries;
+- produce auditable `BeliefUpdate`s for direct and normalization-induced
+  movement.
 
 Current limitation:
 
@@ -444,7 +449,11 @@ Responsibilities:
 
 - write auditable JSONL records;
 - serialize Pydantic models and plain records;
-- preserve run/cycle/evidence/update/evolution/projection traces.
+- preserve run/cycle/evidence/update/evolution/projection traces;
+- record canonical probe sets and external signals exactly once through core
+  ownership;
+- allow initial and terminal run snapshots while preserving immutable event
+  history.
 
 Current limitation:
 
@@ -473,7 +482,8 @@ Responsibilities:
 - run active-only, passive-only, and active-plus-passive samples;
 - score final best hypothesis and update direction accuracy;
 - report belief-state quality metrics such as discarded evidence, schema
-  violations, posterior margin, and belief revision efficiency;
+  violations, posterior margin, and total-variation belief revision
+  efficiency;
 - write reports;
 - parse JSON experiment config;
 - expose a thin CLI over config-driven experiment runs.
@@ -490,11 +500,14 @@ Current file: `bayesprobe/__init__.py`
 
 The package root exports the supported MVP surface for external code:
 
-- benchmark data structures;
-- benchmark dataset IO;
-- experiment config and runner;
-- model gateway config and adapters;
-- structured judgment validation errors.
+- `BayesProbeCore`, initialization, autonomous, and synchronized runners;
+- belief, signal, hypothesis, probe, run-regime, and run-status schemas;
+- probe execution and tool-gateway seams;
+- JSONL ledger, benchmark data structures, and benchmark dataset IO;
+- experiment config, artifacts, and runner;
+- model gateway config and deterministic, recorded, Responses, and
+  OpenAI-compatible Chat Completions adapters;
+- structured judgment validation and repair contracts.
 
 Architectural rule:
 
@@ -514,8 +527,10 @@ Responsibilities:
 - use provider-backed gateways for separate `execute_probe` and
   `judge_evidence` calls;
 - run `AutonomousQuestionRunner`;
-- serialize final answer, belief state, cycle, signal, evidence, update, and
-  evolution traces.
+- serialize the terminal run record, final answer, normalized belief state,
+  integrated cycle, signal, evidence, update, and evolution traces;
+- expose run regime/status/stop reason, posterior mass, top-gap uncertainty,
+  and cycle lifecycle timestamps.
 
 Architectural rule:
 
@@ -537,18 +552,18 @@ Current limitations:
 | BayesProbe paradigm positioning | Strong | Context and v0.2 docs define BayesProbe as a complete paradigm, not wrapper. |
 | Core signal-to-belief loop | Strong | `BayesProbeCore.integrate_cycle(...)` is the shared path. |
 | Active/passive/mixed cycle shapes | Strong | Implemented in core validation, synchronized runner, and benchmark harness. |
-| Signal Inbox and boundary | Strong MVP | Cycle-local closure exists; real-time late-signal queueing remains future work. |
-| Evidence Integration Gate | Good MVP | Direct evidence, projection decomposition, quality heuristics, schema violation path. |
-| Belief update | Good MVP | Deterministic update rules and discarded-evidence skip. |
-| Hypothesis evolution | Good MVP | Anomaly spawn, weakening/reframing/retirement style evolution exists. |
+| Signal Inbox and boundary | Strong MVP | Cycle-local closure and terminal `open -> closed -> integrated` timestamps exist; real-time late-signal queueing remains future work. |
+| Evidence Integration Gate | Strong MVP | Direct evidence, real projection decomposition, exact target validation, bounded quality overrides, schema violation, and repair paths exist. |
+| Belief update | Strong MVP | Exclusive rivals remain normalized; penalties, discarded-evidence neutrality, current summaries, and auditable rival movement are implemented. |
+| Hypothesis evolution | Good MVP | Anomaly spawn, weakening/reframing/retirement style evolution exists and preserves normalized rival state. |
 | Probe planning | Good MVP | Candidate ranking and bounded probe-set design exist. |
 | Probe execution/tool seam | Good MVP | Deterministic and model-backed adapters exist; search/retrieval/tool adapters remain future work. |
-| Autonomous question loop | Good MVP | End-to-end question runner exists with stop conditions. |
-| Synchronized round loop | Good MVP | Fixed-round runner supports passive-only, active-only, and mixed rounds. |
-| Ledger/audit | Good MVP | JSONL audit path exists. |
-| Benchmark harness | Good MVP | Toy and v0.2 methodology fixtures, suite/report flow, and belief-quality metrics exist. |
-| Config/CLI/SDK | Good MVP | JSON experiment config, CLI, package exports exist. |
-| Autonomous WebUI | Good MVP | Local deterministic/OpenAI Responses/OpenAI-compatible Chat Completions workbench executes active probes, integrates optional context as passive signal, and exposes full traces. |
+| Autonomous question loop | Strong MVP | End-to-end runner returns a terminal run, final integrated cycle, answer projection, and explicit stop reason. |
+| Synchronized round loop | Strong MVP | Fixed-round runner enforces synchronized regime and supports passive-only, active-only, and mixed rounds. |
+| Ledger/audit | Strong MVP | JSONL audit path has explicit canonical ownership and exactly-once probe-set/signal records. |
+| Benchmark harness | Good MVP | Toy and real methodology-path fixtures, suite/report flow, net-direction scoring, and belief-quality metrics exist. |
+| Config/CLI/SDK | Strong MVP | JSON experiment config, CLI, public core/runners/tool seams, package-root imports, and external execution regression coverage exist. |
+| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; completed run, normalized belief, integrated cycle, provider errors, and full traces are visible. The deterministic path is manually validated on desktop/mobile. |
 | Model gateway | Good MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Provider observability remains future work. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
@@ -563,22 +578,24 @@ Using the final target as:
 > configurable, experiment-ready, provider-backed, tool-backed, multi-agent-ready
 > BayesProbe agent engineering kernel
 
-the current implementation is approximately **76%-79% complete**.
+the current implementation is approximately **81%-84% complete**.
 
 Using the narrower provider-backed MVP target as:
 
 > deterministic/scripted/provider-backed BayesProbe loop with benchmark,
 > config, SDK, and local WebUI support
 
-the current implementation is approximately **97%-98% complete**.
+the current implementation is approximately **98%-99% complete**.
 
-The remaining work is mostly depth and robustness rather than direction:
+The M0.9 semantic freeze is implemented. The remaining work is depth,
+experimental validity, and production hardening rather than a change of
+direction:
 
-- stronger structured model output handling;
-- broader provider registry and provider observability;
+- broader tool adapters for search, retrieval, and domain systems;
+- provider registry, cost/latency telemetry, and operational observability;
 - provider adapter prompt-registry snapshots;
-- larger benchmark datasets and comparative baselines;
-- stronger synchronized/multi-agent protocol objects;
+- larger benchmark datasets, HLE-scale experiments, and comparative baselines;
+- stronger synchronized/multi-agent protocol objects and transport;
 - production-grade persistence and experiment trace packaging.
 
 ## 7. External Seams and Configuration
@@ -832,3 +849,8 @@ The BayesProbe kernel can be considered substantially complete when:
 
 Until then, the project should continue to prioritize core depth over broad
 feature surface.
+
+M0.9 status: all six criteria above have an MVP implementation and regression
+coverage. This makes the local engineering kernel substantially complete for
+manual WebUI, SDK, and benchmark validation; it does not imply production
+operations or methodological superiority has been established.
