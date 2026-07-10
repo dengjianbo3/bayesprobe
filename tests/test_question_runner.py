@@ -10,6 +10,7 @@ from bayesprobe.probe_planner import ProbePlanningResult
 from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunner,
+    AutonomousQuestionProgressKind,
     AutonomousQuestionStopReason,
 )
 from bayesprobe.schemas import (
@@ -309,3 +310,94 @@ def test_question_runner_does_not_duplicate_core_integration(tmp_path: Path):
     assert record_types.count("probe_execution") == 1
     assert record_types.count("probe_set") == 1
     assert record_types.count("external_signal") == 1
+
+
+def test_question_runner_emits_truthful_progress_for_integrated_cycle():
+    events = []
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+        progress_observer=events.append,
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_question_progress",
+            problem="Does progress follow the BayesProbe lifecycle?",
+        )
+    )
+
+    assert [event.kind for event in events] == [
+        AutonomousQuestionProgressKind.RUN_STARTED,
+        AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
+        AutonomousQuestionProgressKind.CYCLE_STARTED,
+        AutonomousQuestionProgressKind.PROBE_SET_PLANNED,
+        AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED,
+        AutonomousQuestionProgressKind.SIGNALS_COLLECTED,
+        AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED,
+        AutonomousQuestionProgressKind.CYCLE_INTEGRATED,
+        AutonomousQuestionProgressKind.RUN_COMPLETED,
+    ]
+    cycle_event = events[-2]
+    assert cycle_event.cycle_result == result.cycle_results[0]
+    assert cycle_event.cycle_result.cycle.boundary_status.value == "integrated"
+    assert sum(
+        hypothesis.posterior
+        for hypothesis in cycle_event.cycle_result.belief_state.hypotheses
+    ) == pytest.approx(1.0)
+    assert events[-1].result == result
+
+
+def test_question_runner_progress_ends_once_when_no_probe_cycle_is_created():
+    events = []
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        planner=EmptyPlanner(),
+        executor=RecordingExecutor(),
+        config=AutonomousQuestionRunConfig(max_cycles=2, stop_on_no_probes=True),
+        progress_observer=events.append,
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_question_progress_no_probes",
+            problem="What happens when progress reaches an empty probe set?",
+        )
+    )
+
+    assert result.stop_reason == AutonomousQuestionStopReason.NO_PROBES
+    assert [event.kind for event in events][-1] == (
+        AutonomousQuestionProgressKind.RUN_COMPLETED
+    )
+    assert sum(
+        event.kind == AutonomousQuestionProgressKind.RUN_COMPLETED
+        for event in events
+    ) == 1
+    assert all(
+        event.kind != AutonomousQuestionProgressKind.CYCLE_INTEGRATED
+        for event in events
+    )
+
+
+def test_question_runner_repeats_cycle_progress_for_each_integrated_cycle():
+    events = []
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        config=AutonomousQuestionRunConfig(max_cycles=2, max_probes_per_cycle=1),
+        progress_observer=events.append,
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_question_progress_multi",
+            problem="Can progress report both autonomous cycles?",
+        )
+    )
+
+    integrated = [
+        event
+        for event in events
+        if event.kind == AutonomousQuestionProgressKind.CYCLE_INTEGRATED
+    ]
+    assert [event.cycle_index for event in integrated] == [1, 2]
+    assert [event.cycle_result for event in integrated] == result.cycle_results

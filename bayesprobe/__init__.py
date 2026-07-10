@@ -60,6 +60,9 @@ from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunResult,
     AutonomousQuestionRunner,
+    AutonomousQuestionProgress,
+    AutonomousQuestionProgressKind,
+    AutonomousQuestionProgressObserver,
     AutonomousQuestionStopReason,
 )
 from bayesprobe.recorded_gateway import RecordedModelGateway
@@ -90,6 +93,9 @@ __all__ = [
     "AutonomousQuestionRunConfig",
     "AutonomousQuestionRunResult",
     "AutonomousQuestionRunner",
+    "AutonomousQuestionProgress",
+    "AutonomousQuestionProgressKind",
+    "AutonomousQuestionProgressObserver",
     "AutonomousQuestionStopReason",
     "BayesProbeCore",
     "BayesProbeInitializer",

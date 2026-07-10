@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -61,6 +62,18 @@ class AutonomousQuestionStopReason(StrEnum):
     POSTERIOR_STABLE = "posterior_stable"
 
 
+class AutonomousQuestionProgressKind(StrEnum):
+    RUN_STARTED = "run_started"
+    INITIALIZATION_COMPLETED = "initialization_completed"
+    CYCLE_STARTED = "cycle_started"
+    PROBE_SET_PLANNED = "probe_set_planned"
+    PROBE_EXECUTION_STARTED = "probe_execution_started"
+    SIGNALS_COLLECTED = "signals_collected"
+    EVIDENCE_INTEGRATION_STARTED = "evidence_integration_started"
+    CYCLE_INTEGRATED = "cycle_integrated"
+    RUN_COMPLETED = "run_completed"
+
+
 @dataclass(frozen=True)
 class AutonomousQuestionCycleResult:
     cycle: CycleRecord
@@ -85,6 +98,23 @@ class AutonomousQuestionRunResult:
     stop_reason: AutonomousQuestionStopReason
 
 
+@dataclass(frozen=True)
+class AutonomousQuestionProgress:
+    kind: AutonomousQuestionProgressKind
+    run_id: str
+    cycle_id: str | None = None
+    cycle_index: int | None = None
+    run: RunRecord | None = None
+    belief_state: BeliefState | None = None
+    probe_set: ProbeSet | None = None
+    signals: tuple[ExternalSignal, ...] = ()
+    cycle_result: AutonomousQuestionCycleResult | None = None
+    result: AutonomousQuestionRunResult | None = None
+
+
+AutonomousQuestionProgressObserver = Callable[[AutonomousQuestionProgress], None]
+
+
 class AutonomousQuestionRunner:
     def __init__(
         self,
@@ -94,6 +124,7 @@ class AutonomousQuestionRunner:
         planner: ProbePlanner | None = None,
         executor: ProbeExecutor | None = None,
         config: AutonomousQuestionRunConfig | None = None,
+        progress_observer: AutonomousQuestionProgressObserver | None = None,
     ) -> None:
         self.core = core
         self.initializer = initializer or BayesProbeInitializer(ledger=core.ledger)
@@ -103,11 +134,22 @@ class AutonomousQuestionRunner:
             ledger=core.ledger,
         )
         self.config = config or AutonomousQuestionRunConfig()
+        self.progress_observer = progress_observer
 
     def run_question(self, input: InitializeRunInput) -> AutonomousQuestionRunResult:
+        self._emit_progress(
+            AutonomousQuestionProgressKind.RUN_STARTED,
+            run_id=input.run_id,
+        )
         initialization = self.initializer.initialize(input)
         run = initialization.run
         initial_belief_state = initialization.belief_state
+        self._emit_progress(
+            AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
+            run_id=run.run_id,
+            run=run,
+            belief_state=initial_belief_state,
+        )
         current_belief_state = initial_belief_state
         candidate_pool = list(initialization.probe_candidates)
         cycle_results: list[AutonomousQuestionCycleResult] = []
@@ -118,11 +160,26 @@ class AutonomousQuestionRunner:
             cycle_id = self.core.allocate_cycle_id(
                 f"{run.run_id}_cycle_{current_belief_state.cycle_index + 1}"
             )
+            self._emit_progress(
+                AutonomousQuestionProgressKind.CYCLE_STARTED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=current_belief_state.cycle_index + 1,
+                belief_state=current_belief_state,
+            )
             planning = self._plan_next_probe_set(
                 run=run,
                 cycle_id=cycle_id,
                 belief_state=current_belief_state,
                 candidate_pool=candidate_pool,
+            )
+            self._emit_progress(
+                AutonomousQuestionProgressKind.PROBE_SET_PLANNED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=current_belief_state.cycle_index + 1,
+                belief_state=current_belief_state,
+                probe_set=planning.probe_set,
             )
             passive_signals = (
                 _initial_context_signals(
@@ -144,6 +201,14 @@ class AutonomousQuestionRunner:
                     stop_reason=AutonomousQuestionStopReason.NO_PROBES,
                 )
 
+            self._emit_progress(
+                AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=current_belief_state.cycle_index + 1,
+                belief_state=current_belief_state,
+                probe_set=planning.probe_set,
+            )
             execution = self.executor.execute_probe_set(
                 probe_set=planning.probe_set,
                 context=ProbeExecutionContext(
@@ -157,11 +222,29 @@ class AutonomousQuestionRunner:
                 ),
             )
             signals = [*execution.signals, *passive_signals]
+            self._emit_progress(
+                AutonomousQuestionProgressKind.SIGNALS_COLLECTED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=current_belief_state.cycle_index + 1,
+                belief_state=current_belief_state,
+                probe_set=planning.probe_set,
+                signals=tuple(signals),
+            )
             cycle = CycleRecord(
                 cycle_id=cycle_id,
                 run_id=run.run_id,
                 cycle_index=current_belief_state.cycle_index + 1,
                 signal_shape=_cycle_signal_shape(signals),
+            )
+            self._emit_progress(
+                AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=cycle.cycle_index,
+                belief_state=current_belief_state,
+                probe_set=planning.probe_set,
+                signals=tuple(signals),
             )
             core_result = self.core.integrate_cycle(
                 cycle=cycle,
@@ -190,6 +273,16 @@ class AutonomousQuestionRunner:
                 answer_projection=answer_projection,
             )
             cycle_results.append(cycle_result)
+            self._emit_progress(
+                AutonomousQuestionProgressKind.CYCLE_INTEGRATED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=cycle_result.cycle.cycle_index,
+                belief_state=cycle_result.belief_state,
+                probe_set=cycle_result.probe_set,
+                signals=tuple(cycle_result.signals),
+                cycle_result=cycle_result,
+            )
             current_belief_state = core_result.belief_state
             previous_answer = answer_projection
             candidate_pool = self._next_candidate_pool(
@@ -310,13 +403,54 @@ class AutonomousQuestionRunner:
         )
         if self.core.ledger is not None:
             self.core.ledger.append("run", completed_run)
-        return AutonomousQuestionRunResult(
+        result = AutonomousQuestionRunResult(
             run=completed_run,
             initial_belief_state=initial_belief_state,
             final_belief_state=final_belief_state,
             cycle_results=list(cycle_results),
             final_answer_projection=final_answer_projection,
             stop_reason=stop_reason,
+        )
+        self._emit_progress(
+            AutonomousQuestionProgressKind.RUN_COMPLETED,
+            run_id=completed_run.run_id,
+            cycle_id=completed_run.current_cycle_id,
+            cycle_index=final_belief_state.cycle_index,
+            run=completed_run,
+            belief_state=final_belief_state,
+            result=result,
+        )
+        return result
+
+    def _emit_progress(
+        self,
+        kind: AutonomousQuestionProgressKind,
+        *,
+        run_id: str,
+        cycle_id: str | None = None,
+        cycle_index: int | None = None,
+        run: RunRecord | None = None,
+        belief_state: BeliefState | None = None,
+        probe_set: ProbeSet | None = None,
+        signals: tuple[ExternalSignal, ...] = (),
+        cycle_result: AutonomousQuestionCycleResult | None = None,
+        result: AutonomousQuestionRunResult | None = None,
+    ) -> None:
+        if self.progress_observer is None:
+            return
+        self.progress_observer(
+            AutonomousQuestionProgress(
+                kind=kind,
+                run_id=run_id,
+                cycle_id=cycle_id,
+                cycle_index=cycle_index,
+                run=run,
+                belief_state=belief_state,
+                probe_set=probe_set,
+                signals=signals,
+                cycle_result=cycle_result,
+                result=result,
+            )
         )
 
 
