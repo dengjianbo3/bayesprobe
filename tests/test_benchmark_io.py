@@ -21,6 +21,27 @@ def passive_signal_payload(signal_id: str = "S_passive_refute") -> dict:
     }
 
 
+def hypothesis_seed_payloads() -> list[dict]:
+    return [
+        {
+            "id": "H1",
+            "statement": "The fixture's H1 condition holds.",
+            "scope": "Deterministic benchmark fixture.",
+            "prior": 0.5,
+            "falsifiers": ["The fixture emits a reliable H1 refutation."],
+            "predictions": ["The fixture emits a reliable H1 support cue."],
+        },
+        {
+            "id": "H2",
+            "statement": "The fixture's H2 condition holds instead.",
+            "scope": "Deterministic benchmark fixture.",
+            "prior": 0.5,
+            "falsifiers": ["The fixture emits a reliable H2 refutation."],
+            "predictions": ["The fixture emits a reliable H2 support cue."],
+        },
+    ]
+
+
 def active_sample_payload(sample_id: str = "active_support") -> dict:
     return {
         "sample_id": sample_id,
@@ -28,6 +49,7 @@ def active_sample_payload(sample_id: str = "active_support") -> dict:
         "signal_shape": "active_only",
         "gold_best_hypothesis": "H1",
         "gold_update_directions": {"H1": "strengthened"},
+        "hypothesis_seeds": hypothesis_seed_payloads(),
     }
 
 
@@ -39,6 +61,7 @@ def passive_sample_payload(sample_id: str = "passive_refute") -> dict:
         "gold_best_hypothesis": "H2",
         "gold_update_directions": {"H1": "weakened", "H2": "strengthened"},
         "passive_signals": [passive_signal_payload()],
+        "hypothesis_seeds": hypothesis_seed_payloads(),
     }
 
 

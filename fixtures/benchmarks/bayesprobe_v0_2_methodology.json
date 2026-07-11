@@ -11,6 +11,10 @@
         "H1": "strengthened"
       },
       "question_or_claim": "Does an active probe support the default H1 direction?",
+      "hypothesis_seeds": [
+        {"id": "H1", "statement": "The active probe supports the stated H1 direction.", "scope": "Methodology active-probe scenario.", "prior": 0.5, "falsifiers": ["The active probe reliably contradicts H1."], "predictions": ["The active probe yields an H1 support cue."]},
+        {"id": "H2", "statement": "The active probe does not support the stated H1 direction.", "scope": "Methodology active-probe scenario.", "prior": 0.5, "falsifiers": ["The active probe reliably supports H1."], "predictions": ["The active probe fails to favor H1."]}
+      ],
       "sample_id": "v02_active_basic_support",
       "signal_shape": "active_only"
     },
@@ -33,6 +37,10 @@
         }
       ],
       "question_or_claim": "Does expert feedback support the constant-volume no-shift hypothesis?",
+      "hypothesis_seeds": [
+        {"id": "H1", "statement": "At constant volume, added inert gas causes no equilibrium shift.", "scope": "Closed isothermal constant-volume vessel.", "prior": 0.5, "falsifiers": ["Reacting-gas partial pressures change after inert gas is added."], "predictions": ["Expert review supports the no-shift condition."]},
+        {"id": "H2", "statement": "At constant volume, added inert gas changes equilibrium.", "scope": "Closed isothermal constant-volume vessel.", "prior": 0.5, "falsifiers": ["Reacting-gas partial pressures remain unchanged."], "predictions": ["Expert review reports an equilibrium shift."]}
+      ],
       "sample_id": "v02_passive_expert_constant_volume",
       "signal_shape": "passive_only"
     },
@@ -55,6 +63,10 @@
         }
       ],
       "question_or_claim": "Can BayesProbe integrate active support with a stronger passive correction?",
+      "hypothesis_seeds": [
+        {"id": "H1", "statement": "The active support cue remains correct after review.", "scope": "Mixed-signal conflict resolution.", "prior": 0.5, "falsifiers": ["A stronger passive correction identifies a controlling condition."], "predictions": ["Integrated evidence retains H1." ]},
+        {"id": "H2", "statement": "The passive correction supersedes the active support cue.", "scope": "Mixed-signal conflict resolution.", "prior": 0.5, "falsifiers": ["The active cue remains valid under the controlling condition."], "predictions": ["Integrated evidence shifts toward H2."]}
+      ],
       "sample_id": "v02_mixed_conflict_resolution",
       "signal_shape": "active_plus_passive"
     },
@@ -76,6 +88,10 @@
         }
       ],
       "question_or_claim": "Can a noisy passive stream still provide a weak useful update?",
+      "hypothesis_seeds": [
+        {"id": "H1", "statement": "The reliable sentence in the noisy stream weakly supports H1.", "scope": "Noisy passive evidence stream.", "prior": 0.5, "falsifiers": ["The reliable sentence contradicts H1."], "predictions": ["Filtering noise leaves a weak H1 support cue."]},
+        {"id": "H2", "statement": "The noisy stream provides no useful support for H1.", "scope": "Noisy passive evidence stream.", "prior": 0.5, "falsifiers": ["A reliable sentence weakly supports H1."], "predictions": ["Filtering noise does not favor H1."]}
+      ],
       "sample_id": "v02_passive_noisy_stream",
       "signal_shape": "passive_only"
     },
@@ -98,6 +114,10 @@
         }
       ],
       "question_or_claim": "Can a system log signal move belief toward the regression-compatible hypothesis?",
+      "hypothesis_seeds": [
+        {"id": "H1", "statement": "The regression is compatible with H1's assumption.", "scope": "System-log regression scenario.", "prior": 0.5, "falsifiers": ["The regression disappears under H1 and persists under H2."], "predictions": ["The system log remains compatible with H1."]},
+        {"id": "H2", "statement": "The regression is compatible with H2's boundary condition.", "scope": "System-log regression scenario.", "prior": 0.5, "falsifiers": ["The regression persists under H1 and disappears under H2."], "predictions": ["The system log moves belief toward H2."]}
+      ],
       "sample_id": "v02_passive_system_log",
       "signal_shape": "passive_only"
     },
@@ -120,6 +140,10 @@
         }
       ],
       "question_or_claim": "Can another agent's projection enter as a passive signal?",
+      "hypothesis_seeds": [
+        {"id": "H1", "statement": "The peer-agent projection does not favor H2.", "scope": "External agent projection scenario.", "prior": 0.5, "falsifiers": ["The projection reports H2 as current best hypothesis."], "predictions": ["The external projection leaves H1 preferred."]},
+        {"id": "H2", "statement": "The peer-agent projection provides passive support for H2.", "scope": "External agent projection scenario.", "prior": 0.5, "falsifiers": ["The projection reliably favors H1."], "predictions": ["The external projection moves belief toward H2."]}
+      ],
       "sample_id": "v02_passive_agent_projection",
       "signal_shape": "passive_only"
     },
@@ -141,6 +165,10 @@
         }
       ],
       "question_or_claim": "Can a provider-backed fixture preserve schema-safe evidence flow?",
+      "hypothesis_seeds": [
+        {"id": "H1", "statement": "The recorded repair supplies schema-safe evidence supporting H1.", "scope": "Provider replay and repair scenario.", "prior": 0.5, "falsifiers": ["The repair remains malformed or contradicts H1."], "predictions": ["The repaired judgment supports H1."]},
+        {"id": "H2", "statement": "The provider fixture cannot preserve schema-safe evidence supporting H1.", "scope": "Provider replay and repair scenario.", "prior": 0.5, "falsifiers": ["The repaired judgment is schema-safe and supports H1."], "predictions": ["The repair fails to provide usable H1 evidence."]}
+      ],
       "sample_id": "v02_mixed_schema_repair",
       "signal_shape": "active_plus_passive"
     },
@@ -159,6 +187,10 @@
         }
       ],
       "question_or_claim": "Can ambiguous evidence remain cautious instead of over-updating?",
+      "hypothesis_seeds": [
+        {"id": "H1", "statement": "Ambiguous evidence is handled cautiously without a decisive posterior jump.", "scope": "Ambiguous boundary-condition scenario.", "prior": 0.5, "falsifiers": ["Ambiguous evidence causes a decisive unsupported update."], "predictions": ["The evidence is recorded with uncertainty." ]},
+        {"id": "H2", "statement": "Ambiguous evidence forces an overconfident decisive update.", "scope": "Ambiguous boundary-condition scenario.", "prior": 0.5, "falsifiers": ["The system preserves uncertainty without a decisive jump."], "predictions": ["The evidence produces an overconfident posterior shift."]}
+      ],
       "sample_id": "v02_passive_ambiguous_boundary",
       "signal_shape": "passive_only"
     }

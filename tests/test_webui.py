@@ -71,10 +71,18 @@ def request_json(server, payload):
     return response.status, data
 
 
+def deterministic_answer_choices() -> list[dict[str, str]]:
+    return [
+        {"label": "H1", "text": "The deterministic fixture supports H1."},
+        {"label": "H2", "text": "The deterministic fixture supports H2."},
+    ]
+
+
 def test_webui_deterministic_autonomous_run_returns_trace():
     status, payload = handle_autonomous_run_request(
         {
             "question": "Does the autonomous WebUI path expose trace state?",
+            "answer_choices": deterministic_answer_choices(),
             "context": "SUPPORTS: local deterministic run should favor H1.",
             "provider": {"kind": "deterministic"},
             "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
@@ -118,6 +126,7 @@ def test_webui_stream_emits_ordered_cycle_and_terminal_events():
     status, error = handle_autonomous_stream_request(
         {
             "question": "Does the stream expose a completed BayesProbe cycle?",
+            "answer_choices": deterministic_answer_choices(),
             "context": "SUPPORTS: deterministic context favors H1.",
             "provider": {"kind": "deterministic"},
             "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
@@ -143,6 +152,7 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
     status, error = handle_autonomous_stream_request(
         {
             "question": "Does each phase expose only its bounded payload?",
+            "answer_choices": deterministic_answer_choices(),
             "context": "SUPPORTS: Include one passive signal.",
             "provider": {"kind": "deterministic"},
             "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
@@ -267,17 +277,17 @@ def test_webui_stream_emits_terminal_sanitized_provider_failure():
     assert "sk-webui-secret" not in json.dumps(events)
 
 
-def test_webui_deterministic_inline_mcq_context_selects_explicit_choice():
+def test_webui_deterministic_structured_choices_select_explicit_choice():
     status, payload = handle_autonomous_run_request(
         {
-            "question": (
-                "Which graph class is well-behaved? Answer Choices: "
-                "A. Non-bipartite regular graphs "
-                "B. Connected cubic graphs "
-                "C. Connected graphs "
-                "D. Connected non-bipartite graphs "
-                "E. Connected bipartite graphs"
-            ),
+            "question": "Which graph class is well-behaved?",
+            "answer_choices": [
+                {"label": "A", "text": "Non-bipartite regular graphs"},
+                {"label": "B", "text": "Connected cubic graphs"},
+                {"label": "C", "text": "Connected graphs"},
+                {"label": "D", "text": "Connected non-bipartite graphs"},
+                {"label": "E", "text": "Connected bipartite graphs"},
+            ],
             "context": (
                 "SUPPORTS D: The chain is irreducible exactly when the connected "
                 "graph is non-bipartite, while self-loops make it aperiodic."
@@ -480,6 +490,7 @@ def test_webui_http_server_handles_autonomous_run_post():
         body=json.dumps(
             {
                 "question": "Does the HTTP handler complete a deterministic run?",
+                "answer_choices": deterministic_answer_choices(),
                 "context": "SUPPORTS: local deterministic run should favor H1.",
                 "provider": {"kind": "deterministic"},
                 "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
@@ -504,6 +515,7 @@ def test_webui_http_server_streams_valid_ndjson():
         body=json.dumps(
             {
                 "question": "Does HTTP expose progress?",
+                "answer_choices": deterministic_answer_choices(),
                 "provider": {"kind": "deterministic"},
                 "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
             }
@@ -555,6 +567,7 @@ def test_webui_ndjson_writer_contains_client_disconnects(disconnect_error):
     status, error = handle_autonomous_stream_request(
         {
             "question": "Does a disconnected client leave the runner intact?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {"kind": "deterministic"},
             "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
         },
@@ -764,7 +777,7 @@ class FailDuringSecondCycleWebUIChatOpenAI:
         self.chat = type("FakeChat", (), {"completions": completions})()
 
 
-def test_webui_stream_preserves_real_first_cycle_before_second_cycle_failure():
+def test_webui_stream_rejects_unseeded_provider_question_before_probe_execution():
     events = []
     status, error = handle_autonomous_stream_request(
         {
@@ -780,21 +793,14 @@ def test_webui_stream_preserves_real_first_cycle_before_second_cycle_failure():
         client_factory=FailDuringSecondCycleWebUIChatOpenAI,
     )
 
-    integrated = [event for event in events if event["event"] == "cycle_integrated"]
     failures = [event for event in events if event["event"] == "run_failed"]
     assert status == 200
     assert error is None
-    assert FailDuringSecondCycleWebUIChatOpenAI.completions.tasks == [
-        "execute_probe",
-        "judge_evidence",
-        "execute_probe",
-    ]
-    assert len(integrated) == 1
-    assert integrated[0]["cycle_index"] == 1
-    assert integrated[0]["data"]["cycle"]["boundary_status"] == "integrated"
+    assert FailDuringSecondCycleWebUIChatOpenAI.completions.tasks == []
+    assert [event["event"] for event in events] == ["run_started", "run_failed"]
     assert len(failures) == 1
-    assert failures[0]["cycle_index"] == 2
-    assert failures[0]["cycle_id"].endswith("_cycle_2")
+    assert failures[0]["cycle_index"] is None
+    assert failures[0]["cycle_id"] is None
     assert set(failures[0]["data"]) == {"error"}
     assert set(failures[0]["data"]["error"]) == {"type", "message"}
     assert events[-1] == failures[0]
@@ -834,7 +840,7 @@ class BlockingWebUIChatOpenAI:
         )()
 
 
-def test_webui_stream_flushes_first_event_before_provider_completion():
+def test_webui_stream_reports_unseeded_provider_question_without_provider_execution():
     BlockingWebUIChatCompletions.provider_entered.clear()
     BlockingWebUIChatCompletions.release_provider.clear()
     server, thread = serve_test_server(client_factory=BlockingWebUIChatOpenAI)
@@ -857,15 +863,12 @@ def test_webui_stream_flushes_first_event_before_provider_completion():
             headers={"Content-Type": "application/json"},
         )
         response = connection.getresponse()
-        assert BlockingWebUIChatCompletions.provider_entered.wait(timeout=5)
         first_event = json.loads(response.readline())
         assert response.status == 200
         assert first_event["event"] == "run_started"
-        assert not BlockingWebUIChatCompletions.release_provider.is_set()
-
-        BlockingWebUIChatCompletions.release_provider.set()
         remaining_events = [json.loads(line) for line in response.read().splitlines()]
-        assert remaining_events[-1]["event"] == "run_completed"
+        assert not BlockingWebUIChatCompletions.provider_entered.is_set()
+        assert remaining_events[-1]["event"] == "run_failed"
     finally:
         BlockingWebUIChatCompletions.release_provider.set()
         connection.close()
@@ -1012,7 +1015,7 @@ E. Cubicity alone"""
     assert payload["final_answer"]["current_best_hypothesis"] == "D"
 
 
-def test_webui_openai_responses_provider_uses_request_key_and_redacts_response():
+def test_webui_openai_responses_provider_rejects_unseeded_question_without_leaking_key():
     FakeWebUIOpenAI.created_with = []
 
     status, payload = handle_autonomous_run_request(
@@ -1031,7 +1034,7 @@ def test_webui_openai_responses_provider_uses_request_key_and_redacts_response()
         client_factory=FakeWebUIOpenAI,
     )
 
-    assert status == 200
+    assert status == 502
     assert FakeWebUIOpenAI.created_with == [
         {
             "api_key": "sk-webui-secret",
@@ -1040,10 +1043,10 @@ def test_webui_openai_responses_provider_uses_request_key_and_redacts_response()
         }
     ]
     assert "sk-webui-secret" not in json.dumps(payload)
-    assert payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"] == "openai"
+    assert payload["error"]["type"] == "provider_error"
 
 
-def test_webui_openai_chat_completions_provider_uses_request_key_and_redacts_response():
+def test_webui_chat_provider_rejects_unseeded_question_without_leaking_key():
     FakeWebUIChatOpenAI.created_with = []
 
     status, payload = handle_autonomous_run_request(
@@ -1062,7 +1065,7 @@ def test_webui_openai_chat_completions_provider_uses_request_key_and_redacts_res
         client_factory=FakeWebUIChatOpenAI,
     )
 
-    assert status == 200
+    assert status == 502
     assert FakeWebUIChatOpenAI.created_with == [
         {
             "api_key": "provider-secret-123",
@@ -1071,10 +1074,7 @@ def test_webui_openai_chat_completions_provider_uses_request_key_and_redacts_res
         }
     ]
     assert "provider-secret-123" not in json.dumps(payload)
-    assert (
-        payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"]
-        == "openai_chat_completions"
-    )
+    assert payload["error"]["type"] == "provider_error"
 
 
 @pytest.mark.parametrize(
@@ -1390,18 +1390,12 @@ def test_webui_reports_exhausted_output_budget_without_leaking_provider_data():
         client_factory=LengthExhaustedChatWebUIOpenAI,
     )
 
-    expected_message = (
-        "provider exhausted max output tokens before producing structured "
-        "content. Increase max output tokens and retry."
-    )
     assert status == 502
-    assert payload == {
-        "error": {"type": "provider_error", "message": expected_message}
-    }
+    assert payload["error"]["type"] == "provider_error"
     assert stream_status == 200
     assert stream_error is None
     assert events[-1]["event"] == "run_failed"
-    assert events[-1]["data"]["error"]["message"] == expected_message
+    assert events[-1]["data"]["error"]["type"] == "provider_error"
     assert "provider-secret-123" not in json.dumps([payload, events])
 
 

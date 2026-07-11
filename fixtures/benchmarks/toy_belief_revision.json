@@ -11,6 +11,24 @@
         "H1": "strengthened"
       },
       "question_or_claim": "Does the autonomous active path support H1?",
+      "hypothesis_seeds": [
+        {
+          "id": "H1",
+          "statement": "The autonomous active path produces reliable support for H1.",
+          "scope": "Toy active-only benchmark path.",
+          "prior": 0.5,
+          "falsifiers": ["The active path produces reliable evidence against H1."],
+          "predictions": ["The active probe yields a support cue for H1."]
+        },
+        {
+          "id": "H2",
+          "statement": "The autonomous active path does not reliably support H1.",
+          "scope": "Toy active-only benchmark path.",
+          "prior": 0.5,
+          "falsifiers": ["The active path yields reliable support for H1."],
+          "predictions": ["The active probe fails to favor H1 over H2."]
+        }
+      ],
       "sample_id": "toy_active_support",
       "signal_shape": "active_only"
     },
@@ -33,6 +51,24 @@
         }
       ],
       "question_or_claim": "Does the passive benchmark stream refute H1?",
+      "hypothesis_seeds": [
+        {
+          "id": "H1",
+          "statement": "The passive benchmark stream supports H1.",
+          "scope": "Toy passive-only benchmark path.",
+          "prior": 0.5,
+          "falsifiers": ["The passive stream reliably contradicts H1."],
+          "predictions": ["The passive signal favors H1."]
+        },
+        {
+          "id": "H2",
+          "statement": "The passive benchmark stream refutes H1 and favors H2.",
+          "scope": "Toy passive-only benchmark path.",
+          "prior": 0.5,
+          "falsifiers": ["The passive stream reliably supports H1."],
+          "predictions": ["The passive signal weakens H1 and strengthens H2."]
+        }
+      ],
       "sample_id": "toy_passive_refute",
       "signal_shape": "passive_only"
     },
@@ -54,6 +90,24 @@
         }
       ],
       "question_or_claim": "Can mixed active and passive signals move belief toward H2?",
+      "hypothesis_seeds": [
+        {
+          "id": "H1",
+          "statement": "The combined signals support H1 over H2.",
+          "scope": "Toy mixed benchmark path.",
+          "prior": 0.5,
+          "falsifiers": ["A reliable passive correction contradicts H1."],
+          "predictions": ["The combined evidence leaves H1 preferred."]
+        },
+        {
+          "id": "H2",
+          "statement": "The combined signals move belief toward H2.",
+          "scope": "Toy mixed benchmark path.",
+          "prior": 0.5,
+          "falsifiers": ["The combined evidence reliably favors H1."],
+          "predictions": ["The passive correction moves belief toward H2."]
+        }
+      ],
       "sample_id": "toy_mixed_refute",
       "signal_shape": "active_plus_passive"
     }

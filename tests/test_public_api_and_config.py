@@ -105,6 +105,10 @@ def test_public_sdk_exports_supported_names():
         "InitializeRunInput",
         "InitializationResult",
         "HypothesisSeed",
+        "ExplicitTaskFramer",
+        "TaskFramer",
+        "TaskFramingError",
+        "TaskFramingInput",
         "JsonlLedgerStore",
         "ProbeExecutionContext",
         "ProbeExecutionResult",
@@ -124,10 +128,18 @@ def test_public_sdk_exports_supported_names():
         "ExternalSignal",
         "BeliefState",
         "Hypothesis",
+        "HypothesisFrame",
+        "HypothesisRelation",
         "ProbeDesign",
         "ProbeSet",
         "AnswerProjection",
+        "AnswerChoice",
+        "AnswerContract",
         "BeliefStateProjection",
+        "FramedHypothesis",
+        "FramingMethod",
+        "TaskFrame",
+        "TaskKind",
     }
 
     assert expected_names.issubset(set(bayesprobe.__all__))
@@ -183,6 +195,10 @@ def test_public_sdk_runs_autonomous_question_without_internal_imports():
         bayesprobe.InitializeRunInput(
             run_id="public_sdk_autonomous",
             problem="Does the supported package-root interface run BayesProbe?",
+            hypothesis_seeds=[
+                bayesprobe.HypothesisSeed(id="H1", statement="The public SDK fixture's H1 condition holds.", prior=0.5, scope="Public SDK deterministic fixture.", falsifiers=["The public SDK fixture refutes H1."], predictions=["The public SDK fixture supports H1."]),
+                bayesprobe.HypothesisSeed(id="H2", statement="The public SDK fixture's H2 condition holds instead.", prior=0.5, scope="Public SDK deterministic fixture.", falsifiers=["The public SDK fixture refutes H2."], predictions=["The public SDK fixture supports H2."]),
+            ],
         )
     )
 

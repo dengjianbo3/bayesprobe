@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore
-from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ScriptedModelGateway
 from bayesprobe.probe_executor import (
@@ -45,6 +45,13 @@ class RecordingGateway:
                 )
             ],
         )
+
+
+def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
+    return [
+        HypothesisSeed(id="H1", statement="The fixture's H1 condition holds.", prior=0.5, scope="Deterministic test fixture.", falsifiers=["The fixture emits a reliable H1 refutation."], predictions=["The fixture emits a reliable H1 support cue."]),
+        HypothesisSeed(id="H2", statement="The fixture's H2 condition holds instead.", prior=0.5, scope="Deterministic test fixture.", falsifiers=["The fixture emits a reliable H2 refutation."], predictions=["The fixture emits a reliable H2 support cue."]),
+    ]
 
 
 class PassiveGateway:
@@ -331,6 +338,7 @@ def test_planned_probe_set_executes_and_integrates_through_core():
         InitializeRunInput(
             run_id="run_full_active_path",
             problem="Can the active path produce signals for the core?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
     cycle = CycleRecord(

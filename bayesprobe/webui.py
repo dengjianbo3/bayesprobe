@@ -37,6 +37,7 @@ from bayesprobe.question_runner import (
     AutonomousQuestionRunResult,
     AutonomousQuestionRunner,
 )
+from bayesprobe.schemas import AnswerChoice
 
 
 STATIC_DIR = Path(__file__).with_name("webui_static")
@@ -468,6 +469,7 @@ def _prepare_autonomous_run(
             run_id=_webui_run_id(),
             problem=request["question"],
             context=request["context"],
+            answer_choices=request["answer_choices"],
         ),
         provider_kind=provider_kind,
     )
@@ -478,6 +480,7 @@ def _parse_autonomous_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise WebUIError("request payload must be an object")
     question = _required_nonempty_string(payload.get("question"), "question")
     context = _optional_string(payload.get("context"), "context", default="")
+    answer_choices = _answer_choices_from_payload(payload.get("answer_choices", []))
     provider = payload.get("provider", {"kind": "deterministic"})
     if provider is None:
         provider = {"kind": "deterministic"}
@@ -491,9 +494,21 @@ def _parse_autonomous_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "question": question,
         "context": context,
+        "answer_choices": answer_choices,
         "provider": dict(provider),
         "runner_config": _runner_config_from_payload(runner_payload),
     }
+
+
+def _answer_choices_from_payload(value: Any) -> list[AnswerChoice]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise WebUIError("answer_choices must be an array")
+    try:
+        return [AnswerChoice.model_validate(choice) for choice in value]
+    except ValueError as error:
+        raise WebUIError("answer_choices must contain valid choices") from error
 
 
 def _runner_config_from_payload(

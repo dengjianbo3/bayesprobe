@@ -12,6 +12,7 @@ from bayesprobe.benchmark import (
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ScriptedModelGateway
 from bayesprobe.schemas import BeliefUpdate, UpdateDirection
+from bayesprobe.task_framing import HypothesisSeed
 
 
 def passive_refutation_signal(signal_id: str = "S_passive_refute") -> BenchmarkSignal:
@@ -22,6 +23,27 @@ def passive_refutation_signal(signal_id: str = "S_passive_refute") -> BenchmarkS
         raw_content="REFUTES: Benchmark passage contradicts H1 and supports H2.",
         target_hypotheses=["H1", "H2"],
     )
+
+
+def benchmark_hypothesis_seeds() -> list[HypothesisSeed]:
+    return [
+        HypothesisSeed(
+            id="H1",
+            statement="The benchmark's H1 condition holds.",
+            prior=0.5,
+            scope="Deterministic benchmark fixture.",
+            falsifiers=["The benchmark emits a reliable H1 refutation."],
+            predictions=["The benchmark emits a reliable H1 support cue."],
+        ),
+        HypothesisSeed(
+            id="H2",
+            statement="The benchmark's H2 condition holds instead.",
+            prior=0.5,
+            scope="Deterministic benchmark fixture.",
+            falsifiers=["The benchmark emits a reliable H2 refutation."],
+            predictions=["The benchmark emits a reliable H2 support cue."],
+        ),
+    ]
 
 
 def test_update_direction_accuracy_scores_net_movement_not_transient_match():
@@ -58,6 +80,7 @@ def test_benchmark_harness_runs_active_only_sample():
     sample = BenchmarkSample(
         sample_id="active_support_1",
         question_or_claim="Does the autonomous active path support H1?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.ACTIVE_ONLY,
         gold_best_hypothesis="H1",
         gold_update_directions={"H1": "strengthened"},
@@ -82,6 +105,7 @@ def test_benchmark_harness_runs_passive_only_sample():
     sample = BenchmarkSample(
         sample_id="passive_refute_1",
         question_or_claim="Does the passive signal refute H1?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
         gold_best_hypothesis="H2",
         passive_signals=[passive_refutation_signal()],
@@ -106,6 +130,7 @@ def test_benchmark_harness_runs_active_plus_passive_sample():
     sample = BenchmarkSample(
         sample_id="mixed_refute_1",
         question_or_claim="Can a mixed cycle integrate active and passive signals together?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.ACTIVE_PLUS_PASSIVE,
         gold_best_hypothesis="H2",
         passive_signals=[passive_refutation_signal()],
@@ -131,6 +156,7 @@ def test_benchmark_harness_aggregates_suite_metrics():
         BenchmarkSample(
             sample_id="suite_active",
             question_or_claim="Does active-only aggregate?",
+            hypothesis_seeds=benchmark_hypothesis_seeds(),
             signal_shape=BenchmarkSignalShape.ACTIVE_ONLY,
             gold_best_hypothesis="H1",
             gold_update_directions={"H1": "strengthened"},
@@ -138,6 +164,7 @@ def test_benchmark_harness_aggregates_suite_metrics():
         BenchmarkSample(
             sample_id="suite_passive",
             question_or_claim="Does passive-only aggregate?",
+            hypothesis_seeds=benchmark_hypothesis_seeds(),
             signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
             gold_best_hypothesis="H2",
             passive_signals=[passive_refutation_signal("S_suite_passive")],
@@ -187,6 +214,7 @@ def test_benchmark_harness_preserves_ledger_records(tmp_path: Path):
     sample = BenchmarkSample(
         sample_id="ledger_passive",
         question_or_claim="Does benchmark execution preserve the BayesProbe ledger?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
         gold_best_hypothesis="H2",
         passive_signals=[passive_refutation_signal("S_ledger_passive")],
@@ -221,6 +249,7 @@ def test_benchmark_harness_passes_model_gateway_to_created_core(tmp_path: Path):
     sample = BenchmarkSample(
         sample_id="gateway_passive",
         question_or_claim="Can benchmark configure model gateway?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
         gold_best_hypothesis="H1",
         passive_signals=[
@@ -263,6 +292,7 @@ def test_benchmark_harness_records_model_trace_in_evidence_ledger(tmp_path: Path
     sample = BenchmarkSample(
         sample_id="model_trace_passive",
         question_or_claim="Can benchmark ledger preserve model trace?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
         gold_best_hypothesis="H1",
         passive_signals=[
@@ -317,6 +347,7 @@ def test_benchmark_harness_passes_judgment_repair_policy_to_created_core(tmp_pat
     sample = BenchmarkSample(
         sample_id="repair_passive",
         question_or_claim="Can benchmark configure repair policy?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
         gold_best_hypothesis="H1",
         passive_signals=[
@@ -359,6 +390,7 @@ def test_benchmark_harness_records_schema_violation_without_belief_update(tmp_pa
     sample = BenchmarkSample(
         sample_id="schema_violation_passive",
         question_or_claim="Can benchmark replay schema violations?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
         gold_best_hypothesis="H1",
         passive_signals=[
@@ -389,6 +421,7 @@ def test_benchmark_harness_reports_belief_quality_metrics():
     sample = BenchmarkSample(
         sample_id="quality_active",
         question_or_claim="Does active-only quality metric work?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.ACTIVE_ONLY,
         gold_best_hypothesis="H1",
         gold_update_directions={"H1": "strengthened"},
@@ -409,6 +442,7 @@ def test_benchmark_harness_counts_schema_violations_as_discarded_evidence():
     sample = BenchmarkSample(
         sample_id="quality_schema_violation",
         question_or_claim="Does schema violation quality metric work?",
+        hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.PASSIVE_ONLY,
         gold_best_hypothesis="H1",
         passive_signals=[

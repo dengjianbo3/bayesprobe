@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore
-from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.schemas import (
     ExternalSignal,
@@ -31,6 +31,13 @@ def passive_refutation_signal(signal_id: str = "S_passive_refute") -> ExternalSi
     )
 
 
+def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
+    return [
+        HypothesisSeed(id="H1", statement="The fixture's H1 condition holds.", prior=0.5, scope="Deterministic test fixture.", falsifiers=["The fixture emits a reliable H1 refutation."], predictions=["The fixture emits a reliable H1 support cue."]),
+        HypothesisSeed(id="H2", statement="The fixture's H2 condition holds instead.", prior=0.5, scope="Deterministic test fixture.", falsifiers=["The fixture emits a reliable H2 refutation."], predictions=["The fixture emits a reliable H2 support cue."]),
+    ]
+
+
 def test_synchronized_runner_processes_new_run_passive_only_round():
     runner = SynchronizedRoundRunner(core=BayesProbeCore())
 
@@ -39,6 +46,7 @@ def test_synchronized_runner_processes_new_run_passive_only_round():
             initialize_input=InitializeRunInput(
                 run_id="sync_passive_new",
                 problem="Can passive synchronized input revise belief state?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
             ),
             rounds=[
                 SynchronizedRoundInput(
@@ -78,6 +86,7 @@ def test_synchronized_runner_processes_active_only_round():
             initialize_input=InitializeRunInput(
                 run_id="sync_active_new",
                 problem="Can synchronized active probing run inside a round?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
             ),
             rounds=[
                 SynchronizedRoundInput(
@@ -110,6 +119,7 @@ def test_synchronized_runner_processes_active_plus_passive_round():
             initialize_input=InitializeRunInput(
                 run_id="sync_mixed_new",
                 problem="Can synchronized rounds integrate active and passive signals together?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
             ),
             rounds=[
                 SynchronizedRoundInput(
@@ -144,6 +154,7 @@ def test_synchronized_runner_carries_projection_candidates_across_rounds():
             initialize_input=InitializeRunInput(
                 run_id="sync_candidate_carry",
                 problem="Can synchronized rounds carry projection-derived probes forward?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
             ),
             rounds=[
                 SynchronizedRoundInput(
@@ -179,6 +190,7 @@ def test_synchronized_runner_accepts_existing_run_state():
         InitializeRunInput(
             run_id="sync_existing",
             problem="Can synchronized runner resume from existing run state?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
             regime=RunRegime.SYNCHRONIZED,
         )
     )
@@ -239,7 +251,11 @@ def test_synchronized_runner_rejects_invalid_run_configuration():
         shape=SynchronizedRoundShape.ACTIVE_ONLY,
     )
     initialization = BayesProbeInitializer().initialize(
-        InitializeRunInput(run_id="sync_invalid", problem="Invalid run config fixture.")
+        InitializeRunInput(
+            run_id="sync_invalid",
+            problem="Invalid run config fixture.",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
     )
 
     with pytest.raises(ValueError):
@@ -263,6 +279,7 @@ def test_synchronized_runner_writes_projection_ledger_records_without_duplicate_
             initialize_input=InitializeRunInput(
                 run_id="sync_ledger",
                 problem="Does synchronized runner write coherent ledger records?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
             ),
             rounds=[
                 SynchronizedRoundInput(

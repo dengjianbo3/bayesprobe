@@ -8,6 +8,7 @@ from bayesprobe.core import BayesProbeCore, CycleResult
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGateway
+from bayesprobe.task_framing import HypothesisSeed
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
     ProbeExecutionContext,
@@ -73,11 +74,14 @@ class BenchmarkSample:
     passive_signals: list[BenchmarkSignal] = field(default_factory=list)
     gold_update_directions: dict[str, str] = field(default_factory=dict)
     initial_context: str = ""
+    hypothesis_seeds: list[HypothesisSeed] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         _require_nonempty(self.sample_id, "sample_id")
         _require_nonempty(self.question_or_claim, "question_or_claim")
         _require_nonempty(self.gold_best_hypothesis, "gold_best_hypothesis")
+        if len(self.hypothesis_seeds) < 2:
+            raise ValueError("benchmark samples require at least two explicit hypothesis seeds")
         try:
             signal_shape = BenchmarkSignalShape(self.signal_shape)
         except ValueError as error:
@@ -287,6 +291,7 @@ def _initialize_input(sample: BenchmarkSample) -> InitializeRunInput:
         run_id=f"bench_{sample.sample_id}",
         problem=sample.question_or_claim,
         context=sample.initial_context,
+        hypothesis_seeds=list(sample.hypothesis_seeds),
     )
 
 

@@ -32,6 +32,14 @@ from bayesprobe.initialization import (
     InitializationResult,
     InitializeRunInput,
 )
+from bayesprobe.task_framing import (
+    ExplicitTaskFramer,
+    ParsedAnswerChoiceFrame,
+    TaskFramer,
+    TaskFramingError,
+    TaskFramingInput,
+    parse_legacy_answer_choice_frame,
+)
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
@@ -73,17 +81,25 @@ from bayesprobe.question_runner import (
 )
 from bayesprobe.recorded_gateway import RecordedModelGateway
 from bayesprobe.schemas import (
+    AnswerChoice,
+    AnswerContract,
     AnswerProjection,
     BeliefState,
     BeliefStateProjection,
     CycleSignalShape,
     ExternalSignal,
+    FramedHypothesis,
+    FramingMethod,
     Hypothesis,
+    HypothesisFrame,
+    HypothesisRelation,
     ProbeDesign,
     ProbeSet,
     RunRegime,
     RunStatus,
     SignalKind,
+    TaskFrame,
+    TaskKind,
 )
 from bayesprobe.synchronized_runner import (
     SynchronizedRoundInput,
@@ -95,6 +111,8 @@ from bayesprobe.synchronized_runner import (
 )
 
 __all__ = [
+    "AnswerChoice",
+    "AnswerContract",
     "AnswerProjection",
     "ArmCaseResult",
     "AutonomousQuestionRunConfig",
@@ -124,8 +142,13 @@ __all__ = [
     "ExperimentArtifactBundle",
     "ExperimentRunConfig",
     "ExperimentRunResult",
+    "ExplicitTaskFramer",
     "ExternalSignal",
+    "FramedHypothesis",
+    "FramingMethod",
     "Hypothesis",
+    "HypothesisFrame",
+    "HypothesisRelation",
     "HypothesisSeed",
     "InitializationResult",
     "InitializeRunInput",
@@ -146,12 +169,18 @@ __all__ = [
     "ProbeExecutor",
     "ProbeSet",
     "ProbeToolGateway",
+    "ParsedAnswerChoiceFrame",
     "RunRegime",
     "RunStatus",
     "CycleSignalShape",
     "SignalKind",
     "ScriptedModelGateway",
     "StructuredModelRequest",
+    "TaskFramer",
+    "TaskFramingError",
+    "TaskFramingInput",
+    "TaskFrame",
+    "TaskKind",
     "SynchronizedRoundInput",
     "SynchronizedRoundResult",
     "SynchronizedRoundRunner",
@@ -164,6 +193,7 @@ __all__ = [
     "load_benchmark_dataset",
     "load_experiment_config",
     "parse_openai_structured_response",
+    "parse_legacy_answer_choice_frame",
     "run_benchmark_experiment",
     "write_benchmark_report",
 ]

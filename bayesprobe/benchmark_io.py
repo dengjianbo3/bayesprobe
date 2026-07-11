@@ -14,6 +14,7 @@ from bayesprobe.benchmark import (
     BenchmarkSignalShape,
     BenchmarkSuiteResult,
 )
+from bayesprobe.task_framing import HypothesisSeed
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,10 @@ def _sample_from_mapping(data: Mapping[str, Any]) -> BenchmarkSample:
             _signal_from_payload(signal_payload)
             for signal_payload in data.get("passive_signals", [])
         ]
+        hypothesis_seeds = [
+            _hypothesis_seed_from_payload(seed_payload)
+            for seed_payload in data["hypothesis_seeds"]
+        ]
         return BenchmarkSample(
             sample_id=data["sample_id"],
             question_or_claim=data["question_or_claim"],
@@ -135,9 +140,26 @@ def _sample_from_mapping(data: Mapping[str, Any]) -> BenchmarkSample:
             passive_signals=passive_signals,
             gold_update_directions=dict(data.get("gold_update_directions", {})),
             initial_context=data.get("initial_context", ""),
+            hypothesis_seeds=hypothesis_seeds,
         )
     except KeyError as error:
         raise ValueError(f"missing required benchmark sample field: {error.args[0]}") from error
+
+
+def _hypothesis_seed_from_payload(payload: Any) -> HypothesisSeed:
+    if not isinstance(payload, Mapping):
+        raise ValueError("benchmark hypothesis seed must be an object")
+    try:
+        return HypothesisSeed(
+            id=payload.get("id"),
+            statement=payload["statement"],
+            scope=payload.get("scope"),
+            prior=payload.get("prior"),
+            falsifiers=list(payload.get("falsifiers", [])),
+            predictions=list(payload.get("predictions", [])),
+        )
+    except KeyError as error:
+        raise ValueError("benchmark hypothesis seed requires statement") from error
 
 
 def _signal_from_payload(payload: Any) -> BenchmarkSignal:

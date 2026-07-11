@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore
-from bayesprobe.initialization import InitializeRunInput
+from bayesprobe.initialization import HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.probe_executor import ProbeExecutionResult
 from bayesprobe.probe_planner import ProbePlanningResult
@@ -55,6 +55,13 @@ class RecordingExecutor:
         )
 
 
+def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
+    return [
+        HypothesisSeed(id="H1", statement="The fixture's H1 condition holds.", prior=0.5, scope="Deterministic test fixture.", falsifiers=["The fixture emits a reliable H1 refutation."], predictions=["The fixture emits a reliable H1 support cue."]),
+        HypothesisSeed(id="H2", statement="The fixture's H2 condition holds instead.", prior=0.5, scope="Deterministic test fixture.", falsifiers=["The fixture emits a reliable H2 refutation."], predictions=["The fixture emits a reliable H2 support cue."]),
+    ]
+
+
 def test_question_runner_executes_one_end_to_end_cycle():
     runner = AutonomousQuestionRunner(
         core=BayesProbeCore(),
@@ -65,6 +72,7 @@ def test_question_runner_executes_one_end_to_end_cycle():
         InitializeRunInput(
             run_id="run_question_1",
             problem="Does the active BayesProbe path work end to end?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -97,6 +105,7 @@ def test_question_runner_integrates_initial_context_as_passive_signal():
         InitializeRunInput(
             run_id="run_question_context",
             problem="Does supplied context enter the evidence path?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
             context="REFUTES: A human reviewer found a counterexample.",
         )
     )
@@ -133,6 +142,7 @@ def test_question_runner_projection_replaces_stale_initial_uncertainty():
         InitializeRunInput(
             run_id="run_question_uncertainty",
             problem="Does the projection describe the current posterior uncertainty?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -152,6 +162,7 @@ def test_question_runner_runs_multiple_cycles_with_candidate_pool_from_projectio
         InitializeRunInput(
             run_id="run_question_multi",
             problem="Can later cycles use projection-derived probe candidates?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -185,6 +196,7 @@ def test_question_runner_stops_on_confidence_threshold():
         InitializeRunInput(
             run_id="run_question_confident",
             problem="Does one supportive deterministic probe cross confidence?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -208,6 +220,7 @@ def test_question_runner_stops_on_no_probes_before_empty_cycle():
         InitializeRunInput(
             run_id="run_question_no_probes",
             problem="What happens when no probes are available?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -233,6 +246,7 @@ def test_question_runner_integrates_context_before_stopping_on_no_probes():
         InitializeRunInput(
             run_id="run_question_passive_context",
             problem="Can context form a passive-only autonomous cycle?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
             context="SUPPORTS: A human supplied relevant information.",
         )
     )
@@ -274,6 +288,7 @@ def test_question_runner_writes_end_to_end_ledger_records(tmp_path: Path):
         InitializeRunInput(
             run_id="run_question_ledger",
             problem="Does the orchestrator write a coherent ledger?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -300,6 +315,7 @@ def test_question_runner_does_not_duplicate_core_integration(tmp_path: Path):
         InitializeRunInput(
             run_id="run_question_single_core",
             problem="Does the orchestrator integrate exactly once per cycle?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -324,6 +340,7 @@ def test_question_runner_emits_truthful_progress_for_integrated_cycle():
         InitializeRunInput(
             run_id="run_question_progress",
             problem="Does progress follow the BayesProbe lifecycle?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -362,6 +379,7 @@ def test_question_runner_progress_ends_once_when_no_probe_cycle_is_created():
         InitializeRunInput(
             run_id="run_question_progress_no_probes",
             problem="What happens when progress reaches an empty probe set?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -391,6 +409,7 @@ def test_question_runner_repeats_cycle_progress_for_each_integrated_cycle():
         InitializeRunInput(
             run_id="run_question_progress_multi",
             problem="Can progress report both autonomous cycles?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -417,6 +436,7 @@ def test_question_runner_ignores_progress_observer_exceptions():
         InitializeRunInput(
             run_id="run_question_progress_observer_failure",
             problem="Does observer failure leave the autonomous run intact?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
 
@@ -474,6 +494,7 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
         InitializeRunInput(
             run_id="run_question_hostile_progress_observer",
             problem="Can observer mutation alter the autonomous lifecycle?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
             context="SUPPORTS: Keep a passive signal in the first cycle.",
         )
     )
