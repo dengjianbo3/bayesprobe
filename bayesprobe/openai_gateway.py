@@ -77,6 +77,87 @@ PROBE_SIGNAL_JSON_SCHEMA: dict[str, Any] = {
     },
 }
 
+TASK_ADMISSION_DECISION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "status",
+        "epistemic_basis",
+        "proposed_task_kind",
+        "answer_contract_outline",
+        "clarification_questions",
+        "reason",
+    ],
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["admitted", "needs_reframing", "out_of_scope"],
+        },
+        "epistemic_basis": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "uniqueItems": True,
+        },
+        "proposed_task_kind": {
+            "type": ["string", "null"],
+            "enum": [
+                "multiple_choice",
+                "exact_answer",
+                "claim_verification",
+                "explanation",
+                "diagnosis",
+                "design",
+                "decision",
+                None,
+            ],
+        },
+        "answer_contract_outline": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "objective",
+                        "answer_value_type",
+                        "decision_form",
+                        "permits_synthesis",
+                        "required_sections",
+                    ],
+                    "properties": {
+                        "objective": {"type": "string", "minLength": 1},
+                        "answer_value_type": {
+                            "type": "string",
+                            "enum": [
+                                "choice_label",
+                                "integer",
+                                "number",
+                                "short_text",
+                                "structured_text",
+                            ],
+                        },
+                        "decision_form": {"type": "string", "minLength": 1},
+                        "permits_synthesis": {"type": "boolean"},
+                        "required_sections": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "minItems": 1,
+                            "uniqueItems": True,
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        },
+        "clarification_questions": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": True,
+        },
+        "reason": {"type": "string", "minLength": 1},
+    },
+}
+
 MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -126,8 +207,10 @@ OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": [
         "task_kind",
+        "answer_relationship",
         "answer_contract",
-        "hypothesis_relation",
+        "competition",
+        "coverage",
         "hypotheses",
         "coverage_statement",
         "coverage_limitation",
@@ -137,23 +220,41 @@ OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": [
                 "claim_verification",
+                "exact_answer",
                 "explanation",
                 "diagnosis",
                 "design",
                 "decision",
             ],
         },
+        "answer_relationship": {
+            "type": "string",
+            "enum": ["selection", "synthesis"],
+        },
         "answer_contract": {
             "type": "object",
             "additionalProperties": False,
             "required": [
                 "objective",
+                "answer_value_type",
+                "answer_format",
                 "required_sections",
                 "decision_form",
                 "permits_synthesis",
             ],
             "properties": {
                 "objective": {"type": "string", "minLength": 1},
+                "answer_value_type": {
+                    "type": "string",
+                    "enum": [
+                        "choice_label",
+                        "integer",
+                        "number",
+                        "short_text",
+                        "structured_text",
+                    ],
+                },
+                "answer_format": {"type": "string", "minLength": 1},
                 "required_sections": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
@@ -164,13 +265,17 @@ OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA: dict[str, Any] = {
                 "permits_synthesis": {"type": "boolean"},
             },
         },
-        "hypothesis_relation": {
+        "competition": {
             "type": "string",
-            "enum": ["exclusive_exhaustive", "independent"],
+            "enum": ["exclusive", "independent"],
+        },
+        "coverage": {
+            "type": "string",
+            "enum": ["exhaustive", "open"],
         },
         "hypotheses": {
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "maxItems": 6,
             "items": {
                 "type": "object",
@@ -181,6 +286,7 @@ OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA: dict[str, Any] = {
                     "scope",
                     "falsifiers",
                     "predictions",
+                    "answer_value",
                 ],
                 "properties": {
                     "statement": {"type": "string", "minLength": 1},
@@ -195,6 +301,9 @@ OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA: dict[str, Any] = {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1},
                         "minItems": 1,
+                    },
+                    "answer_value": {
+                        "type": ["string", "integer", "number", "null"]
                     },
                 },
             },
@@ -684,6 +793,20 @@ def parse_openai_chat_completions_response(response: Any) -> dict[str, Any]:
 
 
 def _instruction_for_task(task: str) -> str:
+    if task == "assess_task_admission":
+        return (
+            "Perform task admission by assessing whether the supplied task can enter "
+            "BayesProbe epistemic framing. "
+            "Use only the question, Task Context, requested output shape, and sanitized "
+            "capability descriptors. Return admitted, needs_reframing, or out_of_scope "
+            "with the exact TaskAdmissionDecision fields."
+        )
+    if task == "repair_task_admission":
+        return (
+            "Repair the malformed BayesProbe task admission decision. Return exactly "
+            "one valid TaskAdmissionDecision object without copying credentials or "
+            "inventing unavailable capabilities."
+        )
     if task == "execute_probe":
         return (
             "You are the active probe executor inside BayesProbe. Perform the supplied "
@@ -734,7 +857,9 @@ def _instruction_for_task(task: str) -> str:
     if task == "frame_open_question":
         return (
             "Frame the supplied open question for BayesProbe before belief initialization. "
-            "Return 2-6 distinct, falsifiable hypotheses and an AnswerContract. "
+            "Return 1-6 answer candidates for exact-answer tasks or 2-6 distinct, "
+            "falsifiable hypotheses for other tasks, plus a typed AnswerContract, "
+            "answer relationship, competition, and coverage. "
             "Do not assign ids, priors, posteriors, or claim external evidence."
         )
     if task == "repair_task_frame":
@@ -746,6 +871,8 @@ def _instruction_for_task(task: str) -> str:
 
 
 def _structured_output_for_task(task: str) -> tuple[str, dict[str, Any]]:
+    if task in {"assess_task_admission", "repair_task_admission"}:
+        return "TaskAdmissionDecision", TASK_ADMISSION_DECISION_JSON_SCHEMA
     if task == "execute_probe":
         return "ProbeSignal", PROBE_SIGNAL_JSON_SCHEMA
     if task in {"judge_evidence", "repair_evidence_judgment"}:
@@ -763,6 +890,13 @@ def _structured_output_for_task(task: str) -> tuple[str, dict[str, Any]]:
 
 def _chat_instruction_for_task(task: str) -> str:
     base_instruction = _instruction_for_task(task)
+    if task in {"assess_task_admission", "repair_task_admission"}:
+        return (
+            f"{base_instruction} Return only one JSON object with exactly these "
+            "top-level keys: status, epistemic_basis, proposed_task_kind, "
+            "answer_contract_outline, clarification_questions, reason. Do not include "
+            "markdown."
+        )
     if task == "execute_probe":
         return (
             f"{base_instruction} Return only one JSON object with exactly one "
@@ -802,13 +936,27 @@ def _chat_instruction_for_task(task: str) -> str:
     if task in {"frame_open_question", "repair_task_frame"}:
         return (
             f"{base_instruction} Return only one JSON object with exactly these "
-            "top-level keys: task_kind, answer_contract, hypothesis_relation, "
-            "hypotheses, coverage_statement, coverage_limitation. Do not include markdown."
+            "top-level keys: task_kind, answer_relationship, answer_contract, "
+            "competition, coverage, hypotheses, coverage_statement, "
+            "coverage_limitation. Do not include markdown."
         )
     raise ValueError(f"unsupported openai model task: {task}")
 
 
 def _required_output_for_task(task: str) -> dict[str, Any]:
+    if task in {"assess_task_admission", "repair_task_admission"}:
+        return {
+            "type": "TaskAdmissionDecision",
+            "required_keys": [
+                "status",
+                "epistemic_basis",
+                "proposed_task_kind",
+                "answer_contract_outline",
+                "clarification_questions",
+                "reason",
+            ],
+            "json_schema": TASK_ADMISSION_DECISION_JSON_SCHEMA,
+        }
     if task == "execute_probe":
         return {
             "type": "ProbeSignal",
@@ -877,8 +1025,10 @@ def _required_output_for_task(task: str) -> dict[str, Any]:
             "type": "OpenQuestionTaskFrame",
             "required_keys": [
                 "task_kind",
+                "answer_relationship",
                 "answer_contract",
-                "hypothesis_relation",
+                "competition",
+                "coverage",
                 "hypotheses",
                 "coverage_statement",
                 "coverage_limitation",
@@ -1129,6 +1279,7 @@ __all__ = [
     "PYTHON_CODE_REPAIR_JSON_SCHEMA",
     "PYTHON_PROBE_PLAN_JSON_SCHEMA",
     "PROBE_SIGNAL_JSON_SCHEMA",
+    "TASK_ADMISSION_DECISION_JSON_SCHEMA",
     "OpenAIChatCompletionsModelGateway",
     "OpenAIModelGatewayConfig",
     "OpenAIResponsesModelGateway",

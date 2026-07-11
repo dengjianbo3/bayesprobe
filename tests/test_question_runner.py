@@ -5,7 +5,7 @@ import pytest
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.model_gateway import StructuredModelRequest
+from bayesprobe.model_gateway import ScriptedModelGateway, StructuredModelRequest
 from bayesprobe.recorded_gateway import RecordedModelGateway
 from bayesprobe.probe_executor import (
     ModelBackedProbeToolGateway,
@@ -20,6 +20,7 @@ from bayesprobe.question_runner import (
     AutonomousQuestionStopReason,
 )
 from bayesprobe.task_framing import ModelTaskFramer, TaskFramingError
+from bayesprobe.task_admission import ModelTaskAdmitter
 from bayesprobe.schemas import (
     CycleSignalShape,
     HypothesisRelation,
@@ -73,13 +74,17 @@ def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
 def valid_open_frame_payload() -> dict[str, object]:
     return {
         "task_kind": "claim_verification",
+        "answer_relationship": "synthesis",
         "answer_contract": {
             "objective": "Design a discriminating validation protocol.",
+            "answer_value_type": "structured_text",
+            "answer_format": "structured validation protocol",
             "required_sections": ["hypotheses", "controls", "decision_rule"],
             "decision_form": "experimental_protocol",
             "permits_synthesis": True,
         },
-        "hypothesis_relation": "independent",
+        "competition": "independent",
+        "coverage": "open",
         "hypotheses": [
             {
                 "statement": "Scale has an independent effect under matched conditions.",
@@ -87,6 +92,7 @@ def valid_open_frame_payload() -> dict[str, object]:
                 "scope": "Matched task and resource conditions.",
                 "falsifiers": ["The controlled effect is negligible."],
                 "predictions": ["Matched performance rises with size."],
+                "answer_value": None,
             },
             {
                 "statement": "The apparent effect is materially confounded.",
@@ -94,6 +100,7 @@ def valid_open_frame_payload() -> dict[str, object]:
                 "scope": "Unmatched comparisons.",
                 "falsifiers": ["The effect survives matched controls."],
                 "predictions": ["The effect shrinks after matching."],
+                "answer_value": None,
             },
         ],
         "coverage_statement": "Covers the effect and its primary confounder.",
@@ -109,6 +116,21 @@ class RecordingOpenQuestionGateway:
 
     def complete_structured(self, request: StructuredModelRequest) -> dict[str, object]:
         self.requests.append(request)
+        if request.task == "assess_task_admission":
+            return {
+                "status": "admitted",
+                "epistemic_basis": ["The claim can be tested with discriminating hypotheses."],
+                "proposed_task_kind": "claim_verification",
+                "answer_contract_outline": {
+                    "objective": "Return a discriminating validation protocol.",
+                    "answer_value_type": "structured_text",
+                    "decision_form": "experimental_protocol",
+                    "permits_synthesis": True,
+                    "required_sections": ["answer", "basis", "uncertainty"],
+                },
+                "clarification_questions": [],
+                "reason": "The task is verifiable.",
+            }
         if request.task == "frame_open_question":
             return valid_open_frame_payload()
         if request.task == "execute_probe":
@@ -126,6 +148,41 @@ class RecordingOpenQuestionGateway:
         raise AssertionError(f"unexpected task: {request.task}")
 
 
+@pytest.mark.parametrize("status", ["needs_reframing", "out_of_scope"])
+def test_non_admitted_result_creates_no_belief_state(tmp_path: Path, status: str):
+    response = {
+        "status": status,
+        "epistemic_basis": ["The current request cannot enter epistemic framing."],
+        "proposed_task_kind": None,
+        "answer_contract_outline": None,
+        "clarification_questions": (
+            ["What concrete answer should BayesProbe evaluate?"]
+            if status == "needs_reframing"
+            else []
+        ),
+        "reason": "Admission stopped before framing.",
+    }
+    gateway = ScriptedModelGateway({"assess_task_admission": response})
+    ledger = JsonlLedgerStore(tmp_path / f"{status}.jsonl")
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(ledger=ledger),
+        task_admitter=ModelTaskAdmitter(gateway),
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id=f"run_{status}",
+            problem="Please handle this underspecified request.",
+        )
+    )
+
+    assert result.result_type == status
+    assert not hasattr(result, "initial_belief_state")
+    assert len(ledger.read_all("task_admission")) == 1
+    for record_type in ("task_frame", "run", "cycle", "belief_state"):
+        assert ledger.read_all(record_type) == []
+
+
 def test_open_question_framing_precedes_belief_initialization():
     gateway = RecordingOpenQuestionGateway()
     observed = []
@@ -139,6 +196,7 @@ def test_open_question_framing_precedes_belief_initialization():
         executor=ProbeExecutor(ModelBackedProbeToolGateway(gateway)),
         config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
         progress_observer=observe,
+        task_admitter=ModelTaskAdmitter(gateway),
     )
 
     result = runner.run_question(
@@ -160,9 +218,10 @@ def test_open_question_framing_precedes_belief_initialization():
     assert events[1].belief_state is None
     assert events[2].belief_state is None
     assert events[2].task_frame is not None
-    assert observed[1][1] == []
-    assert observed[2][1] == ["frame_open_question"]
-    assert gateway.requests[0].task == "frame_open_question"
+    assert observed[1][1] == ["assess_task_admission"]
+    assert observed[2][1] == ["assess_task_admission", "frame_open_question"]
+    assert gateway.requests[0].task == "assess_task_admission"
+    assert gateway.requests[1].task == "frame_open_question"
     assert gateway.requests[0].input["task_context"] == (
         "Design an experiment for a research audience."
     )
@@ -181,13 +240,14 @@ def test_open_question_framing_precedes_belief_initialization():
 
 def test_recorded_open_question_frames_before_running_cycle():
     gateway = RecordedModelGateway.from_json(
-        Path("tests/fixtures/open_questions/model_scale_validation_v0.1.json")
+        Path("tests/fixtures/open_questions/model_scale_validation_v0.2.json")
     )
     runner = AutonomousQuestionRunner(
         core=BayesProbeCore(model_gateway=gateway),
         initializer=BayesProbeInitializer(task_framer=ModelTaskFramer(gateway)),
         executor=ProbeExecutor(ModelBackedProbeToolGateway(gateway)),
         config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+        task_admitter=ModelTaskAdmitter(gateway),
     )
 
     result = runner.run_question(
@@ -201,6 +261,7 @@ def test_recorded_open_question_frames_before_running_cycle():
     )
 
     assert [request.task for request in gateway.requests] == [
+        "assess_task_admission",
         "frame_open_question",
         "execute_probe",
         "judge_evidence",

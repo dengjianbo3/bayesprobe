@@ -8,6 +8,9 @@ from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.schemas import (
     AnswerChoice,
     BeliefState,
+    EvidenceMemorySnapshot,
+    FrameAdequacyStatus,
+    FrameState,
     FramedHypothesis,
     Hypothesis,
     ProbeCandidate,
@@ -16,7 +19,10 @@ from bayesprobe.schemas import (
     RunRegime,
     RunStatus,
     TaskFrame,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
     TaskKind,
+    HypothesisCompetition,
     HypothesisRelation,
     is_secret_like_value,
 )
@@ -26,11 +32,18 @@ from bayesprobe.task_framing import (
     TaskFramer,
     TaskFramingError,
     TaskFramingInput,
+    parse_legacy_answer_choice_frame,
+)
+from bayesprobe.task_admission import (
+    ExplicitTaskAdmitter,
+    TaskAdmitter,
+    TaskAdmissionError,
+    TaskAdmissionInput,
 )
 
 
 INITIAL_CYCLE_ID = "cycle_0"
-INITIALIZATION_METHOD = "task_frame_v0.1"
+INITIALIZATION_METHOD = "task_frame_v0.2"
 
 
 @dataclass(frozen=True)
@@ -60,18 +73,32 @@ class BayesProbeInitializer:
         self,
         ledger: JsonlLedgerStore | None = None,
         task_framer: TaskFramer | None = None,
+        task_admitter: TaskAdmitter | None = None,
     ) -> None:
         self._ledger = ledger
         self._task_framer = task_framer or ExplicitTaskFramer()
+        self._task_admitter = task_admitter or ExplicitTaskAdmitter()
 
-    def initialize(self, input: InitializeRunInput) -> InitializationResult:
+    def initialize(
+        self,
+        input: InitializeRunInput,
+        admission_decision: TaskAdmissionDecision | None = None,
+    ) -> InitializationResult:
         validate_initialize_run_input_security(input)
         run_id = _clean_required(input.run_id, "run_id")
         problem = _clean_required(input.problem, "problem")
+        decision = admission_decision or self._assess_admission(
+            input,
+            run_id=run_id,
+            problem=problem,
+        )
+        if decision.status != TaskAdmissionStatus.ADMITTED:
+            raise TaskFramingError("initializer requires an admitted task decision")
         task_frame = self._task_framer.frame(
             TaskFramingInput(
                 run_id=run_id,
                 question=problem,
+                admission_decision=decision,
                 task_context=input.task_context,
                 answer_choices=list(input.answer_choices),
                 hypothesis_seeds=list(input.hypothesis_seeds),
@@ -99,7 +126,8 @@ class BayesProbeInitializer:
                 else "explicit_task_frame"
             ),
             "task_kind": task_frame.task_kind.value,
-            "hypothesis_relation": task_frame.hypothesis_frame.relation.value,
+            "hypothesis_competition": task_frame.hypothesis_frame.competition.value,
+            "hypothesis_coverage": task_frame.hypothesis_frame.coverage.value,
             "framing_method": task_frame.framing_method.value,
         }
         run = RunRecord(
@@ -110,17 +138,32 @@ class BayesProbeInitializer:
             current_cycle_id=INITIAL_CYCLE_ID,
             metadata=metadata,
         )
+        compatibility_relation = _compatibility_relation(task_frame)
         belief_summary, uncertainty_summary = summarize_hypotheses(
             hypotheses,
-            relation=task_frame.hypothesis_frame.relation,
+            relation=compatibility_relation,
         )
+        frame_state = FrameState(
+            frame_id=task_frame.hypothesis_frame.frame_id,
+            competition=task_frame.hypothesis_frame.competition,
+            coverage=task_frame.hypothesis_frame.coverage,
+            active_hypothesis_ids=[item.id for item in hypotheses],
+            unresolved_alternative_mass=(
+                task_frame.hypothesis_frame.unresolved_alternative_mass
+            ),
+            adequacy_status=FrameAdequacyStatus.PROVISIONAL,
+        )
+        evidence_memory = EvidenceMemorySnapshot()
         belief_state = BeliefState(
+            schema_version="v0.2",
             belief_state_id=f"{run_id}_bs_0",
             run_id=run_id,
             cycle_id=INITIAL_CYCLE_ID,
             cycle_index=0,
             hypotheses=hypotheses,
             task_frame=task_frame,
+            frame_state=frame_state,
+            evidence_memory=evidence_memory,
             posterior_summary={
                 **belief_summary,
                 "initialization_method": INITIALIZATION_METHOD,
@@ -138,6 +181,7 @@ class BayesProbeInitializer:
             is_multiple_choice=task_frame.task_kind == TaskKind.MULTIPLE_CHOICE,
         )
         self._append_ledger(
+            admission_decision=decision,
             task_frame=task_frame,
             run=run,
             belief_state=belief_state,
@@ -150,9 +194,41 @@ class BayesProbeInitializer:
             probe_candidates=probe_candidates,
         )
 
+    def _assess_admission(
+        self,
+        input: InitializeRunInput,
+        *,
+        run_id: str,
+        problem: str,
+    ) -> TaskAdmissionDecision:
+        choices = list(input.answer_choices)
+        if not choices:
+            parsed = parse_legacy_answer_choice_frame(problem)
+            if parsed is not None:
+                choices = list(parsed.choices)
+        try:
+            return self._task_admitter.assess(
+                TaskAdmissionInput(
+                    attempt_id=f"{run_id}_admission",
+                    question=problem,
+                    task_context=input.task_context,
+                    answer_choices=choices,
+                    hypothesis_seeds=list(input.hypothesis_seeds),
+                    requested_output_shape=_requested_output_shape(input.metadata),
+                    model_metadata={
+                        "task_kind": input.task_kind.value
+                        if input.task_kind is not None
+                        else None
+                    },
+                )
+            )
+        except TaskAdmissionError as error:
+            raise TaskFramingError(str(error)) from None
+
     def _append_ledger(
         self,
         *,
+        admission_decision: TaskAdmissionDecision,
         task_frame: TaskFrame,
         run: RunRecord,
         belief_state: BeliefState,
@@ -160,6 +236,7 @@ class BayesProbeInitializer:
     ) -> None:
         if self._ledger is None:
             return
+        self._ledger.append("task_admission", admission_decision)
         self._ledger.append("task_frame", task_frame)
         self._ledger.append("run", run)
         self._ledger.append("belief_state", belief_state)
@@ -178,6 +255,17 @@ def validate_compatibility_context_security(context: str) -> None:
 
 def validate_initialize_run_input_security(input: InitializeRunInput) -> None:
     validate_compatibility_context_security(input.context)
+
+
+def _requested_output_shape(metadata: dict[str, Any]) -> str | None:
+    value = metadata.get("requested_output_shape")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _compatibility_relation(task_frame: TaskFrame) -> HypothesisRelation:
+    if task_frame.hypothesis_frame.competition == HypothesisCompetition.INDEPENDENT:
+        return HypothesisRelation.INDEPENDENT
+    return HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
 
 
 def _clean_required(value: str, field_name: str) -> str:

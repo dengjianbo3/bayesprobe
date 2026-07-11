@@ -4,6 +4,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import (
@@ -11,6 +12,12 @@ from bayesprobe.initialization import (
     InitializeRunInput,
     validate_initialize_run_input_security,
 )
+from bayesprobe.task_admission import (
+    ExplicitTaskAdmitter,
+    TaskAdmitter,
+    TaskAdmissionInput,
+)
+from bayesprobe.task_framing import parse_legacy_answer_choice_frame
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
     ProbeExecutionContext,
@@ -28,7 +35,6 @@ from bayesprobe.schemas import (
     EvidenceEvent,
     ExternalSignal,
     Hypothesis,
-    HypothesisRelation,
     HypothesisEvolution,
     ProbeCandidate,
     ProbeSet,
@@ -36,6 +42,8 @@ from bayesprobe.schemas import (
     RunStatus,
     SignalKind,
     TaskFrame,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
     utc_now,
 )
 
@@ -106,6 +114,18 @@ class AutonomousQuestionRunResult:
 
 
 @dataclass(frozen=True)
+class NeedsReframingResult:
+    admission: TaskAdmissionDecision
+    result_type: Literal["needs_reframing"] = "needs_reframing"
+
+
+@dataclass(frozen=True)
+class OutOfScopeResult:
+    admission: TaskAdmissionDecision
+    result_type: Literal["out_of_scope"] = "out_of_scope"
+
+
+@dataclass(frozen=True)
 class AutonomousQuestionProgress:
     kind: AutonomousQuestionProgressKind
     run_id: str
@@ -133,6 +153,7 @@ class AutonomousQuestionRunner:
         executor: ProbeExecutor | None = None,
         config: AutonomousQuestionRunConfig | None = None,
         progress_observer: AutonomousQuestionProgressObserver | None = None,
+        task_admitter: TaskAdmitter | None = None,
     ) -> None:
         self.core = core
         self.initializer = initializer or BayesProbeInitializer(ledger=core.ledger)
@@ -143,9 +164,20 @@ class AutonomousQuestionRunner:
         )
         self.config = config or AutonomousQuestionRunConfig()
         self.progress_observer = progress_observer
+        self.task_admitter = task_admitter or ExplicitTaskAdmitter()
 
-    def run_question(self, input: InitializeRunInput) -> AutonomousQuestionRunResult:
+    def run_question(
+        self,
+        input: InitializeRunInput,
+    ) -> AutonomousQuestionRunResult | NeedsReframingResult | OutOfScopeResult:
         validate_initialize_run_input_security(input)
+        admission = self.task_admitter.assess(_task_admission_input(input))
+        if admission.status != TaskAdmissionStatus.ADMITTED:
+            if self.core.ledger is not None:
+                self.core.ledger.append("task_admission", admission)
+            if admission.status == TaskAdmissionStatus.NEEDS_REFRAMING:
+                return NeedsReframingResult(admission=admission)
+            return OutOfScopeResult(admission=admission)
         self._emit_progress(
             AutonomousQuestionProgressKind.RUN_STARTED,
             run_id=input.run_id,
@@ -154,7 +186,10 @@ class AutonomousQuestionRunner:
             AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
             run_id=input.run_id,
         )
-        initialization = self.initializer.initialize(input)
+        initialization = self.initializer.initialize(
+            input,
+            admission_decision=admission,
+        )
         run = initialization.run
         task_frame = initialization.task_frame
         initial_belief_state = initialization.belief_state
@@ -397,8 +432,8 @@ class AutonomousQuestionRunner:
         if threshold is None:
             return False
         if (
-            belief_state.task_frame.hypothesis_frame.relation
-            == HypothesisRelation.INDEPENDENT
+            belief_state.task_frame.hypothesis_frame.competition.value
+            == "independent"
         ):
             return False
         return _top_hypothesis(belief_state).posterior >= threshold
@@ -494,6 +529,30 @@ class AutonomousQuestionRunner:
 
 def _top_hypothesis(belief_state: BeliefState) -> Hypothesis:
     return max(belief_state.hypotheses, key=lambda hypothesis: hypothesis.posterior)
+
+
+def _task_admission_input(input: InitializeRunInput) -> TaskAdmissionInput:
+    choices = list(input.answer_choices)
+    if not choices:
+        parsed = parse_legacy_answer_choice_frame(input.problem)
+        if parsed is not None:
+            choices = list(parsed.choices)
+    output_shape = input.metadata.get("requested_output_shape")
+    return TaskAdmissionInput(
+        attempt_id=f"{input.run_id}_admission",
+        question=input.problem,
+        task_context=input.task_context,
+        answer_choices=choices,
+        hypothesis_seeds=list(input.hypothesis_seeds),
+        requested_output_shape=(
+            output_shape
+            if isinstance(output_shape, str) and output_shape.strip()
+            else None
+        ),
+        model_metadata={
+            "task_kind": input.task_kind.value if input.task_kind is not None else None
+        },
+    )
 
 
 def _initial_context_signals(

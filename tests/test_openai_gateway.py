@@ -15,6 +15,7 @@ from bayesprobe.openai_gateway import (
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
     OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA,
     PROBE_SIGNAL_JSON_SCHEMA,
+    TASK_ADMISSION_DECISION_JSON_SCHEMA,
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
@@ -28,8 +29,10 @@ from bayesprobe.provider_telemetry import ProviderInvocationRecord
 
 OPEN_QUESTION_TASK_FRAME_REQUIRED_KEYS = [
     "task_kind",
+    "answer_relationship",
     "answer_contract",
-    "hypothesis_relation",
+    "competition",
+    "coverage",
     "hypotheses",
     "coverage_statement",
     "coverage_limitation",
@@ -109,13 +112,14 @@ def make_open_question_frame_request() -> StructuredModelRequest:
             "question": "How should this claim be tested?",
             "task_context": "Use a frozen task distribution.",
             "supported_task_kinds": ["claim_verification", "design"],
-            "supported_relations": ["exclusive_exhaustive", "independent"],
-            "hypothesis_count": {"minimum": 2, "maximum": 6},
+            "supported_competition": ["exclusive", "independent"],
+            "supported_coverage": ["exhaustive", "open"],
+            "hypothesis_count": {"minimum": 1, "maximum": 6},
         },
         prompt_id="open_question_task_framing",
-        prompt_version="v0.1",
+        prompt_version="v0.2",
         schema_name="OpenQuestionTaskFrame",
-        schema_version="v0.1",
+        schema_version="v0.2",
     )
 
 
@@ -129,11 +133,73 @@ def make_repair_task_frame_request() -> StructuredModelRequest:
             "attempt_index": 1,
         },
         prompt_id="open_question_task_framing_repair",
-        prompt_version="v0.1",
+        prompt_version="v0.2",
         schema_name="OpenQuestionTaskFrame",
-        schema_version="v0.1",
+        schema_version="v0.2",
         metadata={"repair_attempt_index": 1},
     )
+
+
+def make_task_admission_request(
+    *, task: str = "assess_task_admission"
+) -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task=task,
+        input={
+            "question": "What integer satisfies the constraints?",
+            "task_context": "Use the supplied theorem.",
+            "requested_output_shape": "integer with basis",
+            "available_capabilities": [],
+        },
+        prompt_id="task_admission",
+        prompt_version="v0.2",
+        schema_name="TaskAdmissionDecision",
+        schema_version="v0.2",
+    )
+
+
+@pytest.mark.parametrize(
+    "model_request",
+    [
+        make_task_admission_request(),
+        make_task_admission_request(task="repair_task_admission"),
+    ],
+)
+def test_responses_task_admission_uses_strict_decision_schema(model_request):
+    payload = build_openai_request_payload(model_request, model="test-model")
+
+    assert payload["text"]["format"] == {
+        "type": "json_schema",
+        "name": "TaskAdmissionDecision",
+        "strict": True,
+        "schema": TASK_ADMISSION_DECISION_JSON_SCHEMA,
+    }
+    assert "task admission" in payload["input"][0]["content"].lower()
+
+
+@pytest.mark.parametrize(
+    "model_request",
+    [
+        make_task_admission_request(),
+        make_task_admission_request(task="repair_task_admission"),
+    ],
+)
+def test_chat_task_admission_includes_exact_required_output(model_request):
+    payload = build_openai_chat_completions_payload(model_request, model="test-model")
+    required_output = json.loads(payload["messages"][1]["content"])[
+        "required_output"
+    ]
+
+    assert required_output["type"] == "TaskAdmissionDecision"
+    assert required_output["json_schema"] == TASK_ADMISSION_DECISION_JSON_SCHEMA
+    assert required_output["required_keys"] == [
+        "status",
+        "epistemic_basis",
+        "proposed_task_kind",
+        "answer_contract_outline",
+        "clarification_questions",
+        "reason",
+    ]
 
 
 def assert_open_question_task_frame_schema(schema: dict) -> None:
@@ -163,8 +229,8 @@ def test_build_openai_payload_for_open_question_frame():
     assert payload["text"]["format"]["name"] == "OpenQuestionTaskFrame"
     schema = payload["text"]["format"]["schema"]
     assert_open_question_task_frame_schema(schema)
-    assert schema["properties"]["hypothesis_relation"]["enum"] == [
-        "exclusive_exhaustive",
+    assert schema["properties"]["competition"]["enum"] == [
+        "exclusive",
         "independent",
     ]
     assert json.loads(payload["input"][1]["content"])["task"] == "frame_open_question"

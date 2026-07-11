@@ -1,0 +1,93 @@
+{
+  "fixture_name": "model_scale_validation_v0.2",
+  "metadata": {
+    "language": "zh-CN",
+    "purpose": "task-admission and native-v0.2 framing regression"
+  },
+  "responses": [
+    {
+      "match": {"task": "assess_task_admission"},
+      "response": {
+        "status": "admitted",
+        "epistemic_basis": ["该命题可以通过可区分的竞争性因果主张进行检验。"],
+        "proposed_task_kind": "claim_verification",
+        "answer_contract_outline": {
+          "objective": "给出能够区分规模效应与混杂因素的验证方案。",
+          "answer_value_type": "structured_text",
+          "decision_form": "experimental_protocol",
+          "permits_synthesis": true,
+          "required_sections": ["answer", "basis", "uncertainty"]
+        },
+        "clarification_questions": [],
+        "reason": "任务具有可验证的因果主张。"
+      }
+    },
+    {
+      "match": {"task": "frame_open_question"},
+      "response": {
+        "task_kind": "claim_verification",
+        "answer_relationship": "synthesis",
+        "answer_contract": {
+          "objective": "设计能够区分规模效应与混杂因素的验证方案。",
+          "answer_value_type": "structured_text",
+          "answer_format": "structured experimental protocol",
+          "required_sections": [
+            "hypotheses",
+            "experimental_design",
+            "controls",
+            "metrics",
+            "decision_rule",
+            "limitations"
+          ],
+          "decision_form": "experimental_protocol",
+          "permits_synthesis": true
+        },
+        "competition": "independent",
+        "coverage": "open",
+        "hypotheses": [
+          {
+            "statement": "在任务、脚手架与推理预算匹配时，模型规模仍有独立正向效应。",
+            "type": "causal_claim",
+            "scope": "匹配资源条件下的真实 agent 任务分布。",
+            "falsifiers": ["预注册的规模效应不显著、为负或低于实际意义阈值。"],
+            "predictions": ["匹配条件后表现仍随规模提高。"],
+            "answer_value": null
+          },
+          {
+            "statement": "观察到的规模收益主要来自数据、脚手架或推理预算混杂。",
+            "type": "confounding_explanation",
+            "scope": "资源未匹配的模型比较。",
+            "falsifiers": ["控制混杂并完成消融后规模效应保持稳定。"],
+            "predictions": ["匹配资源后表观规模收益明显缩小。"],
+            "answer_value": null
+          },
+          {
+            "statement": "规模效应取决于任务和工具条件，并非单调或普遍成立。",
+            "type": "boundary_condition",
+            "scope": "不同任务类型、工具可靠性与交互长度。",
+            "falsifiers": ["所有预注册任务层都呈现稳定同向效应。"],
+            "predictions": ["规模与任务或工具条件存在显著交互。"],
+            "answer_value": null
+          }
+        ],
+        "coverage_statement": "覆盖独立规模效应、主要混杂解释和条件性交互。",
+        "coverage_limitation": "不穷尽训练数据污染和评测泄漏等失效模式。"
+      }
+    },
+    {
+      "match": {"task": "execute_probe"},
+      "response": {
+        "raw_content": "MODEL REASONING: 应采用匹配脚手架与推理预算的分层随机或配对设计，并预注册交互项。"
+      }
+    },
+    {
+      "match": {"task": "judge_evidence"},
+      "response": {
+        "evidence_type": "supporting",
+        "likelihoods": {"H1": "weakly_confirming"},
+        "interpretation": "该信号提出设计方向，但不是外部实验结果。",
+        "quality_overrides": {"independence": 0.2, "verifiability": 0.2}
+      }
+    }
+  ]
+}

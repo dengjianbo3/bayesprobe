@@ -15,6 +15,7 @@ from bayesprobe.model_gateway import (
 from bayesprobe.schemas import (
     AnswerChoice,
     AnswerContract,
+    AnswerRelationship,
     AnswerValueType,
     BeliefState,
     FramedHypothesis,
@@ -24,6 +25,8 @@ from bayesprobe.schemas import (
     HypothesisCoverage,
     HypothesisRelation,
     TaskFrame,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
     TaskKind,
     is_forbidden_secret_key_name,
     is_secret_like_value,
@@ -45,6 +48,7 @@ class HypothesisSeed:
 class TaskFramingInput:
     run_id: str
     question: str
+    admission_decision: TaskAdmissionDecision
     task_context: str = ""
     answer_choices: list[AnswerChoice] = field(default_factory=list)
     hypothesis_seeds: list[HypothesisSeed] = field(default_factory=list)
@@ -71,14 +75,20 @@ def validate_task_framing_input_security(input: TaskFramingInput) -> None:
             "answer_choices": list(input.answer_choices),
             "hypothesis_seeds": list(input.hypothesis_seeds),
             "metadata": input.metadata,
+            "admission_decision": input.admission_decision,
         }
     )
+    if input.admission_decision.status != TaskAdmissionStatus.ADMITTED:
+        raise TaskFramingError("task framing requires an admitted decision")
 
 
 def _reject_caller_secret_material(value: Any) -> None:
     if isinstance(value, str):
         if is_secret_like_value(value):
             raise TaskFramingError("task framing input must not contain secret material")
+        return
+    if isinstance(value, TaskAdmissionDecision):
+        _reject_caller_secret_material(value.__dict__)
         return
     if isinstance(value, AnswerChoice):
         _reject_caller_secret_identifier(value.label)
@@ -191,6 +201,7 @@ class ModelTaskFramer:
                 run_id=input.run_id,
                 question=input.question,
                 task_context=input.task_context,
+                admission_decision=input.admission_decision,
                 method=FramingMethod.MODEL,
                 trace=_trace_for(request, self._model_gateway),
             )
@@ -231,6 +242,7 @@ class ModelTaskFramer:
                     run_id=input.run_id,
                     question=input.question,
                     task_context=input.task_context,
+                    admission_decision=input.admission_decision,
                     method=FramingMethod.MODEL,
                     trace=_trace_for(request, self._model_gateway),
                 )
@@ -258,6 +270,10 @@ class RecordedTaskFramer:
 
         try:
             source = _strict_recorded_task_frame(self._frame)
+            if source.task_kind != input.admission_decision.proposed_task_kind:
+                raise TaskFramingError(
+                    "recorded frame must match the admitted task kind"
+                )
             hypothesis_frame = HypothesisFrame(
                 frame_id=f"{run_id}_hypothesis_frame",
                 competition=source.hypothesis_frame.competition,
@@ -271,8 +287,18 @@ class RecordedTaskFramer:
                 coverage_limitation=source.hypothesis_frame.coverage_limitation,
             )
             return TaskFrame(
+                schema_version="v0.2",
                 task_frame_id=f"{run_id}_task_frame",
+                admission_decision_id=input.admission_decision.attempt_id,
                 task_kind=source.task_kind,
+                answer_relationship=(
+                    source.answer_relationship
+                    or (
+                        AnswerRelationship.SYNTHESIS
+                        if source.answer_contract.permits_synthesis
+                        else AnswerRelationship.SELECTION
+                    )
+                ),
                 normalized_question=question,
                 task_context=task_context,
                 answer_contract=source.answer_contract,
@@ -336,8 +362,10 @@ def parse_legacy_answer_choice_frame(
 
 _TASK_FRAME_FIELDS = {
     "task_kind",
+    "answer_relationship",
     "answer_contract",
-    "hypothesis_relation",
+    "competition",
+    "coverage",
     "hypotheses",
     "coverage_statement",
     "coverage_limitation",
@@ -348,9 +376,12 @@ _HYPOTHESIS_FIELDS = {
     "scope",
     "falsifiers",
     "predictions",
+    "answer_value",
 }
 _ANSWER_CONTRACT_FIELDS = {
     "objective",
+    "answer_value_type",
+    "answer_format",
     "required_sections",
     "decision_form",
     "permits_synthesis",
@@ -409,17 +440,17 @@ def _open_frame_request(input: TaskFramingInput) -> StructuredModelRequest:
             "supported_task_kinds": [
                 kind.value
                 for kind in TaskKind
-                if kind not in {TaskKind.MULTIPLE_CHOICE, TaskKind.EXACT_ANSWER}
+                if kind != TaskKind.MULTIPLE_CHOICE
             ],
-            "supported_relations": [
-                relation.value for relation in HypothesisRelation
-            ],
-            "hypothesis_count": {"minimum": 2, "maximum": 6},
+            "admitted_task_kind": input.admission_decision.proposed_task_kind.value,
+            "supported_competition": [item.value for item in HypothesisCompetition],
+            "supported_coverage": [item.value for item in HypothesisCoverage],
+            "hypothesis_count": {"minimum": 1, "maximum": 6},
         },
         prompt_id="open_question_task_framing",
-        prompt_version="v0.1",
+        prompt_version="v0.2",
         schema_name="OpenQuestionTaskFrame",
-        schema_version="v0.1",
+        schema_version="v0.2",
         metadata={"run_id": input.run_id},
     )
 
@@ -446,17 +477,17 @@ def _repair_frame_request(
             "supported_task_kinds": [
                 kind.value
                 for kind in TaskKind
-                if kind not in {TaskKind.MULTIPLE_CHOICE, TaskKind.EXACT_ANSWER}
+                if kind != TaskKind.MULTIPLE_CHOICE
             ],
-            "supported_relations": [
-                relation.value for relation in HypothesisRelation
-            ],
-            "hypothesis_count": {"minimum": 2, "maximum": 6},
+            "admitted_task_kind": input.admission_decision.proposed_task_kind.value,
+            "supported_competition": [item.value for item in HypothesisCompetition],
+            "supported_coverage": [item.value for item in HypothesisCoverage],
+            "hypothesis_count": {"minimum": 1, "maximum": 6},
         },
         prompt_id="open_question_task_framing_repair",
-        prompt_version="v0.1",
+        prompt_version="v0.2",
         schema_name="OpenQuestionTaskFrame",
-        schema_version="v0.1",
+        schema_version="v0.2",
         metadata={"run_id": input.run_id, "repair_attempt_index": attempt_index},
     )
 
@@ -482,6 +513,7 @@ def task_frame_from_mapping(
     run_id: str,
     question: str,
     task_context: str,
+    admission_decision: TaskAdmissionDecision,
     method: FramingMethod,
     trace: dict[str, Any],
 ) -> TaskFrame:
@@ -491,8 +523,8 @@ def task_frame_from_mapping(
         raise TaskFramingError("task frame payload has missing or unknown fields")
 
     raw_hypotheses = payload.get("hypotheses")
-    if not isinstance(raw_hypotheses, list) or not 2 <= len(raw_hypotheses) <= 6:
-        raise TaskFramingError("task frame must contain between 2 and 6 hypotheses")
+    if not isinstance(raw_hypotheses, list):
+        raise TaskFramingError("task frame hypotheses must be a list")
     for item in raw_hypotheses:
         if not isinstance(item, Mapping):
             raise TaskFramingError("each framed hypothesis must be an object")
@@ -502,23 +534,44 @@ def task_frame_from_mapping(
             raise TaskFramingError("provider hypothesis has missing or unknown fields")
 
     try:
-        if not isinstance(payload["task_kind"], str) or not isinstance(
-            payload["hypothesis_relation"], str
+        if (
+            not isinstance(payload["task_kind"], str)
+            or not isinstance(payload["answer_relationship"], str)
+            or not isinstance(payload["competition"], str)
+            or not isinstance(payload["coverage"], str)
         ):
             raise ValueError
         task_kind = TaskKind(payload["task_kind"])
-        relation = HypothesisRelation(payload["hypothesis_relation"])
+        answer_relationship = AnswerRelationship(payload["answer_relationship"])
+        competition = HypothesisCompetition(payload["competition"])
+        coverage = HypothesisCoverage(payload["coverage"])
     except (KeyError, TypeError, ValueError):
-        raise TaskFramingError("invalid task kind or hypothesis relation") from None
+        raise TaskFramingError("invalid task frame classification") from None
     if task_kind == TaskKind.MULTIPLE_CHOICE:
         raise TaskFramingError("model framing cannot create a multiple-choice task")
+    if (
+        admission_decision.status != TaskAdmissionStatus.ADMITTED
+        or admission_decision.proposed_task_kind != task_kind
+    ):
+        raise TaskFramingError("task frame must match the admitted task kind")
+    minimum_count = 1 if task_kind == TaskKind.EXACT_ANSWER else 2
+    if not minimum_count <= len(raw_hypotheses) <= 6:
+        if task_kind == TaskKind.EXACT_ANSWER:
+            raise TaskFramingError(
+                "exclusive-open framing requires one to six candidates"
+            )
+        raise TaskFramingError("task frame must contain between 2 and 6 hypotheses")
 
     ids = [f"H{index}" for index in range(1, len(raw_hypotheses) + 1)]
-    priors = (
-        [1.0 / len(ids)] * len(ids)
-        if relation == HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
-        else [0.5] * len(ids)
-    )
+    unresolved_mass = None
+    if competition == HypothesisCompetition.EXCLUSIVE:
+        if coverage == HypothesisCoverage.OPEN:
+            unresolved_mass = 0.50
+            priors = _exclusive_open_priors(len(ids), unresolved=unresolved_mass)
+        else:
+            priors = [1.0 / len(ids)] * len(ids)
+    else:
+        priors = [0.5] * len(ids)
     normalized_hypotheses = [
         {
             "statement": _native_required_text(item["statement"], "statement"),
@@ -530,9 +583,18 @@ def task_frame_from_mapping(
             "predictions": _native_required_text_list(
                 item["predictions"], "predictions"
             ),
+            "answer_value": _native_answer_value(item["answer_value"]),
         }
         for item in raw_hypotheses
     ]
+    if task_kind == TaskKind.EXACT_ANSWER:
+        answer_values = [item["answer_value"] for item in normalized_hypotheses]
+        if any(value is None for value in answer_values):
+            raise TaskFramingError("exact-answer candidates require answer_value")
+        if len({(type(value).__name__, value) for value in answer_values}) != len(
+            answer_values
+        ):
+            raise TaskFramingError("exact-answer candidate values must be unique")
     coverage_statement = _native_required_text(
         payload["coverage_statement"], "coverage_statement"
     )
@@ -550,28 +612,34 @@ def task_frame_from_mapping(
             initial_prior=priors[index],
             falsifiers=item["falsifiers"],
             predictions=item["predictions"],
+            answer_value=item["answer_value"],
         )
         for index, item in enumerate(normalized_hypotheses)
     ]
     answer_contract = _answer_contract_from_mapping(payload.get("answer_contract"))
     try:
         return TaskFrame(
+            schema_version="v0.2",
             task_frame_id=f"{run_id}_task_frame",
+            admission_decision_id=admission_decision.attempt_id,
             task_kind=task_kind,
+            answer_relationship=answer_relationship,
             normalized_question=question.strip(),
             task_context=task_context.strip(),
             answer_contract=answer_contract,
             hypothesis_frame=HypothesisFrame(
                 frame_id=f"{run_id}_hypothesis_frame",
-                relation=relation,
+                competition=competition,
+                coverage=coverage,
                 hypotheses=hypotheses,
                 rival_sets={
                     hypothesis_id: [other for other in ids if other != hypothesis_id]
-                    if relation == HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
+                    if competition == HypothesisCompetition.EXCLUSIVE
                     else []
                     for hypothesis_id in ids
                 },
                 coverage_statement=coverage_statement,
+                unresolved_alternative_mass=unresolved_mass,
                 coverage_limitation=coverage_limitation,
             ),
             framing_method=method,
@@ -599,6 +667,26 @@ def _native_required_text_list(value: Any, field_name: str) -> list[str]:
     return [item.strip() for item in value]
 
 
+def _native_answer_value(value: Any) -> str | int | float | None:
+    if value is not None and type(value) not in {str, int, float}:
+        raise TaskFramingError("provider answer_value must be scalar or null")
+    if isinstance(value, str) and not value.strip():
+        raise TaskFramingError("provider answer_value must not be empty")
+    return value.strip() if isinstance(value, str) else value
+
+
+def _exclusive_open_priors(
+    count: int,
+    *,
+    unresolved: float = 0.50,
+) -> list[float]:
+    if not 1 <= count <= 6:
+        raise TaskFramingError("exclusive-open framing requires one to six candidates")
+    if not 0.05 <= unresolved < 1.0:
+        raise TaskFramingError("exclusive-open unresolved reserve must be at least 0.05")
+    return [round((1.0 - unresolved) / count, 12) for _ in range(count)]
+
+
 def _answer_contract_from_mapping(payload: Any) -> AnswerContract:
     if not isinstance(payload, Mapping):
         raise TaskFramingError("answer_contract must be an object")
@@ -612,6 +700,18 @@ def _answer_contract_from_mapping(payload: Any) -> AnswerContract:
         payload["decision_form"],
         "answer_contract decision_form",
     )
+    answer_format = _native_required_text(
+        payload["answer_format"],
+        "answer_contract answer_format",
+    )
+    try:
+        if not isinstance(payload["answer_value_type"], str):
+            raise ValueError
+        answer_value_type = AnswerValueType(payload["answer_value_type"])
+    except (KeyError, TypeError, ValueError):
+        raise TaskFramingError(
+            "provider answer_contract answer_value_type is invalid"
+        ) from None
     required_sections = _native_required_text_list(
         payload["required_sections"],
         "answer_contract required_sections",
@@ -627,6 +727,8 @@ def _answer_contract_from_mapping(payload: Any) -> AnswerContract:
         )
     return AnswerContract(
         objective=objective,
+        answer_value_type=answer_value_type,
+        answer_format=answer_format,
         required_sections=required_sections,
         decision_form=decision_form,
         permits_synthesis=permits_synthesis,
@@ -681,12 +783,22 @@ def _strict_recorded_task_frame(frame: TaskFrame) -> TaskFrame:
     )
     if type(payload["task_kind"]) is not TaskKind:
         raise TaskFramingError("recorded task_kind must be a TaskKind")
-    if payload["schema_version"] != "v0.1":
-        raise TaskFramingError("recorded schema_version must be v0.1")
-    if payload["admission_decision_id"] is not None:
-        raise TaskFramingError("recorded v0.1 admission_decision_id must be null")
-    if payload["answer_relationship"] is not None:
-        raise TaskFramingError("recorded v0.1 answer_relationship must be null")
+    if payload["schema_version"] not in {"v0.1", "v0.2"}:
+        raise TaskFramingError("recorded schema_version must be v0.1 or v0.2")
+    if payload["schema_version"] == "v0.1":
+        if payload["admission_decision_id"] is not None:
+            raise TaskFramingError("recorded v0.1 admission_decision_id must be null")
+        if payload["answer_relationship"] is not None:
+            raise TaskFramingError("recorded v0.1 answer_relationship must be null")
+    else:
+        _native_required_text(
+            payload["admission_decision_id"],
+            "recorded admission_decision_id",
+        )
+        if type(payload["answer_relationship"]) is not AnswerRelationship:
+            raise TaskFramingError(
+                "recorded answer_relationship must be an AnswerRelationship"
+            )
     if type(payload["framing_method"]) is not FramingMethod:
         raise TaskFramingError("recorded framing_method must be a FramingMethod")
     if type(payload["task_context"]) is not str:
@@ -697,11 +809,13 @@ def _strict_recorded_task_frame(frame: TaskFrame) -> TaskFrame:
     raw_contract = payload["answer_contract"]
     contract_payload = _strict_recorded_answer_contract(raw_contract)
     return TaskFrame(
-        schema_version="v0.1",
+        schema_version=payload["schema_version"],
         task_frame_id=_native_required_text(
             payload["task_frame_id"], "recorded task_frame_id"
         ),
+        admission_decision_id=payload["admission_decision_id"],
         task_kind=payload["task_kind"],
+        answer_relationship=payload["answer_relationship"],
         normalized_question=_native_required_text(
             payload["normalized_question"], "recorded normalized_question"
         ),
@@ -861,6 +975,8 @@ def _prepare_explicit_input(input: TaskFramingInput) -> _PreparedExplicitInput:
     if choices and seeds:
         raise TaskFramingError("provide answer choices or hypothesis seeds, not both")
     if choices:
+        if input.admission_decision.proposed_task_kind != TaskKind.MULTIPLE_CHOICE:
+            raise TaskFramingError("explicit choices require multiple-choice admission")
         normalized_question = parsed.stem if parsed is not None else normalized_question
         _validate_choices(choices)
         return _PreparedExplicitInput(
@@ -872,6 +988,11 @@ def _prepare_explicit_input(input: TaskFramingInput) -> _PreparedExplicitInput:
     if seeds:
         relation = _normalize_hypothesis_relation(input.hypothesis_relation)
         task_kind = _normalize_task_kind(input.task_kind)
+        admitted_kind = input.admission_decision.proposed_task_kind
+        if input.task_kind is None:
+            task_kind = admitted_kind
+        if admitted_kind != task_kind:
+            raise TaskFramingError("explicit frame must match the admitted task kind")
         priors = _validate_seeds(seeds, relation, task_kind)
         return _PreparedExplicitInput(
             normalized_question=normalized_question,
@@ -1035,16 +1156,22 @@ def _frame_choices(
             predictions=[
                 f"Reliable reasoning should make answer choice {choice.label} more plausible than its rivals."
             ],
+            answer_value=choice.label,
         )
         for choice, prior in zip(choices, priors, strict=True)
     ]
     return TaskFrame(
+        schema_version="v0.2",
         task_frame_id=f"{input.run_id}_task_frame",
+        admission_decision_id=input.admission_decision.attempt_id,
         task_kind=TaskKind.MULTIPLE_CHOICE,
+        answer_relationship=AnswerRelationship.SELECTION,
         normalized_question=normalized_question,
         task_context=task_context,
         answer_contract=AnswerContract(
             objective="Select the best-supported answer choice.",
+            answer_value_type=AnswerValueType.CHOICE_LABEL,
+            answer_format="choice label",
             required_sections=["selected_answer", "justification"],
             decision_form="answer_choice",
         ),
@@ -1099,12 +1226,21 @@ def _frame_seeds(
         else "The explicit hypotheses may coexist and do not exhaust all alternatives."
     )
     return TaskFrame(
+        schema_version="v0.2",
         task_frame_id=f"{input.run_id}_task_frame",
+        admission_decision_id=input.admission_decision.attempt_id,
         task_kind=task_kind,
+        answer_relationship=(
+            AnswerRelationship.SYNTHESIS
+            if input.admission_decision.answer_contract_outline.permits_synthesis
+            else AnswerRelationship.SELECTION
+        ),
         normalized_question=prepared.normalized_question,
         task_context=prepared.task_context,
         answer_contract=AnswerContract(
             objective="Assess the explicit hypotheses against available evidence.",
+            answer_value_type=AnswerValueType.STRUCTURED_TEXT,
+            answer_format="structured text",
             required_sections=["hypotheses", "evidence", "decision"],
             decision_form="hypothesis_assessment",
             permits_synthesis=relation == HypothesisRelation.INDEPENDENT,

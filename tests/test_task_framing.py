@@ -11,9 +11,16 @@ from bayesprobe.model_gateway import ScriptedModelGateway, StructuredModelReques
 from bayesprobe.schemas import (
     AnswerChoice,
     AnswerContract,
+    AnswerContractOutline,
+    AnswerRelationship,
+    AnswerValueType,
     BeliefState,
     Hypothesis,
+    HypothesisCompetition,
+    HypothesisCoverage,
     HypothesisRelation,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
     TaskKind,
 )
 from bayesprobe.task_framing import (
@@ -23,7 +30,7 @@ from bayesprobe.task_framing import (
     RecordedTaskFramer,
     RoutingTaskFramer,
     TaskFramingError,
-    TaskFramingInput,
+    TaskFramingInput as _TaskFramingInput,
     TaskFramingRepairPolicy,
     migrate_legacy_belief_state,
     task_frame_from_mapping,
@@ -49,8 +56,11 @@ class QueueModelGateway:
 
 VALID_OPEN_FRAME = {
     "task_kind": "claim_verification",
+    "answer_relationship": "synthesis",
     "answer_contract": {
         "objective": "Design a discriminating validation protocol.",
+        "answer_value_type": "structured_text",
+        "answer_format": "structured validation protocol",
         "required_sections": [
             "hypotheses",
             "experimental_design",
@@ -62,7 +72,8 @@ VALID_OPEN_FRAME = {
         "decision_form": "experimental_protocol",
         "permits_synthesis": True,
     },
-    "hypothesis_relation": "independent",
+    "competition": "independent",
+    "coverage": "open",
     "hypotheses": [
         {
             "statement": "Scale has an independent positive effect under matched conditions.",
@@ -70,6 +81,7 @@ VALID_OPEN_FRAME = {
             "scope": "Matched task, scaffold, and inference budget.",
             "falsifiers": ["The controlled effect is negligible or negative."],
             "predictions": ["Performance increases across matched sizes."],
+            "answer_value": None,
         },
         {
             "statement": "The apparent scale effect is materially confounded.",
@@ -77,11 +89,137 @@ VALID_OPEN_FRAME = {
             "scope": "Comparisons with unmatched resources.",
             "falsifiers": ["The effect survives matched controls."],
             "predictions": ["The effect shrinks after matching resources."],
+            "answer_value": None,
         },
     ],
     "coverage_statement": "Covers the target effect and the primary confounder.",
     "coverage_limitation": "Conditional task interactions remain possible.",
 }
+
+
+def admitted_decision(
+    *,
+    attempt_id: str = "attempt_framing",
+    task_kind: TaskKind = TaskKind.EXACT_ANSWER,
+) -> TaskAdmissionDecision:
+    return TaskAdmissionDecision(
+        attempt_id=attempt_id,
+        status=TaskAdmissionStatus.ADMITTED,
+        epistemic_basis=["The answer can be tested against discriminating claims."],
+        proposed_task_kind=task_kind,
+        answer_contract_outline=AnswerContractOutline(
+            objective="Return the supported answer.",
+            answer_value_type=(
+                AnswerValueType.INTEGER
+                if task_kind == TaskKind.EXACT_ANSWER
+                else AnswerValueType.STRUCTURED_TEXT
+            ),
+            decision_form="single_value",
+            permits_synthesis=False,
+            required_sections=["answer", "basis", "uncertainty"],
+        ),
+        reason="The task has a verifiable answer.",
+    )
+
+
+def TaskFramingInput(**kwargs) -> _TaskFramingInput:
+    if "admission_decision" not in kwargs:
+        question = kwargs.get("question", "")
+        if (
+            kwargs.get("answer_choices")
+            or "answer choices:" in question.casefold()
+            or "答案选项：" in question
+        ):
+            task_kind = TaskKind.MULTIPLE_CHOICE
+        elif kwargs.get("hypothesis_seeds"):
+            task_kind = kwargs.get("task_kind") or TaskKind.DECISION
+        else:
+            task_kind = TaskKind.CLAIM_VERIFICATION
+        kwargs["admission_decision"] = admitted_decision(task_kind=task_kind)
+    return _TaskFramingInput(**kwargs)
+
+
+EXACT_ANSWER_FRAME = {
+    "task_kind": "exact_answer",
+    "answer_relationship": "selection",
+    "answer_contract": {
+        "objective": "Return the supported integer value.",
+        "answer_value_type": "integer",
+        "answer_format": "integer",
+        "required_sections": ["answer", "basis", "uncertainty"],
+        "decision_form": "single_value",
+        "permits_synthesis": False,
+    },
+    "competition": "exclusive",
+    "coverage": "open",
+    "hypotheses": [
+        {
+            "statement": "The requested integer is 7.",
+            "type": "answer_candidate",
+            "scope": "The supplied integer constraints.",
+            "falsifiers": ["A constraint excludes 7."],
+            "predictions": ["Substitution verifies every constraint."],
+            "answer_value": 7,
+        },
+        {
+            "statement": "The requested integer is 9.",
+            "type": "answer_candidate",
+            "scope": "The supplied integer constraints.",
+            "falsifiers": ["A constraint excludes 9."],
+            "predictions": ["Substitution verifies every constraint."],
+            "answer_value": 9,
+        },
+    ],
+    "coverage_statement": "The named values are initial candidates, not exhaustive.",
+    "coverage_limitation": "Other integer values remain unresolved.",
+}
+
+
+def test_exact_answer_framing_preserves_open_coverage():
+    frame = ModelTaskFramer(
+        ScriptedModelGateway({"frame_open_question": EXACT_ANSWER_FRAME})
+    ).frame(
+        TaskFramingInput(
+            run_id="run_exact",
+            question="Which integer satisfies the constraints?",
+            admission_decision=admitted_decision(attempt_id="admission_exact"),
+        )
+    )
+
+    assert frame.schema_version == "v0.2"
+    assert frame.admission_decision_id == "admission_exact"
+    assert frame.task_kind == TaskKind.EXACT_ANSWER
+    assert frame.answer_relationship == AnswerRelationship.SELECTION
+    assert frame.hypothesis_frame.competition == HypothesisCompetition.EXCLUSIVE
+    assert frame.hypothesis_frame.coverage == HypothesisCoverage.OPEN
+    assert frame.hypothesis_frame.unresolved_alternative_mass == 0.50
+    assert [item.initial_prior for item in frame.hypothesis_frame.hypotheses] == [
+        0.25,
+        0.25,
+    ]
+    assert [item.answer_value for item in frame.hypothesis_frame.hypotheses] == [7, 9]
+
+
+def test_zero_candidate_exact_frame_fails_after_one_repair():
+    zero_candidate_frame = {**EXACT_ANSWER_FRAME, "hypotheses": []}
+    gateway = QueueModelGateway([zero_candidate_frame, zero_candidate_frame])
+
+    with pytest.raises(
+        TaskFramingError,
+        match="task frame invalid after 1 repair attempt",
+    ):
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(
+                run_id="run_zero_candidates",
+                question="Which integer satisfies the constraints?",
+                admission_decision=admitted_decision(),
+            )
+        )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
 
 
 def test_deprecated_belief_migration_wrapper_uses_explicit_v01_migration():
@@ -259,6 +397,32 @@ def test_model_task_framer_rejects_secret_caller_input_before_gateway_call():
         )
 
     assert gateway.requests == []
+
+
+def test_framer_rejects_constructed_admission_trace_with_provider_secret():
+    decision = admitted_decision(task_kind=TaskKind.MULTIPLE_CHOICE)
+    decision = TaskAdmissionDecision.model_construct(
+        **{
+            **decision.__dict__,
+            "model_trace": {"authorization": "Bearer provider-secret-123"},
+        }
+    )
+
+    with pytest.raises(
+        TaskFramingError,
+        match="task framing input must not contain secret material",
+    ):
+        ExplicitTaskFramer().frame(
+            _TaskFramingInput(
+                run_id="run_constructed_admission_secret",
+                question="Which result follows?",
+                admission_decision=decision,
+                answer_choices=[
+                    AnswerChoice(label="A", text="First result"),
+                    AnswerChoice(label="B", text="Second result"),
+                ],
+            )
+        )
 
 
 def test_explicit_framer_wraps_late_task_frame_validation_as_task_framing_error():
@@ -494,14 +658,17 @@ def test_model_task_framer_calls_gateway_before_returning_frame():
         "question": "这个命题应该如何验证？",
         "task_context": "Use matched conditions.",
         "supported_task_kinds": [
+            "exact_answer",
             "claim_verification",
             "explanation",
             "diagnosis",
             "design",
             "decision",
         ],
-        "supported_relations": ["exclusive_exhaustive", "independent"],
-        "hypothesis_count": {"minimum": 2, "maximum": 6},
+        "admitted_task_kind": "claim_verification",
+        "supported_competition": ["exclusive", "independent"],
+        "supported_coverage": ["exhaustive", "open"],
+        "hypothesis_count": {"minimum": 1, "maximum": 6},
     }
     assert [item.id for item in frame.hypothesis_frame.hypotheses] == ["H1", "H2"]
     assert [item.initial_prior for item in frame.hypothesis_frame.hypotheses] == [0.5, 0.5]
@@ -589,7 +756,10 @@ def test_secret_bearing_model_frame_never_reaches_task_frame_ledger_or_trace(tmp
         InitializeRunInput(
             run_id="run_ledger_secret_repair",
             problem="How should this be tested?",
-        )
+        ),
+        admission_decision=admitted_decision(
+            task_kind=TaskKind.CLAIM_VERIFICATION
+        ),
     )
 
     assert secret not in initialized.task_frame.model_dump_json()
@@ -864,6 +1034,9 @@ def test_task_frame_from_mapping_rejects_provider_owned_beliefs():
             run_id="run_strict",
             question="How should this be tested?",
             task_context="",
+            admission_decision=admitted_decision(
+                task_kind=TaskKind.CLAIM_VERIFICATION
+            ),
             method="model",
             trace={},
         )
@@ -882,7 +1055,11 @@ def test_recorded_task_framer_returns_a_run_specific_deep_copy():
     )
 
     frame = RecordedTaskFramer(source_frame).frame(
-        TaskFramingInput(run_id="replay", question="How should this be tested?")
+        TaskFramingInput(
+            run_id="replay",
+            question="How should this be tested?",
+            admission_decision=admitted_decision(task_kind=TaskKind.DECISION),
+        )
     )
 
     assert frame.task_frame_id == "replay_task_frame"
@@ -927,6 +1104,7 @@ def test_recorded_task_framer_uses_current_normalized_question_and_task_context(
             run_id="replay_current_input",
             question="  Current replay question  ",
             task_context="  Current replay context  ",
+            admission_decision=admitted_decision(task_kind=TaskKind.DECISION),
         )
     )
 
@@ -1120,20 +1298,15 @@ def test_recorded_task_framer_rejects_native_malformed_nested_structures(
         )
 
 
-def test_approved_design_provider_example_validates_against_implemented_schema():
-    design = Path(
-        "docs/superpowers/specs/2026-07-11-open-question-architecture-correction-design.md"
-    ).read_text(encoding="utf-8")
-    structured_output_section = design.split("### 6.4 Structured Model Output", 1)[1]
-    match = re.search(r"```json\n(.*?)\n```", structured_output_section, re.DOTALL)
-    assert match is not None
-    payload = json.loads(match.group(1))
-
+def test_native_v02_provider_example_validates_against_implemented_schema():
     frame = task_frame_from_mapping(
-        payload,
+        VALID_OPEN_FRAME,
         run_id="design_example",
         question="How should the model-scale claim be tested?",
         task_context="",
+        admission_decision=admitted_decision(
+            task_kind=TaskKind.CLAIM_VERIFICATION
+        ),
         method="model",
         trace={},
     )

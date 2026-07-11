@@ -240,15 +240,16 @@ def test_recorded_model_gateway_replays_malformed_response_for_gate_validation(
     assert gateway.complete_structured(make_request()) == {"likelihoods": {}}
 
 
-def test_open_question_fixture_is_recursively_secret_free_and_task_only_matched():
+def test_open_question_v02_fixture_is_recursively_secret_free_and_task_only_matched():
     payload = json.loads(
         Path(
-            "tests/fixtures/open_questions/model_scale_validation_v0.1.json"
+            "tests/fixtures/open_questions/model_scale_validation_v0.2.json"
         ).read_text(encoding="utf-8")
     )
 
     assert _secret_like_entries(payload) == []
     assert [entry["match"] for entry in payload["responses"]] == [
+        {"task": "assess_task_admission"},
         {"task": "frame_open_question"},
         {"task": "execute_probe"},
         {"task": "judge_evidence"},

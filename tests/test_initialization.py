@@ -7,12 +7,18 @@ from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, Ini
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.runners import AutonomousLoopConfig, AutonomousLoopRunner, AutonomousStopReason
 from bayesprobe.schemas import (
+    AnswerContractOutline,
+    AnswerValueType,
     ExternalSignal,
     HypothesisRelation,
     RunRegime,
     RunStatus,
     SignalKind,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
+    TaskKind,
 )
+from bayesprobe.task_admission import ExplicitTaskAdmitter
 from bayesprobe.task_framing import TaskFramingError
 
 
@@ -55,6 +61,74 @@ def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
             predictions=["The fixture emits a reliable H2 support cue."],
         ),
     ]
+
+
+def admitted_seed_decision(attempt_id: str = "admission_seeded") -> TaskAdmissionDecision:
+    return TaskAdmissionDecision(
+        attempt_id=attempt_id,
+        status=TaskAdmissionStatus.ADMITTED,
+        epistemic_basis=["The caller supplied explicit hypotheses."],
+        proposed_task_kind=TaskKind.DECISION,
+        answer_contract_outline=AnswerContractOutline(
+            objective="Assess the supplied hypotheses.",
+            answer_value_type=AnswerValueType.STRUCTURED_TEXT,
+            decision_form="hypothesis_assessment",
+            permits_synthesis=True,
+            required_sections=["answer", "basis", "uncertainty"],
+        ),
+        reason="The explicit frame is admissible.",
+    )
+
+
+class FailingTaskAdmitter:
+    def assess(self, input):
+        raise AssertionError("runner-supplied admission must not be reassessed")
+
+
+def test_initializer_uses_supplied_admission_once_and_writes_v02_state_in_order(
+    tmp_path: Path,
+):
+    ledger = JsonlLedgerStore(tmp_path / "initialization-v02.jsonl")
+    initializer = BayesProbeInitializer(
+        ledger=ledger,
+        task_admitter=FailingTaskAdmitter(),
+    )
+
+    result = initializer.initialize(
+        InitializeRunInput(
+            run_id="run_v02_seeded",
+            problem="Which explanation best fits?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+            task_kind=TaskKind.DECISION,
+        ),
+        admission_decision=admitted_seed_decision(),
+    )
+
+    assert result.task_frame.schema_version == "v0.2"
+    assert result.task_frame.admission_decision_id == "admission_seeded"
+    assert result.belief_state.schema_version == "v0.2"
+    assert result.belief_state.frame_state.frame_id == (
+        result.task_frame.hypothesis_frame.frame_id
+    )
+    assert result.belief_state.evidence_memory.accepted_evidence_ids == []
+    assert [record["record_type"] for record in ledger.read_all()[:4]] == [
+        "task_admission",
+        "task_frame",
+        "run",
+        "belief_state",
+    ]
+
+
+def test_initializer_default_admitter_fails_closed_for_unseeded_open_input():
+    initializer = BayesProbeInitializer(task_admitter=ExplicitTaskAdmitter())
+
+    with pytest.raises(TaskFramingError, match="requires answer choices or hypothesis seeds"):
+        initializer.initialize(
+            InitializeRunInput(
+                run_id="run_unseeded_closed",
+                problem="How should this open question be framed?",
+            )
+        )
 
 
 def test_initializer_never_creates_generic_binary_hypotheses_for_open_question():
@@ -228,6 +302,7 @@ def test_initializer_writes_ledger_records_without_evidence_or_answers(tmp_path:
     record_types = [record["record_type"] for record in ledger.read_all()]
 
     assert record_types == [
+        "task_admission",
         "task_frame",
         "run",
         "belief_state",
