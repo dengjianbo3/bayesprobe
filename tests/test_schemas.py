@@ -91,6 +91,24 @@ def test_task_frame_rejects_invalid_contract(mutator, message):
         TaskFrame.model_validate(mutator(_open_task_frame()).model_dump())
 
 
+def test_task_frame_rejects_tuple_secret_material():
+    frame = _open_task_frame().model_copy(
+        update={"framing_trace": {"nested": ("sk-123456789012",)}}
+    )
+
+    with pytest.raises(ValueError, match="JSON-compatible"):
+        TaskFrame.model_validate(frame.model_dump())
+
+
+def test_task_frame_rejects_nested_list_secret_material():
+    frame = _open_task_frame().model_copy(
+        update={"framing_trace": {"nested": [{"deeper": ["sk-123456789012"]}]}}
+    )
+
+    with pytest.raises(ValueError, match="secret"):
+        TaskFrame.model_validate(frame.model_dump())
+
+
 def test_minimal_run_cycle_and_belief_state_round_trip():
     run = RunRecord(run_id="run_1", regime=RunRegime.AUTONOMOUS, problem="Decide X")
     cycle = CycleRecord(

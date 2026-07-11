@@ -133,7 +133,9 @@ def _normalized_semantic_text(value: str) -> str:
 def _reject_secret_material(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            if not isinstance(key, str):
+                raise ValueError("framing_trace must contain only JSON-compatible values")
+            normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
             if any(
                 part in normalized_key
                 for part in ("apikey", "authorization", "token", "secret")
@@ -147,6 +149,8 @@ def _reject_secret_material(value: Any) -> None:
         r"(?:^|\s)sk-[A-Za-z0-9_-]{12,}", value
     ):
         raise ValueError("framing_trace must not contain secret values")
+    elif value is not None and not isinstance(value, (bool, int, float, str)):
+        raise ValueError("framing_trace must contain only JSON-compatible values")
 
 
 class StrictTaskModel(BaseModel):
