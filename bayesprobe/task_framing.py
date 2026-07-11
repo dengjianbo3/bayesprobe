@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from bayesprobe.model_gateway import (
+    ModelGateway,
+    ModelGatewayValidationError,
+    ModelInvocationTrace,
+    StructuredModelRequest,
+)
 from bayesprobe.schemas import (
     AnswerChoice,
     AnswerContract,
@@ -88,6 +95,123 @@ class ExplicitTaskFramer:
         return _frame_seeds(input, prepared)
 
 
+@dataclass(frozen=True)
+class TaskFramingRepairPolicy:
+    max_attempts: int = 1
+    repair_task: str = "repair_task_frame"
+
+    def __post_init__(self) -> None:
+        if type(self.max_attempts) is not int:
+            raise ValueError("task framing repair max_attempts must be an integer")
+        if self.max_attempts < 0:
+            raise ValueError("task framing repair max_attempts must be non-negative")
+        if not isinstance(self.repair_task, str):
+            raise ValueError("task framing repair task must be a string")
+        if not self.repair_task.strip():
+            raise ValueError("task framing repair task must not be empty")
+
+
+class ModelTaskFramer:
+    def __init__(
+        self,
+        model_gateway: ModelGateway,
+        repair_policy: TaskFramingRepairPolicy | None = None,
+    ) -> None:
+        self._model_gateway = model_gateway
+        self._repair_policy = repair_policy or TaskFramingRepairPolicy()
+
+    def frame(self, input: TaskFramingInput) -> TaskFrame:
+        request = _open_frame_request(input)
+        payload = self._model_gateway.complete_structured(request)
+        try:
+            return task_frame_from_mapping(
+                payload,
+                run_id=input.run_id,
+                question=input.question,
+                task_context=input.task_context,
+                method=FramingMethod.MODEL,
+                trace=_trace_for(request, self._model_gateway),
+            )
+        except (ValueError, ModelGatewayValidationError) as error:
+            return self._repair_or_raise(input, request, payload, error)
+
+    def _repair_or_raise(
+        self,
+        input: TaskFramingInput,
+        original_request: StructuredModelRequest,
+        invalid_payload: Any,
+        validation_error: ValueError,
+    ) -> TaskFrame:
+        last_error = validation_error
+        for attempt_index in range(1, self._repair_policy.max_attempts + 1):
+            request = _repair_frame_request(
+                input,
+                original_request,
+                invalid_payload,
+                last_error,
+                attempt_index,
+                self._repair_policy,
+            )
+            payload = self._model_gateway.complete_structured(request)
+            try:
+                return task_frame_from_mapping(
+                    payload,
+                    run_id=input.run_id,
+                    question=input.question,
+                    task_context=input.task_context,
+                    method=FramingMethod.MODEL,
+                    trace=_trace_for(request, self._model_gateway),
+                )
+            except (ValueError, ModelGatewayValidationError) as error:
+                last_error = error
+                invalid_payload = payload
+        raise TaskFramingError(
+            "task frame invalid after "
+            f"{self._repair_policy.max_attempts} repair attempt"
+        ) from last_error
+
+
+class RecordedTaskFramer:
+    def __init__(self, frame: TaskFrame) -> None:
+        self._frame = frame.model_copy(deep=True)
+
+    def frame(self, input: TaskFramingInput) -> TaskFrame:
+        hypothesis_frame = self._frame.hypothesis_frame.model_copy(
+            deep=True,
+            update={"frame_id": f"{input.run_id}_hypothesis_frame"},
+        )
+        return self._frame.model_copy(
+            deep=True,
+            update={
+                "task_frame_id": f"{input.run_id}_task_frame",
+                "normalized_question": input.question.strip(),
+                "framing_method": FramingMethod.RECORDED,
+                "hypothesis_frame": hypothesis_frame,
+            },
+        )
+
+
+class RoutingTaskFramer:
+    def __init__(
+        self,
+        *,
+        explicit_framer: ExplicitTaskFramer,
+        open_framer: TaskFramer,
+    ) -> None:
+        self._explicit_framer = explicit_framer
+        self._open_framer = open_framer
+
+    def frame(self, input: TaskFramingInput) -> TaskFrame:
+        has_explicit_frame = bool(
+            input.answer_choices
+            or input.hypothesis_seeds
+            or parse_legacy_answer_choice_frame(input.question) is not None
+        )
+        if has_explicit_frame:
+            return self._explicit_framer.frame(input)
+        return self._open_framer.frame(input)
+
+
 def parse_legacy_answer_choice_frame(
     question: str,
 ) -> ParsedAnswerChoiceFrame | None:
@@ -110,6 +234,211 @@ def parse_legacy_answer_choice_frame(
     ):
         return None
     return ParsedAnswerChoiceFrame(stem=stem, choices=parsed)
+
+
+_TASK_FRAME_FIELDS = {
+    "task_kind",
+    "answer_contract",
+    "hypothesis_relation",
+    "hypotheses",
+    "coverage_statement",
+    "coverage_limitation",
+}
+_HYPOTHESIS_FIELDS = {
+    "statement",
+    "type",
+    "scope",
+    "falsifiers",
+    "predictions",
+}
+_PROVIDER_BELIEF_FIELDS = {
+    "id",
+    "prior",
+    "posterior",
+    "api_key",
+    "authorization",
+    "token",
+}
+
+
+def _open_frame_request(input: TaskFramingInput) -> StructuredModelRequest:
+    question = _required_question(input.question)
+    task_context = _normalize_task_context(input.task_context)
+    return StructuredModelRequest(
+        task="frame_open_question",
+        input={
+            "question": question,
+            "task_context": task_context,
+            "supported_task_kinds": [
+                kind.value for kind in TaskKind if kind != TaskKind.MULTIPLE_CHOICE
+            ],
+            "supported_relations": [
+                relation.value for relation in HypothesisRelation
+            ],
+            "hypothesis_count": {"minimum": 2, "maximum": 6},
+        },
+        prompt_id="open_question_task_framing",
+        prompt_version="v0.1",
+        schema_name="OpenQuestionTaskFrame",
+        schema_version="v0.1",
+        metadata={"run_id": input.run_id},
+    )
+
+
+def _repair_frame_request(
+    input: TaskFramingInput,
+    original_request: StructuredModelRequest,
+    invalid_payload: Any,
+    validation_error: ValueError,
+    attempt_index: int,
+    repair_policy: TaskFramingRepairPolicy,
+) -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task=repair_policy.repair_task,
+        input={
+            "original_request": _secret_free_payload(original_request.input),
+            "invalid_payload": _secret_free_payload(invalid_payload),
+            "validation_error": _secret_free_payload(str(validation_error)),
+            "attempt_index": attempt_index,
+            "required_fields": {
+                "task_frame": sorted(_TASK_FRAME_FIELDS),
+                "hypothesis": sorted(_HYPOTHESIS_FIELDS),
+            },
+            "supported_task_kinds": [
+                kind.value for kind in TaskKind if kind != TaskKind.MULTIPLE_CHOICE
+            ],
+            "supported_relations": [
+                relation.value for relation in HypothesisRelation
+            ],
+            "hypothesis_count": {"minimum": 2, "maximum": 6},
+        },
+        prompt_id="open_question_task_framing_repair",
+        prompt_version="v0.1",
+        schema_name="OpenQuestionTaskFrame",
+        schema_version="v0.1",
+        metadata={"run_id": input.run_id, "repair_attempt_index": attempt_index},
+    )
+
+
+def _trace_for(
+    request: StructuredModelRequest,
+    model_gateway: ModelGateway,
+) -> dict[str, Any]:
+    adapter_kind = getattr(model_gateway, "adapter_kind", type(model_gateway).__name__)
+    if not isinstance(adapter_kind, str) or not adapter_kind.strip():
+        adapter_kind = type(model_gateway).__name__
+    return _secret_free_payload(
+        ModelInvocationTrace.from_request(
+            request,
+            adapter_kind=adapter_kind,
+        ).to_dict()
+    )
+
+
+def _secret_free_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        clean: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            if any(
+                part in normalized_key
+                for part in ("apikey", "authorization", "token", "secret")
+            ):
+                clean[str(key)] = "[REDACTED]"
+            else:
+                clean[str(key)] = _secret_free_payload(item)
+        return clean
+    if isinstance(value, list):
+        return [_secret_free_payload(item) for item in value]
+    if isinstance(value, str):
+        return re.sub(r"(?:^|\s)sk-[A-Za-z0-9_-]{12,}", " [REDACTED]", value)
+    return value
+
+
+def task_frame_from_mapping(
+    payload: Mapping[str, Any],
+    *,
+    run_id: str,
+    question: str,
+    task_context: str,
+    method: FramingMethod,
+    trace: dict[str, Any],
+) -> TaskFrame:
+    if not isinstance(payload, Mapping):
+        raise TaskFramingError("task frame payload must be an object")
+    if set(payload) != _TASK_FRAME_FIELDS:
+        raise TaskFramingError("task frame payload has missing or unknown fields")
+
+    raw_hypotheses = payload.get("hypotheses")
+    if not isinstance(raw_hypotheses, list) or not 2 <= len(raw_hypotheses) <= 6:
+        raise TaskFramingError("task frame must contain between 2 and 6 hypotheses")
+    for item in raw_hypotheses:
+        if not isinstance(item, Mapping):
+            raise TaskFramingError("each framed hypothesis must be an object")
+        if _PROVIDER_BELIEF_FIELDS.intersection(item):
+            raise TaskFramingError("provider hypotheses cannot assign ids or beliefs")
+        if set(item) != _HYPOTHESIS_FIELDS:
+            raise TaskFramingError("provider hypothesis has missing or unknown fields")
+
+    try:
+        task_kind = TaskKind(payload["task_kind"])
+        relation = HypothesisRelation(payload["hypothesis_relation"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise TaskFramingError("invalid task kind or hypothesis relation") from error
+    if task_kind == TaskKind.MULTIPLE_CHOICE:
+        raise TaskFramingError("model framing cannot create a multiple-choice task")
+
+    ids = [f"H{index}" for index in range(1, len(raw_hypotheses) + 1)]
+    priors = (
+        [1.0 / len(ids)] * len(ids)
+        if relation == HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
+        else [0.5] * len(ids)
+    )
+    hypotheses = [
+        FramedHypothesis(
+            id=ids[index],
+            statement=str(item.get("statement", "")),
+            type=str(item.get("type", "")),
+            scope=str(item.get("scope", "")),
+            initial_prior=priors[index],
+            falsifiers=list(item.get("falsifiers", [])),
+            predictions=list(item.get("predictions", [])),
+        )
+        for index, item in enumerate(raw_hypotheses)
+    ]
+    contract_payload = payload.get("answer_contract")
+    if not isinstance(contract_payload, Mapping):
+        raise TaskFramingError("answer_contract must be an object")
+    try:
+        answer_contract = AnswerContract.model_validate(contract_payload)
+        return TaskFrame(
+            task_frame_id=f"{run_id}_task_frame",
+            task_kind=task_kind,
+            normalized_question=question.strip(),
+            task_context=task_context.strip(),
+            answer_contract=answer_contract,
+            hypothesis_frame=HypothesisFrame(
+                frame_id=f"{run_id}_hypothesis_frame",
+                relation=relation,
+                hypotheses=hypotheses,
+                rival_sets={
+                    hypothesis_id: [other for other in ids if other != hypothesis_id]
+                    if relation == HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
+                    else []
+                    for hypothesis_id in ids
+                },
+                coverage_statement=str(payload.get("coverage_statement", "")),
+                coverage_limitation=(
+                    str(payload["coverage_limitation"])
+                    if payload.get("coverage_limitation") is not None
+                    else None
+                ),
+            ),
+            framing_method=method,
+            framing_trace=_secret_free_payload(trace),
+        )
+    except ValueError as error:
+        raise TaskFramingError("invalid task frame fields") from error
 
 
 @dataclass(frozen=True)
@@ -461,9 +790,14 @@ def _rival_sets(
 __all__ = [
     "ExplicitTaskFramer",
     "HypothesisSeed",
+    "ModelTaskFramer",
     "ParsedAnswerChoiceFrame",
+    "RecordedTaskFramer",
+    "RoutingTaskFramer",
     "TaskFramer",
     "TaskFramingError",
     "TaskFramingInput",
+    "TaskFramingRepairPolicy",
     "parse_legacy_answer_choice_frame",
+    "task_frame_from_mapping",
 ]
