@@ -265,7 +265,7 @@ class _CapabilityPythonObserver:
                 0o600,
             )
             try:
-                os.write(descriptor, line)
+                _write_all(descriptor, line)
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
@@ -362,6 +362,15 @@ def _private_directory(path: Path) -> None:
 
 def _utc_now_text() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written < 1:
+            raise OSError("capability artifact write made no progress")
+        remaining = remaining[written:]
 
 
 __all__ = [

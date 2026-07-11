@@ -493,6 +493,9 @@ git commit -m "feat: run resumable paired capability experiments"
 - [x] Write RED HMAC tests proving pseudonyms are stable within one experiment, differ across secrets, and cannot be plain sample hashes.
 - [x] Write RED recursive leak tests for exact restricted question, choice, answer, canary, API key, raw response, Python source/output, and reversible id in every shareable JSON/Markdown string.
 - [x] Implement score details in restricted storage and aggregate-only `summary.json`, `summary.md`, `paired_metrics.json`, and `provenance.json` in shareable storage.
+- [x] Validate an immutable USD pricing snapshot and report token, latency, and
+  estimated-cost totals plus per-correct efficiency; suppress cost estimates
+  when successful provider usage is incomplete.
 - [x] Include the exploratory, public-set, text-MCQ, and Python-arm asymmetry limitations in generated Markdown.
 - [x] Run:
 
@@ -556,25 +559,30 @@ git commit -m "feat: expose capability evaluation commands"
 ### Task 11: Prove the Full Workflow Without HLE Content
 
 **Files:**
-- Create: `tests/evaluation/fixtures/synthetic_mcq_rows.json`
 - Create: `tests/evaluation/test_end_to_end.py`
+- Create: `tests/evaluation/test_deepseek_live.py`
+- Modify: `bayesprobe/evaluation/config.py`
+- Modify: `bayesprobe/evaluation/runner.py`
+- Modify: `bayesprobe/evaluation/scoring.py`
+- Modify: `bayesprobe/evaluation/cli.py`
+- Modify: `configs/hle-pilot-v0.1.example.json`
 - Modify: `docs/ARCHITECTURE.md`
 - Modify: `docs/superpowers/specs/2026-07-11-hle-text-mcq-capability-pilot-design.md`
 
-- [ ] Add 100 self-authored synthetic MCQs with synthetic ids and categories; no HLE-derived wording, answers, ids, metadata, or canary.
-- [ ] Run prepare -> paired fake-provider execution -> interruption -> resume -> score -> report end to end.
-- [ ] Assert 200 terminal arm/sample results, no duplicate provider/Python records, stable experiment identity, one score marker, correct aggregate metrics, and a clean leak scan.
-- [ ] Add an opt-in live DeepSeek smoke over one self-authored problem gated by `BAYESPROBE_RUN_DEEPSEEK_LIVE=1` and `DEEPSEEK_API_KEY`; never load HLE in the smoke.
-- [ ] Document architecture, restricted/shareable paths, exact formal protocol, resource expectations, and claims that remain prohibited.
-- [ ] Mark the design status implemented only after every verification command succeeds.
-- [ ] Run focused integration tests:
+- [x] Add 100 self-authored synthetic MCQs with synthetic ids and categories; no HLE-derived wording, answers, ids, metadata, or canary.
+- [x] Run prepare -> paired fake-provider execution -> interruption -> resume -> score -> report end to end.
+- [x] Assert 200 terminal arm/sample results, no duplicate provider/Python records, stable experiment identity, one score marker, correct aggregate metrics, and a clean leak scan.
+- [x] Add an opt-in live DeepSeek smoke over one self-authored problem gated by `BAYESPROBE_RUN_DEEPSEEK_LIVE=1` and `DEEPSEEK_API_KEY`; never load HLE in the smoke.
+- [x] Document architecture, restricted/shareable paths, exact formal protocol, resource expectations, and claims that remain prohibited.
+- [x] Mark the design status implemented only after every verification command succeeds.
+- [x] Run focused integration tests:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_end_to_end.py \
   -q -p no:cacheprovider
 ```
 
-- [ ] Run the entire offline suite:
+- [x] Run the entire offline suite:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
@@ -585,18 +593,24 @@ git status --short
 
 Expected: all Python and Node tests pass, live tests skip by default, diff check is clean, and only intentional files are modified.
 
-- [ ] Run Docker isolation suite again after the full regression suite:
+- [x] Run Docker isolation suite again after the full regression suite:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+BAYESPROBE_RUN_DOCKER_TESTS=1 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   tests/evaluation/test_python_sandbox_integration.py -q -p no:cacheprovider
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
-git add tests/evaluation/fixtures/synthetic_mcq_rows.json \
-  tests/evaluation/test_end_to_end.py docs/ARCHITECTURE.md \
+git add tests/evaluation/test_end_to_end.py \
+  tests/evaluation/test_deepseek_live.py bayesprobe/evaluation/artifacts.py \
+  bayesprobe/provider_telemetry.py bayesprobe/evaluation/config.py \
+  bayesprobe/evaluation/runner.py bayesprobe/evaluation/scoring.py \
+  bayesprobe/evaluation/cli.py configs/hle-pilot-v0.1.example.json \
+  tests/evaluation/test_runner.py tests/evaluation/test_scoring.py \
+  docs/ARCHITECTURE.md \
+  docs/superpowers/plans/2026-07-11-hle-text-mcq-capability-pilot.md \
   docs/superpowers/specs/2026-07-11-hle-text-mcq-capability-pilot-design.md
 git commit -m "test: verify HLE capability pilot workflow"
 ```

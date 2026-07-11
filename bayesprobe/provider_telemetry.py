@@ -93,7 +93,7 @@ class JsonlProviderInvocationObserver:
                 0o600,
             )
             try:
-                os.write(descriptor, payload)
+                _write_all(descriptor, payload)
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
@@ -207,6 +207,15 @@ def _sanitize(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [_sanitize(item) for item in value]
     return value
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written < 1:
+            raise OSError("provider telemetry write made no progress")
+        remaining = remaining[written:]
 
 
 __all__ = [

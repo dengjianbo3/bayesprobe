@@ -239,7 +239,11 @@ def preflight_config(tmp_path: Path):
             "pricing_snapshot": {
                 "as_of": "2026-07-11",
                 "currency": "USD",
-                "rates": {"input": 1},
+                "rates": {
+                    "input_uncached_per_million_tokens": 1,
+                    "input_cached_per_million_tokens": 0.25,
+                    "output_per_million_tokens": 4,
+                },
                 "status": "frozen",
             },
         }
@@ -301,6 +305,26 @@ def test_preflight_rejects_missing_provider_key_before_run(tmp_path: Path):
             prepared,
             PreflightSandbox(),
             environ={},
+            run_command=clean_git_command,
+            repo_root=tmp_path,
+        )
+
+
+def test_preflight_rejects_incomplete_pricing_snapshot(tmp_path: Path):
+    config = preflight_config(tmp_path)
+    config.pricing_snapshot["rates"].pop("output_per_million_tokens")
+    prepared = SimpleNamespace(
+        dataset_revision="b" * 40,
+        requested_sample_count=100,
+        manifest_sha256="c" * 64,
+    )
+
+    with pytest.raises(ValueError, match="pricing snapshot rates"):
+        run_capability_preflight(
+            config,
+            prepared,
+            PreflightSandbox(),
+            environ={"DEEPSEEK_API_KEY": "sk-runtime-only"},
             run_command=clean_git_command,
             repo_root=tmp_path,
         )

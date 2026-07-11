@@ -24,7 +24,11 @@
   "pricing_snapshot": {
     "as_of": "REPLACE_BEFORE_FORMAL_RUN",
     "currency": "USD",
-    "rates": {},
+    "rates": {
+      "input_cached_per_million_tokens": null,
+      "input_uncached_per_million_tokens": null,
+      "output_per_million_tokens": null
+    },
     "status": "operator_must_freeze_before_formal_run"
   },
   "prompt_registry": {

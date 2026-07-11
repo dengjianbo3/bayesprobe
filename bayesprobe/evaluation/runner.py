@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from bayesprobe.evaluation.artifacts import CapabilityArtifactStore
-from bayesprobe.evaluation.config import CapabilityExperimentConfig
+from bayesprobe.evaluation.config import (
+    CapabilityExperimentConfig,
+    validate_pricing_snapshot,
+)
 from bayesprobe.evaluation.contracts import ArmCaseResult, EvaluationCase, ExperimentArm
 from bayesprobe.evaluation.python_probe import (
     DockerPythonSandbox,
@@ -150,8 +153,7 @@ def run_capability_preflight(
         raise ValueError("prepared sample count does not match frozen config")
     if not _SHA256.fullmatch(str(prepared.manifest_sha256).lower()):
         raise ValueError("prepared selection manifest hash is invalid")
-    if config.pricing_snapshot.get("status") != "frozen":
-        raise ValueError("pricing snapshot must be frozen before capability run")
+    validate_pricing_snapshot(config.pricing_snapshot)
     prompts = config.prompt_registry.get("prompts")
     if not isinstance(prompts, Mapping) or not prompts:
         raise ValueError("prompt registry must contain frozen prompts")

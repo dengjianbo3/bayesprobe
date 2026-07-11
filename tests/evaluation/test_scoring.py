@@ -165,6 +165,40 @@ def populate_store(store, sample_cases):
             store.write_terminal_result(by_sample_arm[(case.sample_id, arm)])
 
 
+def populate_provider_telemetry(store, sample_cases):
+    usage_by_arm = {
+        "direct_flash": {
+            "input_tokens": 100,
+            "cached_input_tokens": 20,
+            "reasoning_tokens": 10,
+            "output_tokens": 50,
+            "total_tokens": 150,
+        },
+        "bayesprobe_python": {
+            "input_tokens": 200,
+            "cached_input_tokens": 40,
+            "reasoning_tokens": 20,
+            "output_tokens": 100,
+            "total_tokens": 300,
+        },
+    }
+    latency_by_arm = {"direct_flash": 2.0, "bayesprobe_python": 4.0}
+    for case in sample_cases:
+        for arm in ("direct_flash", "bayesprobe_python"):
+            path = store.paths_for(arm, case.sample_id).provider_invocations_path
+            path.write_text(
+                json.dumps(
+                    {
+                        "latency_seconds": latency_by_arm[arm],
+                        "outcome": "success",
+                        "usage": usage_by_arm[arm],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+
 def test_score_service_writes_once_and_shareable_outputs_omit_raw_content(tmp_path: Path):
     sample_cases = cases()
     store = CapabilityArtifactStore(
@@ -212,6 +246,104 @@ def test_score_service_writes_once_and_shareable_outputs_omit_raw_content(tmp_pa
             report_root=tmp_path / "reports",
             bootstrap_resamples=100,
         )
+
+
+def test_score_service_reports_frozen_cost_and_per_correct_efficiency(tmp_path: Path):
+    sample_cases = cases()
+    store = CapabilityArtifactStore(
+        tmp_path / "restricted",
+        identity(),
+        secret=b"fixed-test-secret" * 2,
+    )
+    populate_store(store, sample_cases)
+    populate_provider_telemetry(store, sample_cases)
+    pricing_snapshot = {
+        "as_of": "2026-07-11",
+        "currency": "USD",
+        "rates": {
+            "input_uncached_per_million_tokens": 2.0,
+            "input_cached_per_million_tokens": 0.5,
+            "output_per_million_tokens": 8.0,
+        },
+        "status": "frozen",
+    }
+
+    paths = score_and_write_experiment(
+        artifact_store=store,
+        cases=sample_cases,
+        gold=gold_store(),
+        categories={},
+        report_root=tmp_path / "reports",
+        pricing_snapshot=pricing_snapshot,
+        bootstrap_resamples=100,
+    )
+
+    summary = json.loads(paths.summary_json.read_text(encoding="utf-8"))
+    telemetry = summary["provider_telemetry"]
+    assert summary["pricing_snapshot"]["rates"] == pricing_snapshot["rates"]
+    assert len(summary["pricing_snapshot"]["sha256"]) == 64
+    assert telemetry["direct_flash"]["estimated_cost"] == pytest.approx(0.00342)
+    assert telemetry["direct_flash"]["total_tokens_per_correct"] == 300
+    assert telemetry["direct_flash"]["latency_seconds_per_correct"] == 4
+    assert telemetry["direct_flash"]["estimated_cost_per_correct"] == pytest.approx(
+        0.00114
+    )
+    assert telemetry["bayesprobe_python"]["estimated_cost"] == pytest.approx(
+        0.00684
+    )
+    assert telemetry["bayesprobe_python"]["total_tokens_per_correct"] == 450
+    assert telemetry["bayesprobe_python"]["latency_seconds_per_correct"] == 6
+    assert telemetry["bayesprobe_python"][
+        "estimated_cost_per_correct"
+    ] == pytest.approx(0.00171)
+    markdown = paths.summary_markdown.read_text(encoding="utf-8")
+    assert "## Resource Use" in markdown
+    assert "Pricing snapshot" in markdown
+
+
+def test_score_service_does_not_report_zero_cost_for_missing_success_usage(
+    tmp_path: Path,
+):
+    sample_cases = cases()
+    store = CapabilityArtifactStore(
+        tmp_path / "restricted",
+        identity(),
+        secret=b"fixed-test-secret" * 2,
+    )
+    populate_store(store, sample_cases)
+    populate_provider_telemetry(store, sample_cases)
+    missing_usage_path = store.paths_for(
+        "direct_flash", sample_cases[0].sample_id
+    ).provider_invocations_path
+    record = json.loads(missing_usage_path.read_text(encoding="utf-8"))
+    record["usage"]["output_tokens"] = None
+    missing_usage_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    paths = score_and_write_experiment(
+        artifact_store=store,
+        cases=sample_cases,
+        gold=gold_store(),
+        categories={},
+        report_root=tmp_path / "reports",
+        pricing_snapshot={
+            "as_of": "2026-07-11",
+            "currency": "USD",
+            "rates": {
+                "input_uncached_per_million_tokens": 2.0,
+                "input_cached_per_million_tokens": 0.5,
+                "output_per_million_tokens": 8.0,
+            },
+            "status": "frozen",
+        },
+        bootstrap_resamples=100,
+    )
+
+    telemetry = json.loads(paths.summary_json.read_text(encoding="utf-8"))[
+        "provider_telemetry"
+    ]["direct_flash"]
+    assert telemetry["billable_usage_coverage"] == pytest.approx(5 / 6)
+    assert telemetry["estimated_cost"] is None
+    assert telemetry["estimated_cost_per_correct"] is None
 
 
 def test_score_service_rejects_incomplete_or_manifest_mismatch(tmp_path: Path):

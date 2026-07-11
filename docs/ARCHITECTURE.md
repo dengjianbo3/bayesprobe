@@ -1,6 +1,6 @@
 # BayesProbe Architecture
 
-Date: 2026-07-08
+Date: 2026-07-11
 Status: living architecture document
 
 This document is the engineering architecture entry point for the current
@@ -498,7 +498,8 @@ Current limitation:
 
 - datasets are still small methodology fixtures, not a full benchmark suite;
 - metrics are useful MVP checks, not a full comparative evaluation suite;
-- no external provider cost/latency accounting yet.
+- the legacy fixture harness has no external provider cost/latency accounting;
+  the separate capability-evaluation layer below does.
 
 ### 4.14 Public SDK
 
@@ -565,6 +566,53 @@ Current limitations:
 - no multi-user auth;
 - no provider-side cost/latency telemetry.
 
+### 4.16 Capability Evaluation Layer
+
+Current package: `bayesprobe/evaluation/`
+
+This package is intentionally separate from the fixture-oriented
+`BenchmarkHarness`. It implements the HLE text-only multiple-choice capability
+pilot without changing BayesProbe core semantics:
+
+```text
+gated dataset -> restricted runtime manifest + isolated gold store
+  -> DirectFlashArm / BayesProbePythonArm
+  -> atomic per-arm terminal results
+  -> separate exact-label scorer
+  -> restricted details + leak-scanned aggregate report
+```
+
+Implemented responsibilities:
+
+- require a full immutable dataset revision and deterministic stratified
+  selection;
+- canonicalize multiple-choice framing while checking that the public
+  initializer creates the same hypotheses;
+- keep gold unavailable to both experiment arms and to resume decisions;
+- freeze DeepSeek V4 Flash request controls and record every provider attempt;
+- run model-generated Python only through a digest-resolved Docker image with
+  no network, no host mounts, a read-only filesystem, non-root execution, and
+  bounded process, memory, CPU, time, and output resources;
+- preserve Python/reasoning results as `ExternalSignal`s that still pass
+  through the Evidence Integration Gate;
+- run a deterministic 200-task paired schedule with HMAC case paths, atomic
+  status transitions, and correctness-blind resume;
+- score exact labels once after all tasks are terminal and report Wilson,
+  paired bootstrap, exact McNemar, calibration, process, latency, token, and
+  estimated-cost metrics, including resource use per correct answer;
+- validate a dated USD pricing snapshot with explicit uncached-input,
+  cached-input, and output rates per million tokens; publish its hash and rates
+  with every estimate, and suppress cost when successful calls lack billable
+  token usage;
+- recursively reject benchmark content, raw model/Python material, canaries,
+  reversible ids, or provider secrets from shareable artifacts;
+- expose `bayesprobe eval prepare|run|score|report` as four separate phases.
+
+The engineering workflow is verified on 100 self-authored synthetic cases and
+real Docker isolation tests. No formal HLE result is claimed until an operator
+accepts gated access, supplies a pinned dataset commit, freezes the pricing
+snapshot, and completes the four-phase protocol.
+
 ## 5. Implemented Capability Matrix
 
 | Area | Status | Notes |
@@ -584,12 +632,13 @@ Current limitations:
 | Benchmark harness | Good MVP | Toy and real methodology-path fixtures, suite/report flow, net-direction scoring, and belief-quality metrics exist. |
 | Config/CLI/SDK | Strong MVP | JSON experiment config, CLI, public core/runners/tool seams, package-root imports, and external execution regression coverage exist. |
 | Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; synchronous JSON and autonomous NDJSON progress streams expose completed runs, normalized belief, integrated cycles, provider errors, and full traces. Streaming remains phase/cycle-only and credentials remain request-scoped and page-memory-only. |
-| Model gateway | Good MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Provider observability remains future work. |
+| Model gateway | Strong MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Explicit request controls, bounded transport retries, and per-attempt token/latency/error observation are implemented. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
 | Multi-agent protocol | Partial | Projection-as-signal semantics exist; transport/protocol schema not complete. |
 | Production persistence | Missing | JSONL only. |
-| Large benchmark suite | Partial | v0.2 methodology fixture exists; HLE-scale and comparative benchmark suites remain future work. |
+| Capability evaluation | Strong MVP | Gold-isolated HLE text-MCQ preparation, Direct/BayesProbe paired arms, Docker Python probes, resumable execution, exact scoring, paired/calibration metrics, and leak-safe reports are implemented and synthetic-tested. Formal HLE execution remains pending. |
+| Large benchmark suite | Partial | The HLE text-MCQ-100 runner is ready, but no formal gated run or broader multimodal/exact-answer suite has been completed. |
 
 ## 6. Progress Estimate
 
@@ -598,7 +647,7 @@ Using the final target as:
 > configurable, experiment-ready, provider-backed, tool-backed, multi-agent-ready
 > BayesProbe agent engineering kernel
 
-the current implementation is approximately **81%-84% complete**.
+the current implementation is approximately **88%-91% complete**.
 
 Using the narrower provider-backed MVP target as:
 
@@ -612,9 +661,10 @@ experimental validity, and production hardening rather than a change of
 direction:
 
 - broader tool adapters for search, retrieval, and domain systems;
-- provider registry, cost/latency telemetry, and operational observability;
-- provider adapter prompt-registry snapshots;
-- larger benchmark datasets, HLE-scale experiments, and comparative baselines;
+- provider registry and production operations around the implemented
+  per-attempt telemetry;
+- execution of the frozen HLE pilot and interpretation of its paired results;
+- broader multimodal, exact-answer, search, and retrieval evaluation arms;
 - stronger synchronized/multi-agent protocol objects and transport;
 - production-grade persistence and experiment trace packaging.
 
@@ -737,9 +787,10 @@ Why this is next:
 ### Phase 2: Provider Adapter and Prompt Registry Metadata
 
 Status: OpenAI Responses, OpenAI-compatible Chat Completions, and recorded
-fixture adapters are implemented as MVPs, and prompt/model invocation artifact
-summaries are implemented as v0.1; broader provider registry, prompt registry
-snapshots, live fixture capture, and provider observability remain future work.
+fixture adapters are implemented as MVPs. Explicit experiment controls,
+sanitized request hashes, bounded transport retries, prompt/schema provenance,
+and per-attempt token/latency/error observation are implemented; a broader
+provider registry and production telemetry backend remain future work.
 
 Goal:
 
@@ -755,9 +806,10 @@ Shape:
 
 ### Phase 3: Benchmark Expansion
 
-Status: v0.2 methodology fixture, recorded provider replay, and belief-quality
-metrics are implemented as the current experimental slice; larger datasets and
-comparative baselines remain future work.
+Status: v0.2 methodology fixtures and recorded provider replay remain the core
+regression slice. The HLE text-MCQ-100 paired evaluation workflow is now
+implemented and synthetic-tested; formal gated execution and wider comparative
+baselines remain future work.
 
 Goal:
 
@@ -829,6 +881,9 @@ Adapter tests should assert:
   API keys in artifacts;
 - tool gateway returns only active signals;
 - config objects propagate into benchmark and experiment runs.
+- provider attempts preserve token/error metadata without exposing secrets;
+- Docker Python probes have no host fallback and enforce network, filesystem,
+  process, timeout, and output boundaries.
 
 Benchmark tests should assert:
 
@@ -838,6 +893,16 @@ Benchmark tests should assert:
 - update direction accuracy;
 - belief-state quality metrics;
 - ledger visibility for evidence, updates, and schema failures.
+
+Capability-evaluation tests should assert:
+
+- deterministic HLE eligibility, quotas, selection, and manifest hashing on
+  synthetic rows;
+- strict runtime/gold separation and one-time exact scoring;
+- both arms reach terminal state and resume never uses correctness;
+- terminal failures remain in the denominator;
+- paired, calibration, process, and provider metrics are reproducible;
+- shareable outputs pass recursive leak scans.
 
 ## 10. Architectural Non-Goals
 

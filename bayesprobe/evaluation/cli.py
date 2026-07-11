@@ -185,6 +185,7 @@ def score_capability_experiment(experiment_path: Path) -> str:
         categories=selection.categories,
         report_root=config.report_root,
         provider_secrets=[provider_secret] if provider_secret else [],
+        pricing_snapshot=config.pricing_snapshot,
     )
     return (
         "BayesProbe capability scoring complete: "

@@ -1,7 +1,7 @@
 # HLE Text-MCQ Python-Augmented Capability Pilot Design
 
 Date: 2026-07-11
-Status: Ready for user review
+Status: Implemented; formal gated HLE run pending
 
 ## 1. Context
 
@@ -564,6 +564,26 @@ It excludes:
 Raw token counts are authoritative. Estimated cost is derived from a dated,
 immutable `pricing_snapshot.json`; the report does not present a cost without
 also reporting the rate snapshot and token totals.
+
+The v0.1 snapshot uses USD rates per million tokens:
+
+```json
+{
+  "as_of": "YYYY-MM-DD",
+  "currency": "USD",
+  "rates": {
+    "input_uncached_per_million_tokens": 0.0,
+    "input_cached_per_million_tokens": 0.0,
+    "output_per_million_tokens": 0.0
+  },
+  "status": "frozen"
+}
+```
+
+The operator replaces the example values with the provider rates applicable on
+the snapshot date before preparation. If any successful provider attempt lacks
+input or output token usage, the report publishes billable-usage coverage and
+marks estimated cost unavailable instead of treating the missing usage as zero.
 
 ## 11. Retry and Error Semantics
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,12 @@ _PROVIDER_POLICY = {
     "max_output_tokens": 65536,
     "timeout_seconds": 900,
 }
+
+_PRICING_RATE_KEYS = (
+    "input_uncached_per_million_tokens",
+    "input_cached_per_million_tokens",
+    "output_per_million_tokens",
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +128,32 @@ def load_capability_config(path: str | Path) -> CapabilityExperimentConfig:
     if not isinstance(payload, Mapping):
         raise ValueError("capability config must be a JSON object")
     return capability_config_from_mapping(payload, base_dir=config_path.parent)
+
+
+def validate_pricing_snapshot(snapshot: Mapping[str, Any]) -> dict[str, float]:
+    if snapshot.get("status") != "frozen":
+        raise ValueError("pricing snapshot must be frozen before capability run")
+    if not isinstance(snapshot.get("as_of"), str) or not snapshot["as_of"].strip():
+        raise ValueError("pricing snapshot as_of must not be empty")
+    if snapshot.get("currency") != "USD":
+        raise ValueError("pricing snapshot currency must be USD")
+    rates = snapshot.get("rates")
+    if not isinstance(rates, Mapping) or set(rates) != set(_PRICING_RATE_KEYS):
+        raise ValueError(
+            "pricing snapshot rates must define uncached input, cached input, "
+            "and output per million tokens"
+        )
+    normalized: dict[str, float] = {}
+    for key in _PRICING_RATE_KEYS:
+        value = rates[key]
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"pricing snapshot rate {key} must be non-negative")
+        normalized[key] = float(value)
+    return normalized
 
 
 def capability_config_from_mapping(
@@ -253,4 +286,5 @@ __all__ = [
     "CapabilityExperimentConfig",
     "capability_config_from_mapping",
     "load_capability_config",
+    "validate_pricing_snapshot",
 ]

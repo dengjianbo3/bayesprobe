@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from bayesprobe.evaluation.artifacts import CapabilityArtifactStore
+from bayesprobe.evaluation.config import validate_pricing_snapshot
 from bayesprobe.evaluation.contracts import ArmCaseResult, EvaluationCase
 from bayesprobe.evaluation.hle import EvaluationGoldStore
 from bayesprobe.evaluation.statistics import (
@@ -190,6 +192,7 @@ def score_and_write_experiment(
     report_root: str | Path,
     restricted_canaries: Sequence[str] = (),
     provider_secrets: Sequence[str] = (),
+    pricing_snapshot: Mapping[str, Any] | None = None,
     bootstrap_resamples: int = 10_000,
 ) -> ScoreArtifactPaths:
     score_marker = artifact_store.root / "scoring_complete.json"
@@ -214,6 +217,12 @@ def score_and_write_experiment(
 
     target_report_root = Path(report_root) / artifact_store.identity.experiment_id
     target_report_root.mkdir(parents=True, exist_ok=True)
+    provider_telemetry = _provider_telemetry_summary(
+        artifact_store,
+        cases,
+        correct_by_arm={arm: report.arms[arm]["correct"] for arm in _ARMS},
+        pricing_snapshot=pricing_snapshot,
+    )
     summary_payload = {
         "artifact_version": "0.1",
         "experiment_id": artifact_store.identity.experiment_id,
@@ -221,7 +230,7 @@ def score_and_write_experiment(
         "paired": report.paired,
         "category_metrics": report.category_metrics,
         "process_metrics": report.process_metrics,
-        "provider_telemetry": _provider_telemetry_summary(artifact_store, cases),
+        "provider_telemetry": provider_telemetry,
         "limitations": [
             "Exploratory capability pilot; not a preregistered causal estimate.",
             "Public HLE text-only multiple-choice subset.",
@@ -229,6 +238,12 @@ def score_and_write_experiment(
             "BayesProbe posterior values are internal belief mass, not calibrated probability.",
         ],
     }
+    if pricing_snapshot is not None:
+        validate_pricing_snapshot(pricing_snapshot)
+        summary_payload["pricing_snapshot"] = {
+            **dict(pricing_snapshot),
+            "sha256": _canonical_sha256(pricing_snapshot),
+        }
     paired_payload = {
         "artifact_version": "0.1",
         "experiment_id": artifact_store.identity.experiment_id,
@@ -464,10 +479,20 @@ def _aggregate_process_metrics(results: Sequence[ArmCaseResult]) -> dict[str, An
 def _provider_telemetry_summary(
     store: CapabilityArtifactStore,
     cases: Sequence[EvaluationCase],
+    *,
+    correct_by_arm: Mapping[str, int],
+    pricing_snapshot: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    rates = (
+        validate_pricing_snapshot(pricing_snapshot)
+        if pricing_snapshot is not None
+        else None
+    )
     summary = {
         arm: {
             "attempts": 0,
+            "successful_attempts": 0,
+            "billable_usage_attempts": 0,
             "input_tokens": 0,
             "cached_input_tokens": 0,
             "reasoning_tokens": 0,
@@ -491,6 +516,12 @@ def _provider_telemetry_summary(
                     record.get("latency_seconds", 0)
                 )
                 usage = record.get("usage", {})
+                if record.get("outcome") == "success":
+                    summary[arm]["successful_attempts"] += 1
+                    if type(usage.get("input_tokens")) is int and type(
+                        usage.get("output_tokens")
+                    ) is int:
+                        summary[arm]["billable_usage_attempts"] += 1
                 for key in (
                     "input_tokens",
                     "cached_input_tokens",
@@ -507,6 +538,43 @@ def _provider_telemetry_summary(
             summary[arm]["latency_seconds"], 6
         )
         summary[arm]["outcomes"] = dict(sorted(outcome_counts[arm].items()))
+        successful_attempts = summary[arm]["successful_attempts"]
+        summary[arm]["billable_usage_coverage"] = (
+            summary[arm]["billable_usage_attempts"] / successful_attempts
+            if successful_attempts
+            else None
+        )
+        correct = correct_by_arm[arm]
+        summary[arm]["total_tokens_per_correct"] = (
+            summary[arm]["total_tokens"] / correct if correct else None
+        )
+        summary[arm]["latency_seconds_per_correct"] = (
+            summary[arm]["latency_seconds"] / correct if correct else None
+        )
+        has_complete_billable_usage = (
+            summary[arm]["billable_usage_attempts"] == successful_attempts
+        )
+        if rates is not None and has_complete_billable_usage:
+            uncached_input = max(
+                summary[arm]["input_tokens"]
+                - summary[arm]["cached_input_tokens"],
+                0,
+            )
+            estimated_cost = (
+                uncached_input
+                * rates["input_uncached_per_million_tokens"]
+                + summary[arm]["cached_input_tokens"]
+                * rates["input_cached_per_million_tokens"]
+                + summary[arm]["output_tokens"]
+                * rates["output_per_million_tokens"]
+            ) / 1_000_000
+            summary[arm]["estimated_cost"] = round(estimated_cost, 12)
+            summary[arm]["estimated_cost_per_correct"] = (
+                round(estimated_cost / correct, 12) if correct else None
+            )
+        elif rates is not None:
+            summary[arm]["estimated_cost"] = None
+            summary[arm]["estimated_cost_per_correct"] = None
     return summary
 
 
@@ -532,12 +600,58 @@ def _summary_markdown(payload: Mapping[str, Any]) -> str:
         f"- Direct only: {paired['direct_only']}",
         f"- Both wrong: {paired['both_wrong']}",
         "",
+        "## Resource Use",
+        "",
+        *_resource_markdown_lines(payload),
+        "",
         "## Limitations",
         "",
         *(f"- {limitation}" for limitation in payload["limitations"]),
         "",
     ]
     return "\n".join(lines)
+
+
+def _resource_markdown_lines(payload: Mapping[str, Any]) -> list[str]:
+    telemetry = payload["provider_telemetry"]
+    lines = []
+    for arm, label in (
+        ("bayesprobe_python", "BayesProbe Python"),
+        ("direct_flash", "Direct Flash"),
+    ):
+        values = telemetry[arm]
+        lines.append(
+            f"- {label}: {values['total_tokens']} tokens; "
+            f"{values['latency_seconds']:.3f} provider-seconds"
+        )
+    pricing = payload.get("pricing_snapshot")
+    if isinstance(pricing, Mapping):
+        lines.append(
+            f"- Pricing snapshot: {pricing['as_of']} {pricing['currency']} "
+            f"(`{pricing['sha256']}`)"
+        )
+        for arm, label in (
+            ("bayesprobe_python", "BayesProbe Python"),
+            ("direct_flash", "Direct Flash"),
+        ):
+            estimated_cost = telemetry[arm]["estimated_cost"]
+            formatted_cost = (
+                f"{estimated_cost:.6f} {pricing['currency']}"
+                if estimated_cost is not None
+                else "unavailable (incomplete token usage)"
+            )
+            lines.append(f"- {label} estimated cost: {formatted_cost}")
+    return lines
+
+
+def _canonical_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _mean_or_none(values: Sequence[float]) -> float | None:
