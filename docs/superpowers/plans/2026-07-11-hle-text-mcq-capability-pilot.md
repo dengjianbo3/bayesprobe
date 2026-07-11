@@ -412,10 +412,10 @@ git commit -m "feat: add isolated Python probe gateway"
 - Modify: `bayesprobe/evaluation/python_probe.py`
 - Test: `tests/evaluation/test_bayesprobe_arm.py`
 
-- [ ] Write a RED end-to-end test with a scripted provider proving one choice hypothesis per label, uniform prior, provider-backed probe planning, Python/reasoning signal generation, evidence judgment, posterior update, and final answer projection.
-- [ ] Assert the test fails if the deterministic probe executor is accidentally used.
-- [ ] Write RED tests for fixed `max_cycles=4`, `max_probes_per_cycle=2`, `stop_on_no_probes=True`, disabled confidence/stability stops, full final posterior distribution, process counters, reversals, and first-final-top cycle.
-- [ ] Construct explicitly:
+- [x] Write a RED end-to-end test with a scripted provider proving one choice hypothesis per label, uniform prior, provider-backed probe planning, Python/reasoning signal generation, evidence judgment, posterior update, and final answer projection.
+- [x] Assert the test fails if the deterministic probe executor is accidentally used.
+- [x] Write RED tests for fixed `max_cycles=4`, `max_probes_per_cycle=2`, `stop_on_no_probes=True`, disabled confidence/stability stops, full final posterior distribution, process counters, reversals, and first-final-top cycle.
+- [x] Construct explicitly:
 
 ```text
 BayesProbeInitializer
@@ -426,8 +426,8 @@ BayesProbeCore
 AutonomousQuestionRunner
 ```
 
-- [ ] Keep the answer label equal to the projected best hypothesis id. Do not allow the arm or gateway to inspect gold.
-- [ ] Run:
+- [x] Keep the answer label equal to the projected best hypothesis id. Do not allow the arm or gateway to inspect gold.
+- [x] Run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
@@ -435,7 +435,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   -q -p no:cacheprovider
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add bayesprobe/evaluation/arms.py bayesprobe/evaluation/python_probe.py \

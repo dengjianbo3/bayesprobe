@@ -362,6 +362,21 @@ class PythonAugmentedProbeToolGateway:
         self._sandbox = sandbox
         self._image = image
         self._execution_observer = execution_observer
+        self._process_counts = {
+            "python_plans": 0,
+            "python_plan_repairs": 0,
+            "python_mode_plans": 0,
+            "reasoning_plans": 0,
+            "python_executions": 0,
+            "python_repairs": 0,
+            "python_successes": 0,
+            "python_timeouts": 0,
+            "python_policy_failures": 0,
+        }
+
+    @property
+    def process_metrics(self) -> dict[str, int]:
+        return dict(self._process_counts)
 
     def execute_probe(
         self,
@@ -379,7 +394,9 @@ class PythonAugmentedProbeToolGateway:
                     reason="unverified Python probe planning failed",
                 )
             ]
+        self._process_counts["python_plans"] += 1
         if plan.mode == "reasoning":
+            self._process_counts["reasoning_plans"] += 1
             try:
                 return [
                     self._reasoning_signal(
@@ -396,6 +413,7 @@ class PythonAugmentedProbeToolGateway:
                         reason="unverified reasoning probe failed",
                     )
                 ]
+        self._process_counts["python_mode_plans"] += 1
         assert plan.code is not None
         image = self._resolved_image()
         first_record = self._execute_code(
@@ -472,6 +490,7 @@ class PythonAugmentedProbeToolGateway:
             )
         except (ModelGatewayValidationError, TypeError, ValueError) as error:
             validation_error = str(error)
+        self._process_counts["python_plan_repairs"] += 1
         repaired_payload = self._model_gateway.complete_structured(
             StructuredModelRequest(
                 task="repair_python_probe_plan",
@@ -551,6 +570,15 @@ class PythonAugmentedProbeToolGateway:
                 repair_attempt_index=repair_attempt_index,
             )
         )
+        self._process_counts["python_executions"] += 1
+        if repair_attempt_index > 0:
+            self._process_counts["python_repairs"] += 1
+        if record.success and record.stdout.strip():
+            self._process_counts["python_successes"] += 1
+        if record.timed_out:
+            self._process_counts["python_timeouts"] += 1
+        if record.policy_violation:
+            self._process_counts["python_policy_failures"] += 1
         self._observe_execution(record)
         return record
 
