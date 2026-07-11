@@ -96,6 +96,10 @@ class BayesProbeCore:
             belief_state,
             integration.evidence_events,
         )
+        canonical_evidence_events = _canonical_new_evidence_events(
+            belief_state.ledger_refs.get("evidence_events", []),
+            evidence_events,
+        )
         probe_candidates = integration.probe_candidates
         updated_hypotheses, belief_updates = solve_updates(
             run_id=cycle.run_id,
@@ -125,7 +129,7 @@ class BayesProbeCore:
         ]
         merged_ledger_refs["evidence_events"] = _append_unique(
             existing_ledger_refs.get("evidence_events", []),
-            [event.id for event in evidence_events],
+            [event.id for event in canonical_evidence_events],
         )
         merged_ledger_refs["belief_updates"] = [
             *existing_ledger_refs.get("belief_updates", []),
@@ -164,7 +168,7 @@ class BayesProbeCore:
             cycle=integrated_cycle,
             signals=normalized_signals,
             probe_set=probe_set,
-            evidence_events=evidence_events,
+            evidence_events=canonical_evidence_events,
             belief_updates=belief_updates,
             evolutions=evolutions,
             probe_candidates=probe_candidates,
@@ -290,3 +294,17 @@ def _append_unique(existing: list[str], additions: list[str]) -> list[str]:
             result.append(item)
             seen.add(item)
     return result
+
+
+def _canonical_new_evidence_events(
+    existing_ids: list[str],
+    events: list[EvidenceEvent],
+) -> list[EvidenceEvent]:
+    seen = set(existing_ids)
+    canonical: list[EvidenceEvent] = []
+    for event in events:
+        if event.id in seen:
+            continue
+        canonical.append(event)
+        seen.add(event.id)
+    return canonical

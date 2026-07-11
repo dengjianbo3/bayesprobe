@@ -1720,15 +1720,22 @@ class StaticEventGate(EvidenceIntegrationGate):
 
 
 class StaticEventCore(BayesProbeCore):
-    def __init__(self, events: list[EvidenceEvent]) -> None:
+    def __init__(
+        self,
+        events: list[EvidenceEvent],
+        *,
+        ledger: JsonlLedgerStore | None = None,
+    ) -> None:
         self.static_gate = StaticEventGate(events)
-        super().__init__()
+        super().__init__(ledger=ledger)
 
     def _create_evidence_integration_gate(self):
         return self.static_gate
 
 
-def test_core_marks_past_evidence_replay_and_preserves_exact_state():
+def test_core_marks_past_evidence_replay_without_duplicate_canonical_record(
+    tmp_path: Path,
+):
     replay = EvidenceEvent(
         id="E_replay",
         derived_from_signal="S_replay",
@@ -1737,7 +1744,9 @@ def test_core_marks_past_evidence_replay_and_preserves_exact_state():
         content="Replay fixture.",
         likelihoods={"H1": LikelihoodBand.STRONGLY_CONFIRMING},
     )
-    core = StaticEventCore([replay])
+    ledger = JsonlLedgerStore(tmp_path / "past-replay-ledger.jsonl")
+    ledger.append("evidence_event", replay)
+    core = StaticEventCore([replay], ledger=ledger)
     belief_state = make_belief_state(cycle_id="cycle_0").model_copy(
         update={
             "hypotheses": [
@@ -1761,9 +1770,14 @@ def test_core_marks_past_evidence_replay_and_preserves_exact_state():
     assert result.belief_updates == []
     assert result.hypothesis_evolutions == []
     assert result.belief_state.ledger_refs["evidence_events"] == ["E_replay"]
+    evidence_records = ledger.read_all("evidence_event")
+    assert [record["payload"]["id"] for record in evidence_records] == ["E_replay"]
+    assert [record["payload"]["discard_reason"] for record in evidence_records] == [
+        None
+    ]
 
 
-def test_core_marks_same_cycle_duplicate_event_and_appends_identity_once():
+def test_core_persists_same_cycle_duplicate_identity_once(tmp_path: Path):
     duplicate = EvidenceEvent(
         id="E_same_cycle",
         derived_from_signal="S_same_cycle",
@@ -1772,7 +1786,8 @@ def test_core_marks_same_cycle_duplicate_event_and_appends_identity_once():
         content="Same-cycle duplicate fixture.",
         likelihoods={"H1": LikelihoodBand.MODERATELY_CONFIRMING},
     )
-    core = StaticEventCore([duplicate, duplicate])
+    ledger = JsonlLedgerStore(tmp_path / "same-cycle-replay-ledger.jsonl")
+    core = StaticEventCore([duplicate, duplicate], ledger=ledger)
 
     result = core.integrate_cycle(
         cycle=make_cycle("cycle_same_id"),
@@ -1789,6 +1804,49 @@ def test_core_marks_same_cycle_duplicate_event_and_appends_identity_once():
     }
     assert len(result.belief_updates) == 2
     assert result.belief_state.ledger_refs["evidence_events"] == ["E_same_cycle"]
+    evidence_records = ledger.read_all("evidence_event")
+    assert [record["payload"]["id"] for record in evidence_records] == [
+        "E_same_cycle"
+    ]
+    assert [record["payload"]["discard_reason"] for record in evidence_records] == [
+        None
+    ]
+
+
+def test_core_persists_discarded_first_occurrence_as_canonical_audit(
+    tmp_path: Path,
+):
+    discarded = EvidenceEvent(
+        id="E_gate_discarded",
+        derived_from_signal="S_gate_discarded",
+        target_hypotheses=["H1"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content="Gate-discarded fixture.",
+        likelihoods={"H1": LikelihoodBand.STRONGLY_CONFIRMING},
+        discard_reason="schema_violation: invalid judgment",
+    )
+    ledger = JsonlLedgerStore(tmp_path / "discarded-canonical-ledger.jsonl")
+    core = StaticEventCore([discarded, discarded], ledger=ledger)
+
+    result = core.integrate_cycle(
+        cycle=make_cycle("cycle_gate_discarded"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_gate_discarded"),
+        signals=[make_active_signal("pending")],
+    )
+
+    assert result.evidence_events == [discarded, discarded]
+    assert result.belief_updates == []
+    assert result.belief_state.ledger_refs["evidence_events"] == [
+        "E_gate_discarded"
+    ]
+    evidence_records = ledger.read_all("evidence_event")
+    assert [record["payload"]["id"] for record in evidence_records] == [
+        "E_gate_discarded"
+    ]
+    assert [record["payload"]["discard_reason"] for record in evidence_records] == [
+        "schema_violation: invalid judgment"
+    ]
 
 
 def test_future_cycle_belief_state_is_rejected():

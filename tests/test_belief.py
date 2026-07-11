@@ -451,10 +451,14 @@ def test_duplicate_targets_create_one_independent_update():
     assert [update.hypothesis_id for update in updates] == ["H1"]
 
 
-def test_inactive_independent_target_is_unchanged_and_not_audited():
+@pytest.mark.parametrize(
+    "status",
+    [HypothesisStatus.RETIRED, HypothesisStatus.ARCHIVED],
+)
+def test_inactive_independent_target_is_unchanged_and_not_audited(status):
     state = _belief_state(
         [
-            _hypothesis("H1", 0.2, status=HypothesisStatus.RETIRED),
+            _hypothesis("H1", 0.2, status=status),
             _hypothesis("H2", 0.6),
         ],
         relation=HypothesisRelation.INDEPENDENT,
@@ -483,5 +487,5 @@ def test_independent_update_is_numerically_stable_at_probability_boundary(bounda
 
     hypotheses, updates = solve_updates("run_belief", "cycle_1", state, [event])
 
-    assert 0.0 <= hypotheses[0].posterior <= 1.0
+    assert hypotheses[0].posterior == boundary
     assert len(updates) == 1
