@@ -455,21 +455,21 @@ git commit -m "feat: add Python-augmented BayesProbe evaluation arm"
 - Test: `tests/evaluation/test_config.py`
 - Test: `tests/evaluation/test_runner.py`
 
-- [ ] Write RED config tests for exact v0.1 defaults: DeepSeek endpoint/model, temperature 0, top-p 1, thinking enabled, max reasoning, 65,536 output tokens, 900-second timeout, 4 cycles, 2 probes, and environment-variable key names only.
-- [ ] Write RED identity tests over code SHA, dataset revision, manifest/config/prompt hashes, pricing snapshot, and resolved image digest.
-- [ ] Write RED scheduling tests for deterministic 200-task order and hash-balanced arm-first ordering.
-- [ ] Write RED state tests for `pending -> running -> completed|terminal_failed`, atomic temp/fsync/rename, immutable terminal results, stale-running recovery, and pending-only resume.
-- [ ] Write RED tests proving runner construction receives runtime manifest only and has no gold-store property/path.
-- [ ] Implement direct concurrency 8, BayesProbe concurrency 4, and sandbox semaphore 4 with injectable executors for deterministic unit tests.
-- [ ] Preflight must reject missing API key, mutable/unresolved image tag, unavailable Docker, incomplete manifest, dirty/floating provenance, or tracked restricted path.
-- [ ] Run:
+- [x] Write RED config tests for exact v0.1 defaults: DeepSeek endpoint/model, temperature 0, top-p 1, thinking enabled, max reasoning, 65,536 output tokens, 900-second timeout, 4 cycles, 2 probes, and environment-variable key names only.
+- [x] Write RED identity tests over code SHA, dataset revision, manifest/config/prompt hashes, pricing snapshot, and resolved image digest.
+- [x] Write RED scheduling tests for deterministic 200-task order and hash-balanced arm-first ordering.
+- [x] Write RED state tests for `pending -> running -> completed|terminal_failed`, atomic temp/fsync/rename, immutable terminal results, stale-running recovery, and pending-only resume.
+- [x] Write RED tests proving runner construction receives runtime manifest only and has no gold-store property/path.
+- [x] Implement direct concurrency 8, BayesProbe concurrency 4, and sandbox semaphore 4 with injectable executors for deterministic unit tests.
+- [x] Preflight must reject missing API key, mutable/unresolved image tag, unavailable Docker, incomplete manifest, dirty/floating provenance, or tracked restricted path.
+- [x] Run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_config.py \
   tests/evaluation/test_runner.py -q -p no:cacheprovider
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add bayesprobe/evaluation/config.py bayesprobe/evaluation/runner.py \

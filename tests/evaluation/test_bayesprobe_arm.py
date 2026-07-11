@@ -1,7 +1,9 @@
 import pytest
+from pathlib import Path
 
 from bayesprobe.evaluation.arms import BayesProbePythonArm
 from bayesprobe.evaluation.contracts import EvaluationCase
+from bayesprobe.ledger import JsonlLedgerStore
 
 
 class CapabilityGateway:
@@ -149,3 +151,22 @@ def test_bayesprobe_arm_adds_case_context_to_every_provider_request_without_gold
         assert request.metadata["arm"] == "bayesprobe_python"
         assert request.metadata["sample_id"] == "synthetic_1"
         assert "gold" not in str(request.input).lower()
+
+
+def test_bayesprobe_arm_uses_case_scoped_ledger_factory(tmp_path: Path):
+    ledger_path = tmp_path / "case" / "ledger.jsonl"
+    arm = BayesProbePythonArm(
+        CapabilityGateway(),
+        ForbiddenSandbox(),
+        ledger_factory=lambda case: JsonlLedgerStore(ledger_path),
+    )
+
+    result = arm.run_case(make_case())
+
+    assert result.state == "completed"
+    record_types = {
+        record["record_type"] for record in JsonlLedgerStore(ledger_path).read_all()
+    }
+    assert {"run", "belief_state", "probe_execution", "evidence_event"}.issubset(
+        record_types
+    )

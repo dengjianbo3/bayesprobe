@@ -13,6 +13,7 @@ from bayesprobe.evaluation.python_probe import (
     ResolvedSandboxImage,
 )
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import (
     EvidenceJudgmentRepairPolicy,
     ModelGateway,
@@ -138,14 +139,21 @@ class BayesProbePythonArm:
         image: ResolvedSandboxImage | None = None,
         invocation_metadata: Mapping[str, Any] | None = None,
         execution_observer: PythonExecutionObserver | None = None,
+        execution_observer_factory: Callable[
+            [EvaluationCase], PythonExecutionObserver
+        ]
+        | None = None,
         run_result_observer: Callable[[AutonomousQuestionRunResult], None] | None = None,
+        ledger_factory: Callable[[EvaluationCase], JsonlLedgerStore] | None = None,
     ) -> None:
         self._model_gateway = model_gateway
         self._sandbox = sandbox
         self._image = image
         self._invocation_metadata = dict(invocation_metadata or {})
         self._execution_observer = execution_observer
+        self._execution_observer_factory = execution_observer_factory
         self._run_result_observer = run_result_observer
+        self._ledger_factory = ledger_factory
         self.run_config = AutonomousQuestionRunConfig(
             max_cycles=4,
             max_probes_per_cycle=2,
@@ -170,9 +178,15 @@ class BayesProbePythonArm:
             contextual_gateway,
             self._sandbox,
             image=self._image,
-            execution_observer=self._execution_observer,
+            execution_observer=(
+                self._execution_observer_factory(case)
+                if self._execution_observer_factory is not None
+                else self._execution_observer
+            ),
         )
+        ledger = self._ledger_factory(case) if self._ledger_factory is not None else None
         core = BayesProbeCore(
+            ledger=ledger,
             model_gateway=contextual_gateway,
             judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
         )
