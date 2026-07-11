@@ -1,7 +1,7 @@
 # BayesProbe Epistemic Kernel Completion Design
 
 Date: 2026-07-11
-Status: Section decisions approved; written review pending
+Status: Approved; implementation plan ready
 
 ## 1. Decision Summary
 
