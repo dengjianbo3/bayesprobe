@@ -15,10 +15,13 @@ from bayesprobe.model_gateway import (
 from bayesprobe.schemas import (
     AnswerChoice,
     AnswerContract,
+    AnswerValueType,
     BeliefState,
     FramedHypothesis,
     FramingMethod,
     HypothesisFrame,
+    HypothesisCompetition,
+    HypothesisCoverage,
     HypothesisRelation,
     TaskFrame,
     TaskKind,
@@ -257,7 +260,8 @@ class RecordedTaskFramer:
             source = _strict_recorded_task_frame(self._frame)
             hypothesis_frame = HypothesisFrame(
                 frame_id=f"{run_id}_hypothesis_frame",
-                relation=source.hypothesis_frame.relation,
+                competition=source.hypothesis_frame.competition,
+                coverage=source.hypothesis_frame.coverage,
                 hypotheses=source.hypothesis_frame.hypotheses,
                 rival_sets=source.hypothesis_frame.rival_sets,
                 coverage_statement=source.hypothesis_frame.coverage_statement,
@@ -352,8 +356,11 @@ _ANSWER_CONTRACT_FIELDS = {
     "permits_synthesis",
 }
 _RECORDED_TASK_FRAME_FIELDS = {
+    "schema_version",
     "task_frame_id",
+    "admission_decision_id",
     "task_kind",
+    "answer_relationship",
     "normalized_question",
     "task_context",
     "answer_contract",
@@ -363,7 +370,8 @@ _RECORDED_TASK_FRAME_FIELDS = {
 }
 _RECORDED_HYPOTHESIS_FRAME_FIELDS = {
     "frame_id",
-    "relation",
+    "competition",
+    "coverage",
     "hypotheses",
     "rival_sets",
     "coverage_statement",
@@ -378,6 +386,7 @@ _RECORDED_FRAMED_HYPOTHESIS_FIELDS = {
     "initial_prior",
     "falsifiers",
     "predictions",
+    "answer_value",
 }
 _PROVIDER_BELIEF_FIELDS = {
     "id",
@@ -398,7 +407,9 @@ def _open_frame_request(input: TaskFramingInput) -> StructuredModelRequest:
             "question": question,
             "task_context": task_context,
             "supported_task_kinds": [
-                kind.value for kind in TaskKind if kind != TaskKind.MULTIPLE_CHOICE
+                kind.value
+                for kind in TaskKind
+                if kind not in {TaskKind.MULTIPLE_CHOICE, TaskKind.EXACT_ANSWER}
             ],
             "supported_relations": [
                 relation.value for relation in HypothesisRelation
@@ -433,7 +444,9 @@ def _repair_frame_request(
                 "hypothesis": sorted(_HYPOTHESIS_FIELDS),
             },
             "supported_task_kinds": [
-                kind.value for kind in TaskKind if kind != TaskKind.MULTIPLE_CHOICE
+                kind.value
+                for kind in TaskKind
+                if kind not in {TaskKind.MULTIPLE_CHOICE, TaskKind.EXACT_ANSWER}
             ],
             "supported_relations": [
                 relation.value for relation in HypothesisRelation
@@ -620,6 +633,45 @@ def _answer_contract_from_mapping(payload: Any) -> AnswerContract:
     )
 
 
+def _strict_recorded_answer_contract(value: Any) -> AnswerContract:
+    payload = _recorded_model_payload(
+        value,
+        AnswerContract,
+        {
+            "objective",
+            "answer_value_type",
+            "answer_format",
+            "required_sections",
+            "decision_form",
+            "permits_synthesis",
+        },
+        "answer contract",
+    )
+    if type(payload["answer_value_type"]) is not AnswerValueType:
+        raise TaskFramingError(
+            "recorded answer_value_type must be an AnswerValueType"
+        )
+    if type(payload["permits_synthesis"]) is not bool:
+        raise TaskFramingError("recorded permits_synthesis must be a boolean")
+    required_sections = _native_required_text_list(
+        payload["required_sections"], "recorded required_sections"
+    )
+    if len(required_sections) != len(set(required_sections)):
+        raise TaskFramingError("recorded required_sections must be unique")
+    return AnswerContract(
+        objective=_native_required_text(payload["objective"], "recorded objective"),
+        answer_value_type=payload["answer_value_type"],
+        answer_format=_native_required_text(
+            payload["answer_format"], "recorded answer_format"
+        ),
+        required_sections=required_sections,
+        decision_form=_native_required_text(
+            payload["decision_form"], "recorded decision_form"
+        ),
+        permits_synthesis=payload["permits_synthesis"],
+    )
+
+
 def _strict_recorded_task_frame(frame: TaskFrame) -> TaskFrame:
     payload = _recorded_model_payload(
         frame,
@@ -629,6 +681,12 @@ def _strict_recorded_task_frame(frame: TaskFrame) -> TaskFrame:
     )
     if type(payload["task_kind"]) is not TaskKind:
         raise TaskFramingError("recorded task_kind must be a TaskKind")
+    if payload["schema_version"] != "v0.1":
+        raise TaskFramingError("recorded schema_version must be v0.1")
+    if payload["admission_decision_id"] is not None:
+        raise TaskFramingError("recorded v0.1 admission_decision_id must be null")
+    if payload["answer_relationship"] is not None:
+        raise TaskFramingError("recorded v0.1 answer_relationship must be null")
     if type(payload["framing_method"]) is not FramingMethod:
         raise TaskFramingError("recorded framing_method must be a FramingMethod")
     if type(payload["task_context"]) is not str:
@@ -637,12 +695,9 @@ def _strict_recorded_task_frame(frame: TaskFrame) -> TaskFrame:
         raise TaskFramingError("recorded framing_trace must be an object")
 
     raw_contract = payload["answer_contract"]
-    contract_payload = (
-        dict(raw_contract.__dict__)
-        if isinstance(raw_contract, AnswerContract)
-        else raw_contract
-    )
+    contract_payload = _strict_recorded_answer_contract(raw_contract)
     return TaskFrame(
+        schema_version="v0.1",
         task_frame_id=_native_required_text(
             payload["task_frame_id"], "recorded task_frame_id"
         ),
@@ -651,7 +706,7 @@ def _strict_recorded_task_frame(frame: TaskFrame) -> TaskFrame:
             payload["normalized_question"], "recorded normalized_question"
         ),
         task_context=payload["task_context"],
-        answer_contract=_answer_contract_from_mapping(contract_payload),
+        answer_contract=contract_payload,
         hypothesis_frame=_strict_recorded_hypothesis_frame(
             payload["hypothesis_frame"]
         ),
@@ -667,9 +722,13 @@ def _strict_recorded_hypothesis_frame(value: Any) -> HypothesisFrame:
         _RECORDED_HYPOTHESIS_FRAME_FIELDS,
         "hypothesis frame",
     )
-    if type(payload["relation"]) is not HypothesisRelation:
+    if type(payload["competition"]) is not HypothesisCompetition:
         raise TaskFramingError(
-            "recorded hypothesis frame relation must be a HypothesisRelation"
+            "recorded hypothesis frame competition must be a HypothesisCompetition"
+        )
+    if type(payload["coverage"]) is not HypothesisCoverage:
+        raise TaskFramingError(
+            "recorded hypothesis frame coverage must be a HypothesisCoverage"
         )
     if type(payload["hypotheses"]) is not list:
         raise TaskFramingError("recorded hypotheses must be a list")
@@ -703,7 +762,8 @@ def _strict_recorded_hypothesis_frame(value: Any) -> HypothesisFrame:
 
     return HypothesisFrame(
         frame_id=_native_required_text(payload["frame_id"], "recorded frame_id"),
-        relation=payload["relation"],
+        competition=payload["competition"],
+        coverage=payload["coverage"],
         hypotheses=[
             _strict_recorded_framed_hypothesis(item)
             for item in payload["hypotheses"]
@@ -731,6 +791,9 @@ def _strict_recorded_framed_hypothesis(value: Any) -> FramedHypothesis:
         or not 0 <= initial_prior <= 1
     ):
         raise TaskFramingError("recorded initial_prior must be a probability float")
+    answer_value = payload["answer_value"]
+    if answer_value is not None and type(answer_value) not in {str, int, float}:
+        raise TaskFramingError("recorded answer_value must be scalar or null")
     return FramedHypothesis(
         id=_native_required_text(payload["id"], "recorded hypothesis id"),
         statement=_native_required_text(
@@ -745,6 +808,7 @@ def _strict_recorded_framed_hypothesis(value: Any) -> FramedHypothesis:
         predictions=_native_required_text_list(
             payload["predictions"], "recorded hypothesis predictions"
         ),
+        answer_value=answer_value,
     )
 
 
@@ -1113,55 +1177,11 @@ def _rival_sets(
 
 
 def migrate_legacy_belief_state(state: BeliefState) -> BeliefState:
-    if state.task_frame is not None:
+    if state.schema_version == "v0.2":
         return state
-    ids = [item.id for item in state.hypotheses]
-    if not ids:
-        raise ValueError("legacy belief state requires at least one hypothesis")
-    prior_total = sum(max(item.prior, 0.0) for item in state.hypotheses)
-    priors = (
-        [item.prior / prior_total for item in state.hypotheses]
-        if prior_total > 0
-        else [1.0 / len(ids)] * len(ids)
-    )
-    frame = TaskFrame(
-        task_frame_id=f"{state.run_id}_legacy_task_frame",
-        task_kind=TaskKind.DECISION,
-        normalized_question="Legacy categorical BayesProbe state.",
-        task_context="",
-        answer_contract=AnswerContract(
-            objective="Preserve legacy categorical belief behavior.",
-            required_sections=["answer", "uncertainty"],
-            decision_form="legacy_selection",
-            permits_synthesis=False,
-        ),
-        hypothesis_frame=HypothesisFrame(
-            frame_id=f"{state.run_id}_legacy_hypothesis_frame",
-            relation=HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
-            hypotheses=[
-                FramedHypothesis(
-                    id=item.id,
-                    statement=item.statement,
-                    type=item.type,
-                    scope=item.scope,
-                    initial_prior=priors[index],
-                    falsifiers=list(item.falsifiers)
-                    or [f"A reliable result falsifies legacy hypothesis {item.id}."],
-                    predictions=list(item.predictions)
-                    or [f"A reliable result supports legacy hypothesis {item.id}."],
-                )
-                for index, item in enumerate(state.hypotheses)
-            ],
-            rival_sets=_rival_sets(ids, HypothesisRelation.EXCLUSIVE_EXHAUSTIVE),
-            coverage_statement="Migrated legacy categorical hypothesis set.",
-            coverage_limitation=(
-                "Relation was assigned by the versioned legacy migration."
-            ),
-        ),
-        framing_method=FramingMethod.LEGACY_MIGRATION,
-        framing_trace={"migration": "legacy_categorical_v0.1"},
-    )
-    return state.model_copy(update={"task_frame": frame})
+    from bayesprobe.migrations import migrate_belief_state_v0_1
+
+    return migrate_belief_state_v0_1(state)
 
 
 __all__ = [

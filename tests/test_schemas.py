@@ -1,8 +1,12 @@
 import pytest
 
 import bayesprobe.schemas as schemas
+import bayesprobe
 
 from bayesprobe.schemas import (
+    AnswerContractOutline,
+    AnswerRelationship,
+    AnswerValueType,
     BeliefState,
     AnswerContract,
     ChangeMyMindCondition,
@@ -13,6 +17,8 @@ from bayesprobe.schemas import (
     ExternalSignal,
     FramedHypothesis,
     FramingMethod,
+    HypothesisCompetition,
+    HypothesisCoverage,
     Hypothesis,
     HypothesisFrame,
     HypothesisRelation,
@@ -25,10 +31,235 @@ from bayesprobe.schemas import (
     RunRegime,
     SignalKind,
     TaskFrame,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
     TaskKind,
     is_forbidden_secret_key_name,
     is_secret_like_value,
 )
+
+
+def make_v02_task_frame(
+    *,
+    task_kind: TaskKind = TaskKind.EXPLANATION,
+    competition: HypothesisCompetition = HypothesisCompetition.EXCLUSIVE,
+    coverage: HypothesisCoverage = HypothesisCoverage.OPEN,
+    priors: list[float] | None = None,
+    unresolved: float | None = 0.5,
+) -> TaskFrame:
+    prior_values = priors or [0.25, 0.25]
+    hypotheses = [
+        FramedHypothesis(
+            id=f"H{index}",
+            statement=f"Candidate {index} explains the observation.",
+            type="candidate",
+            scope="The stated task.",
+            initial_prior=prior,
+            falsifiers=[f"Candidate {index} is contradicted."],
+            predictions=[f"Candidate {index} predicts the observation."],
+            answer_value=f"candidate-{index}",
+        )
+        for index, prior in enumerate(prior_values, start=1)
+    ]
+    ids = [hypothesis.id for hypothesis in hypotheses]
+    rivals = (
+        {item: [other for other in ids if other != item] for item in ids}
+        if competition == HypothesisCompetition.EXCLUSIVE
+        else {item: [] for item in ids}
+    )
+    return TaskFrame(
+        schema_version="v0.2",
+        task_frame_id="v02_task_frame",
+        admission_decision_id="admission_1",
+        task_kind=task_kind,
+        answer_relationship=AnswerRelationship.SELECTION,
+        normalized_question="Which candidate answers the question?",
+        answer_contract=AnswerContract(
+            objective="Select the best supported candidate.",
+            answer_value_type=AnswerValueType.SHORT_TEXT,
+            answer_format="A short candidate value.",
+            required_sections=["answer", "uncertainty"],
+            decision_form="candidate_selection",
+            permits_synthesis=False,
+        ),
+        hypothesis_frame=HypothesisFrame(
+            frame_id="v02_hypothesis_frame",
+            competition=competition,
+            coverage=coverage,
+            hypotheses=hypotheses,
+            rival_sets=rivals,
+            coverage_statement="The named candidates are provisional.",
+            unresolved_alternative_mass=unresolved,
+        ),
+        framing_method=FramingMethod.EXPLICIT,
+    )
+
+
+def test_exact_answer_frame_is_exclusive_open_with_unresolved_mass():
+    frame = make_v02_task_frame(
+        task_kind=TaskKind.EXACT_ANSWER,
+        competition=HypothesisCompetition.EXCLUSIVE,
+        coverage=HypothesisCoverage.OPEN,
+        priors=[0.25, 0.25],
+        unresolved=0.50,
+    )
+
+    assert frame.answer_relationship == AnswerRelationship.SELECTION
+    assert frame.hypothesis_frame.coverage == HypothesisCoverage.OPEN
+    assert frame.hypothesis_frame.unresolved_alternative_mass == 0.50
+    assert "relation" not in frame.hypothesis_frame.model_dump()
+
+
+def test_exact_answer_frame_accepts_one_initial_candidate():
+    frame = make_v02_task_frame(
+        task_kind=TaskKind.EXACT_ANSWER,
+        priors=[0.5],
+        unresolved=0.5,
+    )
+
+    assert [item.id for item in frame.hypothesis_frame.hypotheses] == ["H1"]
+
+
+def test_independent_frame_rejects_shared_unresolved_mass():
+    with pytest.raises(
+        ValueError,
+        match="independent frames do not use shared unresolved mass",
+    ):
+        make_v02_task_frame(
+            competition=HypothesisCompetition.INDEPENDENT,
+            coverage=HypothesisCoverage.OPEN,
+            priors=[0.5, 0.5],
+            unresolved=0.2,
+        )
+
+
+def test_independent_exhaustive_frame_is_valid_without_shared_mass():
+    frame = make_v02_task_frame(
+        competition=HypothesisCompetition.INDEPENDENT,
+        coverage=HypothesisCoverage.EXHAUSTIVE,
+        priors=[0.5, 0.5],
+        unresolved=None,
+    )
+
+    assert frame.hypothesis_frame.coverage == HypothesisCoverage.EXHAUSTIVE
+
+
+def test_v02_belief_state_requires_frame_state_and_evidence_memory():
+    with pytest.raises(ValueError, match="v0.2 belief state requires frame_state"):
+        BeliefState(
+            schema_version="v0.2",
+            belief_state_id="bs",
+            run_id="run",
+            cycle_id="cycle_0",
+            hypotheses=[],
+            task_frame=make_v02_task_frame(),
+        )
+
+
+def test_v02_task_frame_rejects_compatibility_defaulted_answer_contract():
+    frame = make_v02_task_frame()
+    legacy_contract = AnswerContract(
+        objective="Select the best supported candidate.",
+        required_sections=["answer", "uncertainty"],
+        decision_form="candidate_selection",
+        permits_synthesis=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="v0.2 answer contract requires answer_value_type",
+    ):
+        TaskFrame.model_validate(
+            {
+                **frame.model_dump(mode="python", exclude={"answer_contract"}),
+                "answer_contract": legacy_contract,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "decision, message",
+    [
+        (
+            {
+                "attempt_id": "attempt_1",
+                "status": TaskAdmissionStatus.ADMITTED,
+                "epistemic_basis": ["The task requests a bounded answer."],
+                "reason": "The task is admissible.",
+            },
+            "admitted decisions require proposed_task_kind",
+        ),
+        (
+            {
+                "attempt_id": "attempt_1",
+                "status": TaskAdmissionStatus.NEEDS_REFRAMING,
+                "epistemic_basis": ["The answer target is ambiguous."],
+                "reason": "Clarification is required.",
+            },
+            "needs_reframing decisions require clarification_questions",
+        ),
+        (
+            {
+                "attempt_id": "attempt_1",
+                "status": TaskAdmissionStatus.OUT_OF_SCOPE,
+                "epistemic_basis": ["The request is not epistemically assessable."],
+                "proposed_task_kind": TaskKind.EXPLANATION,
+                "reason": "No supported task kind applies.",
+            },
+            "out_of_scope decisions must not propose a task kind",
+        ),
+    ],
+)
+def test_task_admission_decision_enforces_status_contract(decision, message):
+    with pytest.raises(ValueError, match=message):
+        TaskAdmissionDecision(**decision)
+
+
+def test_task_admission_decision_accepts_complete_admission():
+    decision = TaskAdmissionDecision(
+        attempt_id="attempt_1",
+        status=TaskAdmissionStatus.ADMITTED,
+        epistemic_basis=["The task requests a bounded answer."],
+        proposed_task_kind=TaskKind.EXACT_ANSWER,
+        answer_contract_outline=AnswerContractOutline(
+            objective="Return the requested scalar.",
+            answer_value_type=AnswerValueType.NUMBER,
+            decision_form="exact_answer",
+            permits_synthesis=False,
+            required_sections=["answer"],
+        ),
+        reason="The task is admissible.",
+    )
+
+    assert decision.status == TaskAdmissionStatus.ADMITTED
+
+
+def test_v02_domain_contracts_are_publicly_exported():
+    names = {
+        "TaskAdmissionStatus",
+        "AnswerRelationship",
+        "AnswerValueType",
+        "HypothesisCompetition",
+        "HypothesisCoverage",
+        "FrameAdequacyStatus",
+        "FrameFit",
+        "EpistemicOrigin",
+        "ProbePurpose",
+        "CapabilityKind",
+        "ProjectionMode",
+        "AnswerContractOutline",
+        "TaskAdmissionDecision",
+        "FrameState",
+        "SignalProvenance",
+        "EvidenceMemorySnapshot",
+        "FrameMassUpdate",
+        "CapabilityDescriptor",
+        "CapabilityDecision",
+        "migrate_task_frame_v0_1",
+        "migrate_belief_state_v0_1",
+    }
+
+    assert names.issubset(set(bayesprobe.__all__))
 
 
 def _open_task_frame() -> TaskFrame:

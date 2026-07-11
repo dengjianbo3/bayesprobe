@@ -8,7 +8,14 @@ import pytest
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ScriptedModelGateway, StructuredModelRequest
-from bayesprobe.schemas import AnswerChoice, AnswerContract, HypothesisRelation, TaskKind
+from bayesprobe.schemas import (
+    AnswerChoice,
+    AnswerContract,
+    BeliefState,
+    Hypothesis,
+    HypothesisRelation,
+    TaskKind,
+)
 from bayesprobe.task_framing import (
     ExplicitTaskFramer,
     HypothesisSeed,
@@ -18,6 +25,7 @@ from bayesprobe.task_framing import (
     TaskFramingError,
     TaskFramingInput,
     TaskFramingRepairPolicy,
+    migrate_legacy_belief_state,
     task_frame_from_mapping,
 )
 
@@ -74,6 +82,31 @@ VALID_OPEN_FRAME = {
     "coverage_statement": "Covers the target effect and the primary confounder.",
     "coverage_limitation": "Conditional task interactions remain possible.",
 }
+
+
+def test_deprecated_belief_migration_wrapper_uses_explicit_v01_migration():
+    legacy = BeliefState(
+        belief_state_id="legacy_belief",
+        run_id="legacy_run",
+        cycle_id="cycle_0",
+        hypotheses=[
+            Hypothesis(
+                id="H1",
+                statement="The legacy claim is correct.",
+                scope="The legacy task.",
+                prior=1.0,
+                posterior=1.0,
+            )
+        ],
+    )
+
+    migrated = migrate_legacy_belief_state(legacy)
+
+    assert migrated.schema_version == "v0.2"
+    assert migrated.frame_state is not None
+    assert migrated.evidence_memory is not None
+
+    assert migrate_legacy_belief_state(migrated) is migrated
 
 
 def test_explicit_framer_uses_structured_choices_without_text_parsing():
