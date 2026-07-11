@@ -130,8 +130,19 @@ def _normalized_semantic_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
-_SECRET_VALUE_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{12,}")
-_FORBIDDEN_SECRET_KEY_PARTS = ("apikey", "authorization", "token", "secret")
+_SECRET_VALUE_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{12,}", re.IGNORECASE)
+_FORBIDDEN_SECRET_KEY_PARTS = (
+    "apikey",
+    "authorization",
+    "token",
+    "secret",
+    "privatekey",
+    "password",
+    "passwd",
+    "credential",
+    "credentials",
+    "accesskey",
+)
 
 
 def is_secret_like_value(value: str) -> bool:

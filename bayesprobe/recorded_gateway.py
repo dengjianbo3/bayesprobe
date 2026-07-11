@@ -9,8 +9,7 @@ from bayesprobe.model_gateway import (
     ModelGatewayValidationError,
     StructuredModelRequest,
 )
-
-_SECRET_KEY_PARTS = ("api_key", "apikey", "authorization", "token", "secret")
+from bayesprobe.schemas import is_forbidden_secret_key_name, is_secret_like_value
 
 
 class RecordedModelGateway:
@@ -26,9 +25,19 @@ class RecordedModelGateway:
     ) -> None:
         if not isinstance(fixture_name, str) or not fixture_name.strip():
             raise ValueError("recorded model fixture_name must not be empty")
-        self.fixture_name = fixture_name.strip()
-        self.responses = list(responses)
-        self.metadata = dict(metadata or {})
+        clean_fixture_name = fixture_name.strip()
+        copied_responses = list(responses)
+        copied_metadata = dict(metadata or {})
+        _reject_secrets(
+            {
+                "fixture_name": clean_fixture_name,
+                "responses": copied_responses,
+                "metadata": copied_metadata,
+            }
+        )
+        self.fixture_name = clean_fixture_name
+        self.responses = copied_responses
+        self.metadata = copied_metadata
         self.fixture_path = Path(fixture_path) if fixture_path is not None else None
         self.requests: list[StructuredModelRequest] = []
 
@@ -93,13 +102,18 @@ def _validate_entry(entry: Any) -> None:
 def _reject_secrets(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            key_text = str(key).replace("_", "").replace("-", "").lower()
-            if any(secret_part in key_text for secret_part in _SECRET_KEY_PARTS):
+            key_text = str(key)
+            if (
+                is_forbidden_secret_key_name(key_text)
+                or is_secret_like_value(key_text)
+            ):
                 raise ValueError("recorded model fixture must not contain secrets")
             _reject_secrets(item)
-    elif isinstance(value, list):
+    elif isinstance(value, list | tuple):
         for item in value:
             _reject_secrets(item)
+    elif isinstance(value, str) and is_secret_like_value(value):
+        raise ValueError("recorded model fixture must not contain secrets")
 
 
 __all__ = ["RecordedModelGateway"]

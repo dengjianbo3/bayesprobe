@@ -6,6 +6,7 @@ import pytest
 
 from bayesprobe.model_gateway import ModelGatewayValidationError, StructuredModelRequest
 from bayesprobe.recorded_gateway import RecordedModelGateway
+from bayesprobe.schemas import is_forbidden_secret_key_name, is_secret_like_value
 
 
 def write_fixture(path: Path, payload: dict) -> None:
@@ -97,6 +98,83 @@ def test_recorded_model_gateway_rejects_fixture_with_api_key(tmp_path: Path):
         RecordedModelGateway.from_json(path)
 
 
+@pytest.mark.parametrize(
+    "secret_key",
+    [
+        "private_key",
+        "privatekey",
+        "password",
+        "passwd",
+        "credential",
+        "credentials",
+        "access_key",
+        "accesskey",
+    ],
+)
+def test_shared_secret_key_predicate_covers_normalized_variants(secret_key: str):
+    assert is_forbidden_secret_key_name(secret_key)
+
+
+@pytest.mark.parametrize(
+    "secret_key",
+    ["private_key", "password", "credential", "access_key"],
+)
+def test_recorded_model_gateway_rejects_nested_forbidden_secret_keys(
+    tmp_path: Path,
+    secret_key: str,
+):
+    path = tmp_path / "unsafe.json"
+    payload = recorded_fixture_payload()
+    payload["responses"][0]["response"]["nested"] = {secret_key: "unsafe"}
+    write_fixture(path, payload)
+
+    with pytest.raises(
+        ValueError,
+        match="recorded model fixture must not contain secrets",
+    ):
+        RecordedModelGateway.from_json(path)
+
+
+def test_recorded_model_gateway_rejects_embedded_secret_like_value(tmp_path: Path):
+    path = tmp_path / "unsafe.json"
+    payload = recorded_fixture_payload()
+    payload["metadata"]["description"] = (
+        "Captured provider trace includes sk-abcdefghijklmnop mid-sentence."
+    )
+    write_fixture(path, payload)
+
+    with pytest.raises(
+        ValueError,
+        match="recorded model fixture must not contain secrets",
+    ):
+        RecordedModelGateway.from_json(path)
+
+
+def test_recorded_model_gateway_rejects_direct_constructor_secret_material():
+    with pytest.raises(
+        ValueError,
+        match="recorded model fixture must not contain secrets",
+    ):
+        RecordedModelGateway(
+            fixture_name="direct_fixture",
+            responses=recorded_fixture_payload()["responses"],
+            metadata={"nested": {"credential": "unsafe"}},
+        )
+
+
+def test_recorded_model_gateway_accepts_ordinary_tokenization_prose(tmp_path: Path):
+    path = tmp_path / "ordinary.json"
+    payload = recorded_fixture_payload()
+    payload["metadata"]["description"] = (
+        "Tokenization research compares semantic units without provider credentials."
+    )
+    write_fixture(path, payload)
+
+    gateway = RecordedModelGateway.from_json(path)
+
+    assert gateway.metadata["description"].startswith("Tokenization research")
+
+
 def test_recorded_model_gateway_replays_malformed_response_for_gate_validation(
     tmp_path: Path,
 ):
@@ -130,13 +208,12 @@ def _secret_like_entries(value: Any, path: str = "$") -> list[str]:
     if isinstance(value, dict):
         for key, item in value.items():
             key_path = f"{path}.{key}"
-            normalized_key = str(key).replace("_", "").replace("-", "").lower()
-            if any(part in normalized_key for part in ("apikey", "authorization", "token", "secret")):
+            if is_forbidden_secret_key_name(key) or is_secret_like_value(key):
                 findings.append(key_path)
             findings.extend(_secret_like_entries(item, key_path))
     elif isinstance(value, list):
         for index, item in enumerate(value):
             findings.extend(_secret_like_entries(item, f"{path}[{index}]"))
-    elif isinstance(value, str) and value.lower().startswith("sk-"):
+    elif isinstance(value, str) and is_secret_like_value(value):
         findings.append(path)
     return findings
