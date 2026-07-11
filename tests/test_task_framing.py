@@ -73,3 +73,37 @@ def test_explicit_framer_rejects_unseeded_open_question():
                 question="这个命题应该如何验证？",
             )
         )
+
+
+def test_explicit_framer_can_frame_without_materializing(monkeypatch):
+    framer = ExplicitTaskFramer()
+    materializations = 0
+    original_frame = ExplicitTaskFramer.frame
+
+    def count_materializations(self, input):
+        nonlocal materializations
+        materializations += 1
+        return original_frame(self, input)
+
+    monkeypatch.setattr(ExplicitTaskFramer, "frame", count_materializations)
+
+    assert framer.can_frame(
+        TaskFramingInput(
+            run_id="run_choices",
+            question="Which result follows?",
+            answer_choices=[
+                AnswerChoice(label="A", text="First result"),
+                AnswerChoice(label="B", text="Second result"),
+            ],
+        )
+    )
+    assert framer.can_frame(
+        TaskFramingInput(
+            run_id="run_legacy",
+            question="Which result follows? Answer Choices: A. First result B. Second result",
+        )
+    )
+    assert not framer.can_frame(
+        TaskFramingInput(run_id="run_open", question="How should this claim be tested?")
+    )
+    assert materializations == 0

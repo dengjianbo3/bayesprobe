@@ -69,6 +69,13 @@ _CHOICE_INLINE_RE = re.compile(
 
 
 class ExplicitTaskFramer:
+    def can_frame(self, input: TaskFramingInput) -> bool:
+        return bool(
+            input.answer_choices
+            or input.hypothesis_seeds
+            or parse_legacy_answer_choice_frame(input.question) is not None
+        )
+
     def frame(self, input: TaskFramingInput) -> TaskFrame:
         parsed = (
             None

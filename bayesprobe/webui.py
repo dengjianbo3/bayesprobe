@@ -491,13 +491,15 @@ def _prepare_autonomous_run(
 
 
 def _preflight_task_framing(input: InitializeRunInput) -> None:
-    ExplicitTaskFramer().frame(
-        TaskFramingInput(
-            run_id=input.run_id,
-            question=input.problem,
-            answer_choices=list(input.answer_choices),
-        )
+    framing_input = TaskFramingInput(
+        run_id=input.run_id,
+        question=input.problem,
+        answer_choices=list(input.answer_choices),
     )
+    if not ExplicitTaskFramer().can_frame(framing_input):
+        raise TaskFramingError(
+            "unseeded open question requires a model or recorded task framer"
+        )
 
 
 def _task_framing_error_payload() -> dict[str, Any]:

@@ -258,6 +258,37 @@ def test_webui_unseeded_open_question_is_framing_validation_before_provider_exec
     assert FakeWebUIChatOpenAI.created_with == []
 
 
+def test_webui_materializes_explicit_frames_once_and_unseeded_frames_never(monkeypatch):
+    materializations = 0
+    original_frame = webui.ExplicitTaskFramer.frame
+
+    def count_materializations(self, input):
+        nonlocal materializations
+        materializations += 1
+        return original_frame(self, input)
+
+    monkeypatch.setattr(webui.ExplicitTaskFramer, "frame", count_materializations)
+
+    status, _ = handle_autonomous_run_request(
+        {
+            "question": "Does the explicit WebUI path materialize once?",
+            "answer_choices": deterministic_answer_choices(),
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        }
+    )
+
+    assert status == 200
+    assert materializations == 1
+
+    materializations = 0
+    status, _ = handle_autonomous_run_request(
+        {"question": "How should this claim be tested?"}
+    )
+
+    assert status == 400
+    assert materializations == 0
+
+
 def test_webui_stream_returns_preflight_validation_as_http_error_payload():
     events = []
     status, error = handle_autonomous_stream_request(
