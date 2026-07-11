@@ -289,6 +289,7 @@ def _hypothesis_from_frame(
         falsifiers=list(framed.falsifiers),
         predictions=list(framed.predictions),
         created_by="initial",
+        answer_value=framed.answer_value,
     )
 
 

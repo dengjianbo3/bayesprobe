@@ -200,6 +200,111 @@ def test_exact_answer_framing_preserves_open_coverage():
     assert [item.answer_value for item in frame.hypothesis_frame.hypotheses] == [7, 9]
 
 
+def _exact_answer_frame_with_values(
+    answer_value_type: str,
+    values: list[str | int | float | bool],
+) -> dict:
+    frame = deepcopy(EXACT_ANSWER_FRAME)
+    frame["answer_contract"]["answer_value_type"] = answer_value_type
+    frame["hypotheses"] = [
+        {
+            **deepcopy(EXACT_ANSWER_FRAME["hypotheses"][index]),
+            "answer_value": value,
+        }
+        for index, value in enumerate(values)
+    ]
+    return frame
+
+
+@pytest.mark.parametrize(
+    "answer_value_type,values",
+    [
+        ("choice_label", ["A", "B"]),
+        ("integer", [7, 9]),
+        ("number", [7, 9.5]),
+        ("short_text", ["alpha", "beta"]),
+        ("structured_text", ['{"answer": 7}', '{"answer": 9}']),
+    ],
+)
+def test_exact_answer_candidates_accept_values_matching_contract_type(
+    answer_value_type,
+    values,
+):
+    frame = ModelTaskFramer(
+        ScriptedModelGateway(
+            {
+                "frame_open_question": _exact_answer_frame_with_values(
+                    answer_value_type,
+                    values,
+                )
+            }
+        )
+    ).frame(
+        TaskFramingInput(
+            run_id=f"run_exact_{answer_value_type}",
+            question="Which value satisfies the constraints?",
+            admission_decision=admitted_decision(),
+        )
+    )
+
+    assert [item.answer_value for item in frame.hypothesis_frame.hypotheses] == values
+
+
+@pytest.mark.parametrize(
+    "answer_value_type,invalid_value,valid_value",
+    [
+        ("choice_label", 1, "A"),
+        ("integer", 7.0, 7),
+        ("integer", True, 7),
+        ("number", "7", 7),
+        ("number", False, 7.5),
+        ("short_text", 7, "seven"),
+        ("structured_text", 7, '{"answer": 7}'),
+    ],
+)
+def test_exact_answer_candidate_type_mismatch_consumes_one_repair(
+    answer_value_type,
+    invalid_value,
+    valid_value,
+):
+    invalid = _exact_answer_frame_with_values(answer_value_type, [invalid_value])
+    repaired = _exact_answer_frame_with_values(answer_value_type, [valid_value])
+    gateway = QueueModelGateway([invalid, repaired])
+
+    frame = ModelTaskFramer(gateway).frame(
+        TaskFramingInput(
+            run_id=f"run_exact_repair_{answer_value_type}",
+            question="Which value satisfies the constraints?",
+            admission_decision=admitted_decision(),
+        )
+    )
+
+    assert frame.hypothesis_frame.hypotheses[0].answer_value == valid_value
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+
+
+def test_second_exact_answer_candidate_type_mismatch_fails_closed():
+    malformed = _exact_answer_frame_with_values("integer", [7.0])
+    gateway = QueueModelGateway([malformed, malformed])
+
+    with pytest.raises(TaskFramingError, match="invalid after 1 repair attempt"):
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(
+                run_id="run_exact_type_fail_closed",
+                question="Which integer satisfies the constraints?",
+                admission_decision=admitted_decision(),
+            )
+        )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+
+
 def test_zero_candidate_exact_frame_fails_after_one_repair():
     zero_candidate_frame = {**EXACT_ANSWER_FRAME, "hypotheses": []}
     gateway = QueueModelGateway([zero_candidate_frame, zero_candidate_frame])

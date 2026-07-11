@@ -5,6 +5,7 @@ import pytest
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
+from bayesprobe.model_gateway import ScriptedModelGateway
 from bayesprobe.runners import AutonomousLoopConfig, AutonomousLoopRunner, AutonomousStopReason
 from bayesprobe.schemas import (
     AnswerContractOutline,
@@ -19,7 +20,7 @@ from bayesprobe.schemas import (
     TaskKind,
 )
 from bayesprobe.task_admission import ExplicitTaskAdmitter
-from bayesprobe.task_framing import TaskFramingError
+from bayesprobe.task_framing import ModelTaskFramer, TaskFramingError
 
 
 class OneBatchSignalProvider:
@@ -80,6 +81,23 @@ def admitted_seed_decision(attempt_id: str = "admission_seeded") -> TaskAdmissio
     )
 
 
+def admitted_exact_decision(attempt_id: str = "admission_exact") -> TaskAdmissionDecision:
+    return TaskAdmissionDecision(
+        attempt_id=attempt_id,
+        status=TaskAdmissionStatus.ADMITTED,
+        epistemic_basis=["The task has testable exact-answer candidates."],
+        proposed_task_kind=TaskKind.EXACT_ANSWER,
+        answer_contract_outline=AnswerContractOutline(
+            objective="Return the supported integer.",
+            answer_value_type=AnswerValueType.INTEGER,
+            decision_form="single_value",
+            permits_synthesis=False,
+            required_sections=["answer", "basis", "uncertainty"],
+        ),
+        reason="The exact answer can be verified.",
+    )
+
+
 class FailingTaskAdmitter:
     def assess(self, input):
         raise AssertionError("runner-supplied admission must not be reassessed")
@@ -117,6 +135,58 @@ def test_initializer_uses_supplied_admission_once_and_writes_v02_state_in_order(
         "run",
         "belief_state",
     ]
+
+
+def test_initializer_preserves_framed_answer_value_in_runtime_hypothesis():
+    framed_answer_value = 7
+    initializer = BayesProbeInitializer(
+        task_framer=ModelTaskFramer(
+            ScriptedModelGateway(
+                {
+                    "frame_open_question": {
+                        "task_kind": "exact_answer",
+                        "answer_relationship": "selection",
+                        "answer_contract": {
+                            "objective": "Return the supported integer value.",
+                            "answer_value_type": "integer",
+                            "answer_format": "integer",
+                            "required_sections": ["answer", "basis", "uncertainty"],
+                            "decision_form": "single_value",
+                            "permits_synthesis": False,
+                        },
+                        "competition": "exclusive",
+                        "coverage": "open",
+                        "hypotheses": [
+                            {
+                                "statement": "The requested integer is 7.",
+                                "type": "answer_candidate",
+                                "scope": "The supplied integer constraints.",
+                                "falsifiers": ["A constraint excludes 7."],
+                                "predictions": [
+                                    "Substitution verifies every constraint."
+                                ],
+                                "answer_value": framed_answer_value,
+                            }
+                        ],
+                        "coverage_statement": "The named value is an initial candidate.",
+                        "coverage_limitation": "Other integer values remain unresolved.",
+                    }
+                }
+            )
+        ),
+        task_admitter=FailingTaskAdmitter(),
+    )
+
+    result = initializer.initialize(
+        InitializeRunInput(
+            run_id="run_exact_answer_value",
+            problem="Which integer satisfies the constraints?",
+        ),
+        admission_decision=admitted_exact_decision(),
+    )
+
+    assert result.task_frame.hypothesis_frame.hypotheses[0].answer_value == 7
+    assert result.belief_state.hypotheses[0].answer_value == 7
 
 
 def test_initializer_default_admitter_fails_closed_for_unseeded_open_input():

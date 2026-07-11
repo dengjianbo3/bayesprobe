@@ -572,6 +572,7 @@ def task_frame_from_mapping(
             priors = [1.0 / len(ids)] * len(ids)
     else:
         priors = [0.5] * len(ids)
+    answer_contract = _answer_contract_from_mapping(payload.get("answer_contract"))
     normalized_hypotheses = [
         {
             "statement": _native_required_text(item["statement"], "statement"),
@@ -591,6 +592,16 @@ def task_frame_from_mapping(
         answer_values = [item["answer_value"] for item in normalized_hypotheses]
         if any(value is None for value in answer_values):
             raise TaskFramingError("exact-answer candidates require answer_value")
+        if any(
+            not _answer_value_matches_type(
+                value,
+                answer_contract.answer_value_type,
+            )
+            for value in answer_values
+        ):
+            raise TaskFramingError(
+                "exact-answer candidate values must match answer_value_type"
+            )
         if len({(type(value).__name__, value) for value in answer_values}) != len(
             answer_values
         ):
@@ -616,7 +627,6 @@ def task_frame_from_mapping(
         )
         for index, item in enumerate(normalized_hypotheses)
     ]
-    answer_contract = _answer_contract_from_mapping(payload.get("answer_contract"))
     try:
         return TaskFrame(
             schema_version="v0.2",
@@ -673,6 +683,23 @@ def _native_answer_value(value: Any) -> str | int | float | None:
     if isinstance(value, str) and not value.strip():
         raise TaskFramingError("provider answer_value must not be empty")
     return value.strip() if isinstance(value, str) else value
+
+
+def _answer_value_matches_type(
+    value: str | int | float,
+    answer_value_type: AnswerValueType,
+) -> bool:
+    if answer_value_type == AnswerValueType.INTEGER:
+        return type(value) is int
+    if answer_value_type == AnswerValueType.NUMBER:
+        return type(value) in {int, float}
+    if answer_value_type in {
+        AnswerValueType.CHOICE_LABEL,
+        AnswerValueType.SHORT_TEXT,
+        AnswerValueType.STRUCTURED_TEXT,
+    }:
+        return type(value) is str
+    return False
 
 
 def _exclusive_open_priors(
