@@ -201,6 +201,34 @@ def test_valid_hypothesis_seeds_are_admitted_without_model_call():
     assert gateway.requests == []
 
 
+@pytest.mark.parametrize(
+    "task_kind",
+    [TaskKind.EXACT_ANSWER, TaskKind.MULTIPLE_CHOICE],
+)
+def test_hypothesis_seeds_reject_task_kinds_that_require_answer_values(task_kind):
+    gateway = ScriptedModelGateway(responses={})
+    explicit_admitter = ExplicitTaskAdmitter()
+    admitter = RoutingTaskAdmitter(
+        explicit_admitter=explicit_admitter,
+        open_admitter=ModelTaskAdmitter(gateway),
+    )
+    input = TaskAdmissionInput(
+        attempt_id=f"attempt_invalid_seed_kind_{task_kind.value}",
+        question="Which answer is supported?",
+        hypothesis_seeds=[
+            HypothesisSeed(statement="The first explanation is supported."),
+            HypothesisSeed(statement="The second explanation is supported."),
+        ],
+        model_metadata={"task_kind": task_kind.value},
+    )
+
+    with pytest.raises(TaskAdmissionError, match="hypothesis seeds cannot frame"):
+        explicit_admitter.can_assess(input)
+    with pytest.raises(TaskAdmissionError, match="hypothesis seeds cannot frame"):
+        admitter.assess(input)
+    assert gateway.requests == []
+
+
 def test_model_admitter_repairs_once_then_accepts_valid_decision():
     gateway = QueueModelGateway(
         [{"status": "maybe"}, deepcopy(ADMITTED_RESPONSE)]

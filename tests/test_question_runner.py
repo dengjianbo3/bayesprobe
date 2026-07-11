@@ -19,10 +19,21 @@ from bayesprobe.question_runner import (
     AutonomousQuestionProgressKind,
     AutonomousQuestionStopReason,
 )
-from bayesprobe.task_framing import ModelTaskFramer, TaskFramingError
-from bayesprobe.task_admission import ModelTaskAdmitter
+from bayesprobe.task_framing import (
+    ExplicitTaskFramer,
+    ModelTaskFramer,
+    RoutingTaskFramer,
+    TaskFramingError,
+)
+from bayesprobe.task_admission import (
+    ExplicitTaskAdmitter,
+    ModelTaskAdmitter,
+    RoutingTaskAdmitter,
+)
 from bayesprobe.schemas import (
+    AnswerChoice,
     CycleSignalShape,
+    FramingMethod,
     HypothesisRelation,
     ProbeSet,
     RunRegime,
@@ -236,6 +247,39 @@ def test_open_question_framing_precedes_belief_initialization():
     assert "independent hypotheses may coexist" in (
         result.final_answer_projection.main_uncertainty
     )
+
+
+def test_malformed_single_choice_routes_through_model_admission_and_framing():
+    gateway = RecordingOpenQuestionGateway()
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(model_gateway=gateway),
+        initializer=BayesProbeInitializer(
+            task_framer=RoutingTaskFramer(
+                explicit_framer=ExplicitTaskFramer(),
+                open_framer=ModelTaskFramer(gateway),
+            )
+        ),
+        executor=ProbeExecutor(ModelBackedProbeToolGateway(gateway)),
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+        task_admitter=RoutingTaskAdmitter(
+            explicit_admitter=ExplicitTaskAdmitter(),
+            open_admitter=ModelTaskAdmitter(gateway),
+        ),
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_malformed_single_choice",
+            problem="Which result follows?",
+            answer_choices=[AnswerChoice(label="A", text="Only result")],
+        )
+    )
+
+    assert result.task_frame.framing_method == FramingMethod.MODEL
+    assert [request.task for request in gateway.requests[:2]] == [
+        "assess_task_admission",
+        "frame_open_question",
+    ]
 
 
 def test_recorded_open_question_frames_before_running_cycle():

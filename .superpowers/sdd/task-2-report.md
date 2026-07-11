@@ -402,3 +402,108 @@ progress, kernel policy/capability controls, complete v0.2 observability, and
 rich admission outcome presentation. The `app.js` change only recognizes the
 two tagged admission outcomes as successful terminal events and marks progress
 complete.
+
+## Review Fix 4
+
+### Changed Files
+
+- `bayesprobe/task_admission.py`
+- `bayesprobe/task_framing.py`
+- `tests/test_task_admission.py`
+- `tests/test_task_framing.py`
+- `tests/test_initialization.py`
+- `tests/test_question_runner.py`
+- `.superpowers/sdd/task-2-report.md`
+
+### RED Evidence
+
+Initial routing, seed semantics, model/recorded continuity, and full runner
+regressions:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py tests/test_initialization.py tests/test_question_runner.py -q -p no:cacheprovider -k 'hypothesis_seeds_reject_task_kinds or creates_no_state_for_answer_valued_seed_task_kind or malformed_single_choice_routes or accepts_semantically_paraphrased_objective or accepts_required_section_superset or accepts_paraphrased_objective_and_section_superset'
+8 failed, 172 deselected in 0.33s
+exit 1
+```
+
+The failures showed answer-valued seed kinds were accepted, malformed
+single-choice material was recaptured by explicit framing after model
+admission, and paraphrased/superset contracts were rejected by both model and
+recorded framing.
+
+Router-level fail-closed refinement:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_initialization.py -q -p no:cacheprovider -k 'hypothesis_seeds_reject_task_kinds or creates_no_state_for_answer_valued_seed_task_kind'
+4 failed, 33 deselected in 0.14s
+exit 1
+```
+
+This second RED established that returning `can_assess=False` was insufficient:
+the routing admitter could still send semantically forbidden seeds to model
+admission instead of rejecting them before any model call.
+
+### GREEN Evidence
+
+Focused regressions:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py tests/test_initialization.py tests/test_question_runner.py -q -p no:cacheprovider -k 'hypothesis_seeds_reject_task_kinds or creates_no_state_for_answer_valued_seed_task_kind or malformed_single_choice_routes or accepts_semantically_paraphrased_objective or accepts_required_section_superset or accepts_paraphrased_objective_and_section_superset'
+8 passed, 172 deselected in 0.19s
+exit 0
+```
+
+Router-level fail-closed refinement:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_initialization.py -q -p no:cacheprovider -k 'hypothesis_seeds_reject_task_kinds or creates_no_state_for_answer_valued_seed_task_kind'
+4 passed, 33 deselected in 0.11s
+exit 0
+```
+
+Complete Task 2 focused suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py tests/test_initialization.py tests/test_openai_gateway.py tests/test_recorded_model_gateway.py tests/test_question_runner.py -q -p no:cacheprovider
+275 passed in 0.41s
+exit 0
+```
+
+WebUI Python integration suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_webui.py -q -p no:cacheprovider
+94 passed in 5.57s
+exit 0
+```
+
+Node stream integration suite:
+
+```text
+node --test tests/test_webui_stream.js
+15 passed in 101.70ms
+exit 0
+```
+
+### Full Offline Suite
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
+894 passed, 10 skipped in 7.60s
+exit 0
+```
+
+### Diff Hygiene
+
+```text
+git diff --check
+exit 0
+```
+
+### Concerns
+
+None. Exact-answer continuity now treats objective text as semantic wording,
+requires the admitted sections as a subset, and still rejects replacement of
+answer value type, decision form, synthesis permission, task kind, answer
+relationship, or answer-candidate invariants. Open-task contracts retain their
+existing outline-to-native section refinement.

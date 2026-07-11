@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from bayesprobe.model_gateway import (
     ModelGateway,
@@ -50,30 +50,51 @@ class TaskAdmissionError(ValueError):
 
 class ExplicitTaskAdmitter:
     def can_assess(self, input: TaskAdmissionInput) -> bool:
-        _reject_ambiguous_explicit_frame(input)
-        if input.answer_choices:
-            return _has_valid_answer_choices(input.answer_choices)
-        if input.hypothesis_seeds:
-            return _has_valid_hypothesis_seeds(input)
-        return False
+        if input.answer_choices and input.hypothesis_seeds:
+            _classify_explicit_frame_material(
+                answer_choices=input.answer_choices,
+                hypothesis_seeds=input.hypothesis_seeds,
+                task_kind=None,
+            )
+        try:
+            task_kind = (
+                _explicit_seed_task_kind(input) if input.hypothesis_seeds else None
+            )
+        except TaskAdmissionError:
+            return False
+        return _classify_explicit_frame_material(
+            answer_choices=input.answer_choices,
+            hypothesis_seeds=input.hypothesis_seeds,
+            task_kind=task_kind,
+        ) is not None
 
     def assess(self, input: TaskAdmissionInput) -> TaskAdmissionDecision:
         _validate_admission_input(input)
-        _reject_ambiguous_explicit_frame(input)
-        if input.answer_choices:
-            if not _has_valid_answer_choices(input.answer_choices):
-                raise TaskAdmissionError("invalid explicit answer-choice frame")
+        if input.answer_choices and input.hypothesis_seeds:
+            _classify_explicit_frame_material(
+                answer_choices=input.answer_choices,
+                hypothesis_seeds=input.hypothesis_seeds,
+                task_kind=None,
+            )
+        task_kind = _explicit_seed_task_kind(input) if input.hypothesis_seeds else None
+        mode = _classify_explicit_frame_material(
+            answer_choices=input.answer_choices,
+            hypothesis_seeds=input.hypothesis_seeds,
+            task_kind=task_kind,
+        )
+        if mode == "choices":
             task_kind = TaskKind.MULTIPLE_CHOICE
             value_type = AnswerValueType.CHOICE_LABEL
             objective = "Select the best-supported answer choice."
             decision_form = "answer_choice"
-        elif input.hypothesis_seeds:
-            if not _has_valid_hypothesis_seeds(input):
-                raise TaskAdmissionError("invalid explicit hypothesis frame")
-            task_kind = _explicit_seed_task_kind(input)
+        elif mode == "seeds":
             value_type = AnswerValueType.STRUCTURED_TEXT
             objective = "Assess the supplied hypotheses against available evidence."
             decision_form = "hypothesis_assessment"
+        elif input.answer_choices:
+            raise TaskAdmissionError("invalid explicit answer-choice frame")
+        elif input.hypothesis_seeds:
+            raise TaskAdmissionError("invalid explicit hypothesis frame")
         else:
             raise TaskAdmissionError(
                 "explicit task admission requires answer choices or hypothesis seeds"
@@ -258,11 +279,27 @@ def _explicit_seed_task_kind(input: TaskAdmissionInput) -> TaskKind:
         raise TaskAdmissionError("invalid explicit task kind") from None
 
 
-def _reject_ambiguous_explicit_frame(input: TaskAdmissionInput) -> None:
-    if input.answer_choices and input.hypothesis_seeds:
+def _classify_explicit_frame_material(
+    *,
+    answer_choices: Any,
+    hypothesis_seeds: Any,
+    task_kind: TaskKind | None,
+) -> Literal["choices", "seeds"] | None:
+    if answer_choices and hypothesis_seeds:
         raise TaskAdmissionError(
             "provide answer choices or hypothesis seeds, not both"
         )
+    if answer_choices:
+        return "choices" if _has_valid_answer_choices(answer_choices) else None
+    if hypothesis_seeds:
+        if not _has_valid_hypothesis_seeds(hypothesis_seeds):
+            return None
+        if task_kind in {TaskKind.EXACT_ANSWER, TaskKind.MULTIPLE_CHOICE}:
+            raise TaskAdmissionError(
+                "hypothesis seeds cannot frame exact-answer or multiple-choice tasks"
+            )
+        return "seeds"
+    return None
 
 
 def _has_valid_answer_choices(choices: Any) -> bool:
@@ -283,8 +320,9 @@ def _has_valid_answer_choices(choices: Any) -> bool:
     return len(labels) == len(set(labels))
 
 
-def _has_valid_hypothesis_seeds(input: TaskAdmissionInput) -> bool:
-    seeds = input.hypothesis_seeds
+def _has_valid_hypothesis_seeds(
+    seeds: Any,
+) -> bool:
     if type(seeds) is not list or not 2 <= len(seeds) <= 6:
         return False
     try:
@@ -319,8 +357,7 @@ def _has_valid_hypothesis_seeds(input: TaskAdmissionInput) -> bool:
             return False
         if len(ids) != len(set(ids)):
             return False
-        _explicit_seed_task_kind(input)
-    except (TaskAdmissionError, TypeError, ValueError):
+    except (TypeError, ValueError):
         return False
     return True
 

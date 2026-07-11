@@ -201,6 +201,34 @@ def test_initializer_default_admitter_fails_closed_for_unseeded_open_input():
         )
 
 
+@pytest.mark.parametrize(
+    "task_kind",
+    [TaskKind.EXACT_ANSWER, TaskKind.MULTIPLE_CHOICE],
+)
+def test_initializer_creates_no_state_for_answer_valued_seed_task_kind(
+    tmp_path,
+    task_kind,
+):
+    ledger = JsonlLedgerStore(tmp_path / f"invalid_seed_{task_kind.value}.jsonl")
+    initializer = BayesProbeInitializer(
+        ledger=ledger,
+        task_admitter=ExplicitTaskAdmitter(),
+    )
+
+    with pytest.raises(TaskFramingError, match="hypothesis seeds cannot frame"):
+        initializer.initialize(
+            InitializeRunInput(
+                run_id=f"invalid_seed_{task_kind.value}",
+                problem="Which answer is supported?",
+                task_kind=task_kind,
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
+            )
+        )
+
+    for record_type in ("task_admission", "task_frame", "run", "belief_state"):
+        assert ledger.read_all(record_type) == []
+
+
 def test_initializer_never_creates_generic_binary_hypotheses_for_open_question():
     with pytest.raises(TaskFramingError):
         BayesProbeInitializer().initialize(

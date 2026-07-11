@@ -296,7 +296,6 @@ def test_exact_answer_candidates_accept_values_matching_contract_type(
     "contract_update,frame_update,values",
     [
         ({"answer_value_type": "short_text"}, {}, ["seven", "nine"]),
-        ({"objective": "Return a provider-selected value."}, {}, [7, 9]),
         ({"decision_form": "provider_choice"}, {}, [7, 9]),
         (
             {"permits_synthesis": True},
@@ -307,7 +306,6 @@ def test_exact_answer_candidates_accept_values_matching_contract_type(
     ],
     ids=[
         "answer_value_type",
-        "objective",
         "decision_form",
         "permits_synthesis",
         "required_sections",
@@ -338,6 +336,43 @@ def test_provider_replacement_contract_consumes_one_repair(
     assert [request.task for request in gateway.requests] == [
         "frame_open_question",
         "repair_task_frame",
+    ]
+
+
+def test_model_frame_accepts_semantically_paraphrased_objective():
+    paraphrased = deepcopy(EXACT_ANSWER_FRAME)
+    paraphrased["answer_contract"]["objective"] = (
+        "Choose the integer best justified by the available evidence."
+    )
+
+    frame = ModelTaskFramer(QueueModelGateway([paraphrased])).frame(
+        TaskFramingInput(
+            run_id="run_paraphrased_objective",
+            question="Which integer satisfies the constraints?",
+            admission_decision=admitted_decision(),
+        )
+    )
+
+    assert frame.answer_contract.objective == paraphrased["answer_contract"]["objective"]
+
+
+def test_model_frame_accepts_required_section_superset():
+    expanded = deepcopy(EXACT_ANSWER_FRAME)
+    expanded["answer_contract"]["required_sections"].append("method")
+
+    frame = ModelTaskFramer(QueueModelGateway([expanded])).frame(
+        TaskFramingInput(
+            run_id="run_required_section_superset",
+            question="Which integer satisfies the constraints?",
+            admission_decision=admitted_decision(),
+        )
+    )
+
+    assert frame.answer_contract.required_sections == [
+        "answer",
+        "basis",
+        "uncertainty",
+        "method",
     ]
 
 
@@ -1431,6 +1466,35 @@ def test_recorded_task_framer_revalidates_the_materialized_task_frame():
         RecordedTaskFramer(invalid_source).frame(
             TaskFramingInput(run_id="replay_invalid_copy", question="Current question")
         )
+
+
+def test_recorded_frame_accepts_paraphrased_objective_and_section_superset():
+    source_frame = task_frame_from_mapping(
+        EXACT_ANSWER_FRAME,
+        run_id="fixture_contract_refinement",
+        question="Which integer satisfies the constraints?",
+        task_context="",
+        admission_decision=admitted_decision(),
+        method="model",
+        trace={},
+    )
+    refined_contract = source_frame.answer_contract.model_copy(
+        update={
+            "objective": "Choose the integer best justified by the available evidence.",
+            "required_sections": ["answer", "basis", "uncertainty", "method"],
+        }
+    )
+    source_frame = source_frame.model_copy(update={"answer_contract": refined_contract})
+
+    frame = RecordedTaskFramer(source_frame).frame(
+        TaskFramingInput(
+            run_id="replay_contract_refinement",
+            question="Which integer satisfies the current constraints?",
+            admission_decision=admitted_decision(),
+        )
+    )
+
+    assert frame.answer_contract == refined_contract
 
 
 @pytest.mark.parametrize(

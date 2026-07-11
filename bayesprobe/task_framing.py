@@ -32,6 +32,10 @@ from bayesprobe.schemas import (
     is_secret_like_value,
     redact_secret_material,
 )
+from bayesprobe.task_admission import (
+    TaskAdmissionError,
+    _classify_explicit_frame_material,
+)
 
 
 @dataclass(frozen=True)
@@ -327,12 +331,22 @@ class RoutingTaskFramer:
         self._open_framer = open_framer
 
     def frame(self, input: TaskFramingInput) -> TaskFrame:
-        has_explicit_frame = bool(
-            input.answer_choices
-            or input.hypothesis_seeds
-            or parse_legacy_answer_choice_frame(input.question) is not None
+        parsed = (
+            None
+            if input.answer_choices
+            else parse_legacy_answer_choice_frame(input.question)
         )
-        if has_explicit_frame:
+        choices = input.answer_choices if parsed is None else parsed.choices
+        task_kind = input.task_kind or input.admission_decision.proposed_task_kind
+        try:
+            mode = _classify_explicit_frame_material(
+                answer_choices=choices,
+                hypothesis_seeds=input.hypothesis_seeds,
+                task_kind=task_kind,
+            )
+        except TaskAdmissionError as error:
+            raise TaskFramingError(str(error)) from None
+        if mode is not None:
             return self._explicit_framer.frame(input)
         return self._open_framer.frame(input)
 
@@ -728,12 +742,6 @@ def _validate_native_frame_invariants(
             "task frame synthesis permission must match the admitted contract"
         )
     if task_kind == TaskKind.EXACT_ANSWER:
-        admitted_objective_terms = _semantic_terms(outline.objective)
-        framed_objective_terms = _semantic_terms(answer_contract.objective)
-        if not admitted_objective_terms <= framed_objective_terms:
-            raise TaskFramingError(
-                "task frame objective must preserve the admitted contract"
-            )
         framed_sections = {
             _normalized_semantic_text(section)
             for section in answer_contract.required_sections
@@ -741,9 +749,9 @@ def _validate_native_frame_invariants(
         admitted_sections = {
             _normalized_semantic_text(section) for section in outline.required_sections
         }
-        if framed_sections != admitted_sections:
+        if not admitted_sections <= framed_sections:
             raise TaskFramingError(
-                "task frame required sections must match the admitted contract"
+                "task frame must preserve all admitted required sections"
             )
     if (
         answer_relationship == AnswerRelationship.SYNTHESIS
@@ -778,10 +786,6 @@ def _validate_native_frame_invariants(
         answer_values
     ):
         raise TaskFramingError("exact-answer candidate values must be unique")
-
-
-def _semantic_terms(value: str) -> set[str]:
-    return set(re.findall(r"\w+", value.casefold()))
 
 
 def _exclusive_open_priors(
@@ -1102,6 +1106,16 @@ def _prepare_explicit_input(input: TaskFramingInput) -> _PreparedExplicitInput:
             task_kind = admitted_kind
         if admitted_kind != task_kind:
             raise TaskFramingError("explicit frame must match the admitted task kind")
+        try:
+            seed_mode = _classify_explicit_frame_material(
+                answer_choices=[],
+                hypothesis_seeds=raw_seeds,
+                task_kind=task_kind,
+            )
+        except TaskAdmissionError as error:
+            raise TaskFramingError(str(error)) from None
+        if seed_mode != "seeds":
+            raise TaskFramingError("invalid explicit hypothesis frame")
         priors = _validate_seeds(seeds, relation, task_kind)
         return _PreparedExplicitInput(
             normalized_question=normalized_question,
