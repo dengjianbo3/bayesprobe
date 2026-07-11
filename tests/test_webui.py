@@ -542,6 +542,89 @@ def _seven_answer_choices() -> list[dict[str, str]]:
     ]
 
 
+def _secret_caller_framing_payload(field: str) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "question": "Which result follows?",
+        "answer_choices": deterministic_answer_choices(),
+    }
+    if field == "question":
+        payload["question"] = "Which result follows sk-abcdefghijklmnop?"
+    elif field == "task_context":
+        payload["task_context"] = "Use sk-abcdefghijklmnop as a constraint."
+    elif field == "answer_choice":
+        payload["answer_choices"] = [
+            {"label": "H1", "text": "First result sk-abcdefghijklmnop"},
+            {"label": "H2", "text": "Second result"},
+        ]
+    else:
+        raise AssertionError(f"unknown framing field: {field}")
+    return payload
+
+
+@pytest.mark.parametrize("field", ["question", "task_context", "answer_choice"])
+def test_webui_rejects_secret_caller_framing_input_before_deterministic_run_or_stream(field):
+    payload = {
+        **_secret_caller_framing_payload(field),
+        "provider": {"kind": "deterministic"},
+    }
+    events = []
+
+    status, response = handle_autonomous_run_request(payload)
+    stream_status, stream_response = handle_autonomous_stream_request(
+        payload,
+        event_sink=events.append,
+    )
+
+    expected_error = {
+        "error": {
+            "type": "validation_error",
+            "message": "task framing input must not contain secret material",
+        }
+    }
+    assert status == 400
+    assert response == expected_error
+    assert stream_status == 400
+    assert stream_response == expected_error
+    assert events == []
+
+
+@pytest.mark.parametrize("field", ["question", "task_context", "answer_choice"])
+def test_webui_rejects_secret_caller_framing_input_before_provider_run_or_stream(field):
+    FakeWebUIChatOpenAI.created_with = []
+    payload = {
+        **_secret_caller_framing_payload(field),
+        "provider": {
+            "kind": "openai_chat_completions",
+            "api_key": "provider-secret-123",
+            "model": "provider-model",
+        },
+    }
+    events = []
+
+    status, response = handle_autonomous_run_request(
+        payload,
+        client_factory=FakeWebUIChatOpenAI,
+    )
+    stream_status, stream_response = handle_autonomous_stream_request(
+        payload,
+        event_sink=events.append,
+        client_factory=FakeWebUIChatOpenAI,
+    )
+
+    expected_error = {
+        "error": {
+            "type": "validation_error",
+            "message": "task framing input must not contain secret material",
+        }
+    }
+    assert status == 400
+    assert response == expected_error
+    assert stream_status == 400
+    assert stream_response == expected_error
+    assert events == []
+    assert FakeWebUIChatOpenAI.created_with == []
+
+
 def test_webui_rejects_more_than_six_choices_before_deterministic_run_or_stream():
     payload = {
         "question": "Which result follows?",

@@ -55,6 +55,48 @@ class TaskFramingError(ValueError):
     pass
 
 
+_CALLER_SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{12,}")
+
+
+def validate_task_framing_input_security(input: TaskFramingInput) -> None:
+    _reject_caller_secret_material(
+        {
+            "run_id": input.run_id,
+            "question": input.question,
+            "task_context": input.task_context,
+            "answer_choices": list(input.answer_choices),
+            "hypothesis_seeds": list(input.hypothesis_seeds),
+            "metadata": input.metadata,
+        }
+    )
+
+
+def _reject_caller_secret_material(value: Any) -> None:
+    if isinstance(value, str):
+        if _CALLER_SECRET_PATTERN.search(value):
+            raise TaskFramingError("task framing input must not contain secret material")
+        return
+    if isinstance(value, AnswerChoice):
+        _reject_caller_secret_material(value.label)
+        _reject_caller_secret_material(value.text)
+        return
+    if isinstance(value, HypothesisSeed):
+        _reject_caller_secret_material(value.id)
+        _reject_caller_secret_material(value.statement)
+        _reject_caller_secret_material(value.scope)
+        _reject_caller_secret_material(value.falsifiers)
+        _reject_caller_secret_material(value.predictions)
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_caller_secret_material(str(key))
+            _reject_caller_secret_material(item)
+        return
+    if isinstance(value, list | tuple):
+        for item in value:
+            _reject_caller_secret_material(item)
+
+
 @dataclass(frozen=True)
 class ParsedAnswerChoiceFrame:
     stem: str
@@ -85,14 +127,19 @@ class ExplicitTaskFramer:
 
     def frame(self, input: TaskFramingInput) -> TaskFrame:
         prepared = _prepare_explicit_input(input)
-        if prepared.choices:
-            return _frame_choices(
-                input,
-                prepared.choices,
-                prepared.normalized_question,
-                prepared.task_context,
-            )
-        return _frame_seeds(input, prepared)
+        try:
+            if prepared.choices:
+                return _frame_choices(
+                    input,
+                    prepared.choices,
+                    prepared.normalized_question,
+                    prepared.task_context,
+                )
+            return _frame_seeds(input, prepared)
+        except TaskFramingError:
+            raise
+        except ValueError:
+            raise TaskFramingError("invalid explicit task frame fields") from None
 
 
 @dataclass(frozen=True)
@@ -121,6 +168,7 @@ class ModelTaskFramer:
         self._repair_policy = repair_policy or TaskFramingRepairPolicy()
 
     def frame(self, input: TaskFramingInput) -> TaskFrame:
+        validate_task_framing_input_security(input)
         request = _open_frame_request(input)
         payload = self._complete_structured(request)
         try:
@@ -186,6 +234,7 @@ class RecordedTaskFramer:
         self._frame = frame.model_copy(deep=True)
 
     def frame(self, input: TaskFramingInput) -> TaskFrame:
+        validate_task_framing_input_security(input)
         hypothesis_frame = self._frame.hypothesis_frame.model_copy(
             deep=True,
             update={"frame_id": f"{input.run_id}_hypothesis_frame"},
@@ -471,6 +520,7 @@ class _PreparedExplicitInput:
 
 
 def _prepare_explicit_input(input: TaskFramingInput) -> _PreparedExplicitInput:
+    validate_task_framing_input_security(input)
     normalized_question = _required_question(input.question)
     task_context = _normalize_task_context(input.task_context)
     answer_choices = _required_list(input.answer_choices, "answer_choices")
@@ -817,4 +867,5 @@ __all__ = [
     "TaskFramingRepairPolicy",
     "parse_legacy_answer_choice_frame",
     "task_frame_from_mapping",
+    "validate_task_framing_input_security",
 ]

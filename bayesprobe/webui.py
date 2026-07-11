@@ -44,6 +44,7 @@ from bayesprobe.task_framing import (
     RoutingTaskFramer,
     TaskFramingError,
     TaskFramingInput,
+    validate_task_framing_input_security,
 )
 
 
@@ -545,6 +546,17 @@ def _parse_autonomous_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         payload.get("task_context"), "task_context", default=""
     )
     answer_choices = _answer_choices_from_payload(payload.get("answer_choices"))
+    try:
+        validate_task_framing_input_security(
+            TaskFramingInput(
+                run_id="webui_request_validation",
+                question=question,
+                task_context=task_context,
+                answer_choices=answer_choices,
+            )
+        )
+    except TaskFramingError as error:
+        raise WebUIError(str(error)) from None
     provider = payload.get("provider", {"kind": "deterministic"})
     if provider is None:
         provider = {"kind": "deterministic"}

@@ -176,6 +176,76 @@ def test_explicit_framer_can_frame_without_materializing(monkeypatch):
     "input",
     [
         TaskFramingInput(
+            run_id="run_secret_question",
+            question="Which result follows from sk-abcdefghijklmnop?",
+            answer_choices=[
+                AnswerChoice(label="A", text="First result"),
+                AnswerChoice(label="B", text="Second result"),
+            ],
+        ),
+        TaskFramingInput(
+            run_id="run_secret_context",
+            question="Which result follows?",
+            task_context="Use sk-abcdefghijklmnop as a constraint.",
+            answer_choices=[
+                AnswerChoice(label="A", text="First result"),
+                AnswerChoice(label="B", text="Second result"),
+            ],
+        ),
+        TaskFramingInput(
+            run_id="run_secret_choice",
+            question="Which result follows?",
+            answer_choices=[
+                AnswerChoice(label="A", text="First result sk-abcdefghijklmnop"),
+                AnswerChoice(label="B", text="Second result"),
+            ],
+        ),
+    ],
+)
+def test_explicit_framer_rejects_secret_caller_input_without_materializing(input):
+    framer = ExplicitTaskFramer()
+
+    assert not framer.can_frame(input)
+    with pytest.raises(TaskFramingError, match="task framing input must not contain secret material"):
+        framer.frame(input)
+
+
+def test_model_task_framer_rejects_secret_caller_input_before_gateway_call():
+    gateway = QueueModelGateway([VALID_OPEN_FRAME])
+
+    with pytest.raises(TaskFramingError, match="task framing input must not contain secret material"):
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(
+                run_id="run_model_secret_input",
+                question="How should sk-abcdefghijklmnop be tested?",
+            )
+        )
+
+    assert gateway.requests == []
+
+
+def test_explicit_framer_wraps_late_task_frame_validation_as_task_framing_error():
+    invalid_choice = AnswerChoice(label="A", text="First result").model_copy(
+        update={"label": " "}
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid explicit task frame fields"):
+        ExplicitTaskFramer().frame(
+            TaskFramingInput(
+                run_id="run_invalid_late_frame",
+                question="Which result follows?",
+                answer_choices=[
+                    invalid_choice,
+                    AnswerChoice(label="B", text="Second result"),
+                ],
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "input",
+    [
+        TaskFramingInput(
             run_id="run_one_choice",
             question="Which result follows?",
             answer_choices=[AnswerChoice(label="A", text="First result")],
