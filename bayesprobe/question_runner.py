@@ -9,6 +9,7 @@ from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import (
     BayesProbeInitializer,
     InitializeRunInput,
+    validate_initialize_run_input_security,
 )
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
@@ -144,6 +145,7 @@ class AutonomousQuestionRunner:
         self.progress_observer = progress_observer
 
     def run_question(self, input: InitializeRunInput) -> AutonomousQuestionRunResult:
+        validate_initialize_run_input_security(input)
         self._emit_progress(
             AutonomousQuestionProgressKind.RUN_STARTED,
             run_id=input.run_id,

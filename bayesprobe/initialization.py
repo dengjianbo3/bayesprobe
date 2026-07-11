@@ -18,11 +18,13 @@ from bayesprobe.schemas import (
     TaskFrame,
     TaskKind,
     HypothesisRelation,
+    is_secret_like_value,
 )
 from bayesprobe.task_framing import (
     ExplicitTaskFramer,
     HypothesisSeed,
     TaskFramer,
+    TaskFramingError,
     TaskFramingInput,
 )
 
@@ -63,6 +65,7 @@ class BayesProbeInitializer:
         self._task_framer = task_framer or ExplicitTaskFramer()
 
     def initialize(self, input: InitializeRunInput) -> InitializationResult:
+        validate_initialize_run_input_security(input)
         run_id = _clean_required(input.run_id, "run_id")
         problem = _clean_required(input.problem, "problem")
         task_frame = self._task_framer.frame(
@@ -162,6 +165,19 @@ class BayesProbeInitializer:
         self._ledger.append("belief_state", belief_state)
         for candidate in probe_candidates:
             self._ledger.append("probe_candidate", candidate)
+
+
+def validate_compatibility_context_security(context: str) -> None:
+    if not isinstance(context, str):
+        raise TaskFramingError("compatibility context must be a string")
+    if is_secret_like_value(context):
+        raise TaskFramingError(
+            "compatibility context must not contain secret material"
+        )
+
+
+def validate_initialize_run_input_security(input: InitializeRunInput) -> None:
+    validate_compatibility_context_security(input.context)
 
 
 def _clean_required(value: str, field_name: str) -> str:
@@ -290,4 +306,6 @@ __all__ = [
     "HypothesisSeed",
     "InitializationResult",
     "InitializeRunInput",
+    "validate_compatibility_context_security",
+    "validate_initialize_run_input_security",
 ]

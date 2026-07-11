@@ -41,9 +41,10 @@ def make_belief_state(
     h2_posterior: float = 0.5,
     *,
     relation: HypothesisRelation = HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
+    independent_conflicts: bool = False,
 ) -> BeliefState:
     rivals = {"H1": ["H2"], "H2": ["H1"]}
-    if relation == HypothesisRelation.INDEPENDENT:
+    if relation == HypothesisRelation.INDEPENDENT and not independent_conflicts:
         rivals = {"H1": [], "H2": []}
     hypotheses = [
         Hypothesis(
@@ -370,7 +371,7 @@ def test_same_cycle_duplicate_anomaly_id_spawns_once():
     ) == 1
 
 
-def test_independent_spawn_has_no_dynamic_rivals():
+def test_independent_spawn_adds_no_blanket_rivals_and_preserves_frame_links():
     previous = make_belief_state(relation=HypothesisRelation.INDEPENDENT)
 
     result = HypothesisEvolutionEngine().evolve(
@@ -381,7 +382,34 @@ def test_independent_spawn_has_no_dynamic_rivals():
         belief_updates=[],
     )
 
-    assert all(not item.rivals for item in result.hypotheses)
+    spawned = result.hypotheses_by_id()["H_E_independent_spawn_spawned"]
+    assert spawned.rivals == []
+    assert {
+        item.id: item.rivals for item in result.hypotheses if item.id in {"H1", "H2"}
+    } == previous.task_frame.hypothesis_frame.rival_sets
+
+
+def test_independent_spawn_preserves_preexisting_explicit_conflicts():
+    previous = make_belief_state(
+        relation=HypothesisRelation.INDEPENDENT,
+        independent_conflicts=True,
+    )
+
+    result = HypothesisEvolutionEngine().evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=previous.hypotheses,
+        evidence_events=[anomaly_event("E_independent_conflict_spawn")],
+        belief_updates=[],
+    )
+
+    assert result.hypotheses_by_id()["H1"].rivals == ["H2"]
+    assert result.hypotheses_by_id()["H2"].rivals == ["H1"]
+    assert result.hypotheses_by_id()["H_E_independent_conflict_spawn_spawned"].rivals == []
+    assert {
+        item.id: result.hypotheses_by_id()[item.id].rivals
+        for item in previous.task_frame.hypothesis_frame.hypotheses
+    } == previous.task_frame.hypothesis_frame.rival_sets
 
 
 def test_exclusive_spawn_reconciles_reciprocal_dynamic_rivals():
@@ -402,7 +430,7 @@ def test_exclusive_spawn_reconciles_reciprocal_dynamic_rivals():
     } == {item.id: ids - {item.id} for item in result.hypotheses}
 
 
-def test_independent_reframe_has_no_dynamic_rivals():
+def test_independent_reframe_preserves_original_links_and_tracks_its_origin():
     previous = make_belief_state(
         h1_posterior=0.7,
         h2_posterior=0.7,
@@ -423,7 +451,50 @@ def test_independent_reframe_has_no_dynamic_rivals():
     )
 
     assert any(item.operation == EvolutionOperation.REFRAME for item in result.evolutions)
-    assert all(not item.rivals for item in result.hypotheses)
+    assert result.hypotheses_by_id()["H1"].rivals == []
+    assert result.hypotheses_by_id()["H2"].rivals == []
+    assert result.hypotheses_by_id()["H_H1_cycle_1_reframed"].rivals == ["H1"]
+    assert {
+        item.id: result.hypotheses_by_id()[item.id].rivals
+        for item in previous.task_frame.hypothesis_frame.hypotheses
+    } == previous.task_frame.hypothesis_frame.rival_sets
+
+
+def test_independent_reframe_inherits_explicit_conflicts_without_wiping_originals():
+    previous = make_belief_state(
+        h1_posterior=0.7,
+        h2_posterior=0.7,
+        relation=HypothesisRelation.INDEPENDENT,
+        independent_conflicts=True,
+    )
+    current = [
+        item.model_copy(update={"posterior": 0.55}) if item.id == "H1" else item
+        for item in previous.hypotheses
+    ]
+
+    result = HypothesisEvolutionEngine(
+        config=HypothesisEvolutionConfig(retire_posterior_threshold=0.05)
+    ).evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=current,
+        evidence_events=[counter_event("E_independent_conflict_reframe")],
+        belief_updates=[
+            update(
+                evidence_id="E_independent_conflict_reframe",
+                prior=0.7,
+                posterior=0.55,
+            )
+        ],
+    )
+
+    assert result.hypotheses_by_id()["H1"].rivals == ["H2"]
+    assert result.hypotheses_by_id()["H2"].rivals == ["H1"]
+    assert result.hypotheses_by_id()["H_H1_cycle_1_reframed"].rivals == ["H1", "H2"]
+    assert {
+        item.id: result.hypotheses_by_id()[item.id].rivals
+        for item in previous.task_frame.hypothesis_frame.hypotheses
+    } == previous.task_frame.hypothesis_frame.rival_sets
 
 
 def test_exclusive_reframe_reconciles_reciprocal_dynamic_rivals():

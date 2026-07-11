@@ -45,7 +45,10 @@ This gives the architecture four hard commitments:
 The target runtime flow is:
 
 ```text
-Problem / Existing BeliefState
+Question + Task Context / Existing BeliefState
+  -> Task Framing
+  -> TaskFrame
+  -> Initial BeliefState materialization
   -> Probe Set Design
   -> Signal Inbox
   -> Signal Collection Boundary
@@ -64,6 +67,7 @@ Client / CLI / SDK / Benchmark / External Agent
   -> Run Regime Runner
       -> Autonomous Runner
       -> Synchronized Runner
+      -> TaskFramer + Initializer
   -> BayesProbe Core
       -> Signal Inbox
       -> Evidence Integration Gate
@@ -134,6 +138,10 @@ For autonomous question runs, non-empty `InitializeRunInput.context` is converte
 to one first-cycle passive `ExternalSignal`. It is integrated once, together with
 active probe returns when present. If no probe is available, the context still
 forms a legal `passive_only` cycle before the runner stops.
+
+The compatibility `context` field is not Task Context. Because it can become an
+`ExternalSignal`, ledger record, or provider input, secret-like credential text is
+rejected before progress, provider construction, framing, or state materialization.
 
 ### 3.4 Projection-As-Signal Rule
 
@@ -245,20 +253,22 @@ Current file: `bayesprobe/belief.py`
 
 Responsibilities:
 
-- map `EvidenceEvent`s into posterior changes;
+- map `EvidenceEvent`s into relation-aware belief changes;
 - skip discarded evidence events;
 - preserve belief-neutral handling for schema violations;
-- maintain one normalized categorical distribution across active rival
-  hypotheses;
-- apply complexity and ad-hoc penalties during normalization;
-- refresh posterior, uncertainty, entropy, and top-gap summaries;
-- produce auditable `BeliefUpdate`s for direct and normalization-induced
-  movement.
+- preserve normalized categorical mass across active hypotheses for
+  `exclusive_exhaustive` frames;
+- update targeted `independent` hypotheses in log-odds space without
+  cross-normalizing their credences;
+- apply complexity and ad-hoc penalties according to the selected relation;
+- refresh relation-aware belief, uncertainty, entropy, and top-gap summaries;
+- produce auditable `BeliefUpdate`s for direct movement and, for exclusive
+  frames, normalization-induced rival movement.
 
 Current limitation:
 
-- posterior updates are pragmatic MVP scoring rules, not calibrated Bayesian
-  inference.
+- exclusive mass and independent credence updates are pragmatic MVP scoring
+  rules, not calibrated Bayesian inference.
 
 ### 4.5 Hypothesis Evolution
 
@@ -269,28 +279,36 @@ Responsibilities:
 - inspect evidence pressure and belief updates;
 - spawn hypotheses from anomaly signals;
 - reframe or retire weakened hypotheses;
+- preserve explicit independent conflict links while avoiding blanket
+  all-to-all rivals for independent anomaly spawns;
+- maintain reciprocal all-to-all rivals for exclusive frames;
 - emit `HypothesisEvolution` audit records;
 - generate probe candidates for evolved hypotheses.
 
 Current limitation:
 
-- evolution policy is deterministic and rule-based; it is ready for deeper
-  model-assisted evolution later.
+- evolution policy is deterministic and rule-based; cross-cycle semantic
+  evolution remains deferred.
 
 ### 4.6 Initialization
 
-Current file: `bayesprobe/initialization.py`
+Current files:
+
+- `bayesprobe/task_framing.py`
+- `bayesprobe/initialization.py`
 
 Responsibilities:
 
-- initialize a `RunRecord`;
-- create initial hypotheses;
-- create initial `BeliefState`;
+- produce a validated `TaskFrame` through explicit, model, or recorded framers;
+- allow at most one sanitized model repair before failing closed;
+- initialize a `RunRecord` only after framing succeeds;
+- materialize initial hypotheses and `BeliefState` from the `TaskFrame`;
 - create seed `ProbeCandidate`s.
 
 Current limitation:
 
-- initialization is still mostly deterministic and template-driven.
+- task-aware `ProbeDesigner` behavior remains deferred; current seed candidates
+  are deterministic after framing.
 
 ### 4.7 Probe Planning
 
@@ -366,7 +384,8 @@ class ModelGateway(Protocol):
 
 Current tasks:
 
-- `judge_evidence`.
+- `frame_open_question` and its bounded `repair_task_frame` repair;
+- `judge_evidence` and its opt-in `repair_evidence_judgment` repair;
 - `execute_probe` for structured `ProbeSignal` generation behind the
   `ProbeToolGateway` seam.
 
@@ -386,7 +405,8 @@ Current validation:
 
 Current repair support:
 
-- `repair_evidence_judgment` task behind an opt-in repair policy.
+- one fail-closed task-frame repair through `TaskFramingRepairPolicy`;
+- evidence-judgment repair behind `EvidenceJudgmentRepairPolicy`.
 
 Future extension:
 
@@ -514,6 +534,8 @@ The package root exports the supported MVP surface for external code:
 - experiment config, artifacts, and runner;
 - model gateway config and deterministic, recorded, Responses, and
   OpenAI-compatible Chat Completions adapters;
+- `ModelTaskFramer`, `RecordedTaskFramer`, `RoutingTaskFramer`,
+  `TaskFramingRepairPolicy`, and legacy belief-state migration;
 - structured judgment validation and repair contracts.
 
 Architectural rule:
@@ -545,10 +567,10 @@ Responsibilities:
 - adapt runner observations into flushed NDJSON records on
   `POST /api/runs/autonomous/stream` while retaining
   `/api/runs/autonomous` for the synchronous JSON contract;
-- serialize the terminal run record, final answer, normalized belief state,
+- serialize the terminal run record, final answer, relation-aware belief state,
   integrated cycle, signal, evidence, update, and evolution traces;
-- expose run regime/status/stop reason, posterior mass, top-gap uncertainty,
-  and cycle lifecycle timestamps.
+- expose run regime/status/stop reason, exclusive posterior mass or independent
+  credence, relation-aware top-gap uncertainty, and cycle lifecycle timestamps.
 
 Architectural rule:
 
@@ -622,16 +644,16 @@ snapshot, and completes the four-phase protocol.
 | Active/passive/mixed cycle shapes | Strong | Implemented in core validation, synchronized runner, and benchmark harness. |
 | Signal Inbox and boundary | Strong MVP | Cycle-local closure and terminal `open -> closed -> integrated` timestamps exist; real-time late-signal queueing remains future work. |
 | Evidence Integration Gate | Strong MVP | Direct evidence, real projection decomposition, exact target validation, bounded quality overrides, schema violation, and repair paths exist. |
-| Belief update | Strong MVP | Exclusive rivals remain normalized; penalties, discarded-evidence neutrality, current summaries, and auditable rival movement are implemented. |
-| Hypothesis evolution | Good MVP | Anomaly spawn, weakening/reframing/retirement style evolution exists and preserves normalized rival state. |
+| Belief update | Strong MVP | Exclusive mass remains normalized; independent credences update without cross-normalization; penalties, discarded-evidence neutrality, and relation-aware summaries are implemented. |
+| Hypothesis evolution | Good MVP | Anomaly spawn, weakening/reframing/retirement style evolution preserves explicit independent conflicts and reciprocal exclusive rivals; semantic evolution remains deferred. |
 | Probe planning | Good MVP | Candidate ranking and bounded probe-set design exist. |
 | Probe execution/tool seam | Good MVP | Deterministic and model-backed adapters exist; search/retrieval/tool adapters remain future work. |
 | Autonomous question loop | Strong MVP | End-to-end runner returns a terminal run, final integrated cycle, answer projection, and explicit stop reason. |
 | Synchronized round loop | Strong MVP | Fixed-round runner enforces synchronized regime and supports passive-only, active-only, and mixed rounds. |
 | Ledger/audit | Strong MVP | JSONL audit path has explicit canonical ownership and exactly-once probe-set/signal records. |
 | Benchmark harness | Good MVP | Toy and real methodology-path fixtures, suite/report flow, net-direction scoring, and belief-quality metrics exist. |
-| Config/CLI/SDK | Strong MVP | JSON experiment config, CLI, public core/runners/tool seams, package-root imports, and external execution regression coverage exist. |
-| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; synchronous JSON and autonomous NDJSON progress streams expose completed runs, normalized belief, integrated cycles, provider errors, and full traces. Streaming remains phase/cycle-only and credentials remain request-scoped and page-memory-only. |
+| Config/CLI/SDK | Strong MVP | JSON experiment config, CLI, public core/runners/tool/framing seams, package-root imports, and external execution regression coverage exist. |
+| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; synchronous JSON and autonomous NDJSON progress streams expose completed runs, relation-aware belief, integrated cycles, provider errors, and full traces. Streaming remains phase/cycle-only and credentials remain request-scoped and page-memory-only. |
 | Model gateway | Strong MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Explicit request controls, bounded transport retries, and per-attempt token/latency/error observation are implemented. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
@@ -646,11 +668,13 @@ Implemented: explicit/model/recorded TaskFrame before Belief State creation.
 
 Implemented: fail-closed open framing with one structured repair.
 
-Implemented: explicit categorical and independent belief-update semantics.
+Implemented: exclusive categorical mass and non-normalized independent credence
+solver semantics.
 
 Not yet implemented: cross-cycle Evidence Memory.
 
-Not yet implemented: task-aware ProbeDesigner and open Answer Projection.
+Not yet implemented: task-aware ProbeDesigner and open Answer Projection
+synthesis.
 
 ## 7. External Seams and Configuration
 
@@ -661,8 +685,9 @@ The architecture should expose variation through a small number of deep seams.
 Use for model-shaped structured decisions:
 
 - evidence judgment;
+- open-question framing and its single bounded repair;
 - structured model-backed probe execution behind `ProbeToolGateway`;
-- future judgment repair;
+- evidence-judgment repair when configured;
 - future hypothesis evolution assistance;
 - future projection writing or compression;
 - future prompt-versioned provider calls;

@@ -239,6 +239,52 @@ def test_initializer_writes_ledger_records_without_evidence_or_answers(tmp_path:
     assert "answer_projection" not in record_types
 
 
+@pytest.mark.parametrize(
+    "context",
+    [
+        "Source includes sk-abcdefghijklmnop",
+        "password = correct-horse-battery-staple",
+        "Authorization: Bearer abcdefghijklmnop",
+        "-----BEGIN PRIVATE KEY-----",
+        "access_key='AKIAEXAMPLEVALUE'",
+    ],
+)
+def test_initializer_rejects_secret_compatibility_context_before_materialization(
+    tmp_path: Path,
+    context: str,
+):
+    ledger_path = tmp_path / "secret-context-initialization.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+
+    with pytest.raises(
+        TaskFramingError,
+        match="compatibility context must not contain secret material",
+    ):
+        BayesProbeInitializer(ledger=ledger).initialize(
+            InitializeRunInput(
+                run_id="run_secret_compatibility_context",
+                problem="Should this source change the belief state?",
+                context=context,
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
+            )
+        )
+
+    assert not ledger_path.exists()
+
+
+def test_initializer_preserves_ordinary_compatibility_source_text():
+    result = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_ordinary_compatibility_context",
+            problem="Should this source change the belief state?",
+            context="The source compares password policies and access key rotation.",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    )
+
+    assert result.run.metadata["context_provided"] is True
+
+
 def test_initialized_belief_state_can_run_autonomous_loop():
     initialization = BayesProbeInitializer().initialize(
         InitializeRunInput(

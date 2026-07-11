@@ -1,7 +1,7 @@
 # Open-Question Architecture Correction Design
 
 Date: 2026-07-11
-Status: Awaiting written-spec review
+Status: Approved and implemented (Milestones 1-2)
 
 ## 1. Decision
 
@@ -600,7 +600,7 @@ any new progress estimate is published:
   gates pass;
 - state that model reasoning is not external verification;
 - state the exact implemented evolution operations;
-- remove the 88-91 percent global estimate;
+- remove the obsolete global completion estimate;
 - document TaskFrame, HypothesisFrame, relation-aware solving, Evidence Memory,
   and task-aware projection.
 

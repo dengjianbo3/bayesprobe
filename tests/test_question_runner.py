@@ -19,7 +19,7 @@ from bayesprobe.question_runner import (
     AutonomousQuestionProgressKind,
     AutonomousQuestionStopReason,
 )
-from bayesprobe.task_framing import ModelTaskFramer
+from bayesprobe.task_framing import ModelTaskFramer, TaskFramingError
 from bayesprobe.schemas import (
     CycleSignalShape,
     HypothesisRelation,
@@ -551,6 +551,32 @@ def test_question_runner_emits_truthful_progress_for_integrated_cycle():
         for hypothesis in cycle_event.cycle_result.belief_state.hypotheses
     ) == pytest.approx(1.0)
     assert events[-1].result == result
+
+
+def test_question_runner_rejects_secret_context_before_progress_or_ledger(tmp_path: Path):
+    ledger_path = tmp_path / "secret-context-runner.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+    events = []
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(ledger=ledger),
+        progress_observer=events.append,
+    )
+
+    with pytest.raises(
+        TaskFramingError,
+        match="compatibility context must not contain secret material",
+    ):
+        runner.run_question(
+            InitializeRunInput(
+                run_id="run_secret_context_before_progress",
+                problem="Does validation happen before progress?",
+                context="credential = provider-value-123",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
+            )
+        )
+
+    assert events == []
+    assert not ledger_path.exists()
 
 
 def test_question_runner_progress_ends_once_when_no_probe_cycle_is_created():

@@ -1,5 +1,7 @@
 import pytest
 
+import bayesprobe.schemas as schemas
+
 from bayesprobe.schemas import (
     BeliefState,
     AnswerContract,
@@ -130,6 +132,69 @@ def test_forbidden_secret_key_name_normalizes_common_variants(key):
 
 def test_secret_predicates_allow_ordinary_tokenization_prose():
     assert not is_secret_like_value("Tokenization is a useful concept.")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "sk-abcdefghijklmnop",
+        "password = correct-horse-battery-staple",
+        "credential: provider-value-123",
+        "Authorization: Bearer abcdefghijklmnop",
+        "-----BEGIN PRIVATE KEY-----",
+        "access_key='AKIAEXAMPLEVALUE'",
+    ],
+)
+def test_secret_value_predicate_detects_credential_text_forms(value):
+    assert is_secret_like_value(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Tokenization is a useful concept.",
+        "Compare password policies without including a password value.",
+        "Bearer authentication should use short-lived credentials.",
+        "Private-key cryptography has different trust assumptions.",
+        "The source discusses access key rotation practices.",
+    ],
+)
+def test_secret_value_predicate_preserves_ordinary_source_text(value):
+    assert not is_secret_like_value(value)
+
+
+def test_shared_redaction_removes_forbidden_fields_and_redacts_secret_strings():
+    redact_secret_material = getattr(schemas, "redact_secret_material")
+    payload = {
+        "private_key": "first-private-value",
+        "password": "second-password-value",
+        "credential": "third-credential-value",
+        "access_key": "fourth-access-value",
+        "nested": {
+            "authorization_text": "Authorization: Bearer abcdefghijklmnop",
+            "ordinary_source": "A source compares password policies.",
+        },
+    }
+
+    sanitized = redact_secret_material(payload)
+    serialized = repr(sanitized)
+
+    for forbidden in (
+        "private_key",
+        "credential",
+        "access_key",
+        "first-private-value",
+        "second-password-value",
+        "third-credential-value",
+        "fourth-access-value",
+        "abcdefghijklmnop",
+    ):
+        assert forbidden not in serialized
+    assert sanitized == {
+        "nested": {
+            "ordinary_source": "A source compares password policies.",
+        }
+    }
 
 
 @pytest.mark.parametrize(

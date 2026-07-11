@@ -150,6 +150,29 @@ def test_sanitized_request_hash_is_stable_and_secret_value_independent():
     assert len(sanitized_request_sha256(first)) == 64
 
 
+def test_sanitized_request_hash_ignores_secret_field_variants_and_secret_text():
+    first = {
+        "model": "provider-model",
+        "messages": [{"role": "user", "content": "same prompt"}],
+        "private_key": "first-private-value",
+        "nested": {
+            "credential": "first-credential-value",
+            "header": "Authorization: Bearer abcdefghijklmnop",
+        },
+    }
+    second = {
+        "model": "provider-model",
+        "messages": [{"role": "user", "content": "same prompt"}],
+        "password": "second-password-value",
+        "nested": {
+            "access_key": "second-access-value",
+            "header": "Authorization: Bearer zyxwvutsrqponmlk",
+        },
+    }
+
+    assert sanitized_request_sha256(first) == sanitized_request_sha256(second)
+
+
 def test_provider_error_category_normalizes_common_transport_failures():
     assert provider_error_category(TimeoutError("slow")) == "timeout"
     assert provider_error_category(ConnectionError("reset")) == "connection"

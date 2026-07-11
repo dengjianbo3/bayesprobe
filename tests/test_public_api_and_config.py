@@ -106,6 +106,10 @@ def test_public_sdk_exports_supported_names():
         "InitializationResult",
         "HypothesisSeed",
         "ExplicitTaskFramer",
+        "ModelTaskFramer",
+        "RecordedTaskFramer",
+        "RoutingTaskFramer",
+        "TaskFramingRepairPolicy",
         "TaskFramer",
         "TaskFramingError",
         "TaskFramingInput",
@@ -140,6 +144,7 @@ def test_public_sdk_exports_supported_names():
         "FramingMethod",
         "TaskFrame",
         "TaskKind",
+        "migrate_legacy_belief_state",
     }
 
     assert expected_names.issubset(set(bayesprobe.__all__))
@@ -205,6 +210,42 @@ def test_public_sdk_runs_autonomous_question_without_internal_imports():
     assert result.run.status == bayesprobe.RunStatus.COMPLETED
     assert result.run.regime == bayesprobe.RunRegime.AUTONOMOUS
     assert result.final_answer_projection is not None
+
+
+def test_public_sdk_configures_recorded_open_framing_without_internal_imports():
+    source_frame = bayesprobe.ExplicitTaskFramer().frame(
+        bayesprobe.TaskFramingInput(
+            run_id="public_recorded_fixture",
+            question="Which explanation fits?",
+            task_context="Fixture context",
+            hypothesis_seeds=[
+                bayesprobe.HypothesisSeed(statement="The first explanation fits."),
+                bayesprobe.HypothesisSeed(statement="The second explanation fits."),
+            ],
+        )
+    )
+    routing_framer = bayesprobe.RoutingTaskFramer(
+        explicit_framer=bayesprobe.ExplicitTaskFramer(),
+        open_framer=bayesprobe.RecordedTaskFramer(source_frame),
+    )
+    initializer = bayesprobe.BayesProbeInitializer(task_framer=routing_framer)
+    model_framer = bayesprobe.ModelTaskFramer(
+        bayesprobe.ScriptedModelGateway({}),
+        repair_policy=bayesprobe.TaskFramingRepairPolicy(max_attempts=0),
+    )
+
+    result = initializer.initialize(
+        bayesprobe.InitializeRunInput(
+            run_id="public_recorded_replay",
+            problem="How should this open question be framed?",
+            task_context="Current external caller context",
+        )
+    )
+
+    assert model_framer is not None
+    assert result.task_frame.framing_method == bayesprobe.FramingMethod.RECORDED
+    assert result.task_frame.task_context == "Current external caller context"
+    assert callable(bayesprobe.migrate_legacy_belief_state)
 
 
 def test_pyproject_declares_optional_openai_extra_without_required_dependency():

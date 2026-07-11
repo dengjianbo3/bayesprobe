@@ -17,7 +17,11 @@ from urllib.parse import urlparse
 from pydantic import BaseModel
 
 from bayesprobe.core import BayesProbeCore
-from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.initialization import (
+    BayesProbeInitializer,
+    InitializeRunInput,
+    validate_compatibility_context_security,
+)
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     ModelGateway,
@@ -542,6 +546,10 @@ def _parse_autonomous_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise WebUIError("request payload must be an object")
     question = _required_nonempty_string(payload.get("question"), "question")
     context = _optional_string(payload.get("context"), "context", default="")
+    try:
+        validate_compatibility_context_security(context)
+    except TaskFramingError as error:
+        raise WebUIError(str(error)) from None
     task_context = _optional_string(
         payload.get("task_context"), "task_context", default=""
     )

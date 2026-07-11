@@ -358,6 +358,75 @@ test("keeps beliefs pending until task framing completes initialization", () => 
   assert.ok(elements.get("belief-panel").children.length > 0);
 });
 
+test("rejects out-of-order initialization without rendering a belief state", () => {
+  const { api, elements } = loadApp();
+  elements.get("belief-panel").textContent = "Run pending.";
+
+  api.handleProgressEvent({
+    event: "run_started",
+    sequence: 1,
+    run_id: "run-out-of-order",
+    data: {},
+  });
+
+  assert.throws(
+    () => api.handleProgressEvent({
+      event: "initialization_completed",
+      sequence: 2,
+      run_id: "run-out-of-order",
+      data: { belief_state: integratedCycleEvent().data.belief_state },
+    }),
+    /before task framing completed/
+  );
+  assert.equal(elements.get("belief-panel").textContent, "Run pending.");
+  assert.equal(elements.get("belief-panel").children.length, 0);
+});
+
+test("resets task framing completion for each run", () => {
+  const { api, elements } = loadApp();
+
+  api.handleProgressEvent({
+    event: "run_started",
+    sequence: 1,
+    run_id: "run-one",
+    data: {},
+  });
+  api.handleProgressEvent({
+    event: "task_framing_completed",
+    sequence: 2,
+    run_id: "run-one",
+    data: { task_frame: { task_kind: "claim_verification" } },
+  });
+  api.handleProgressEvent({
+    event: "run_started",
+    sequence: 1,
+    run_id: "run-two",
+    data: {},
+  });
+
+  assert.throws(
+    () => api.handleProgressEvent({
+      event: "initialization_completed",
+      sequence: 2,
+      run_id: "run-two",
+      data: { belief_state: integratedCycleEvent().data.belief_state },
+    }),
+    /before task framing completed/
+  );
+  assert.equal(elements.get("belief-panel").children.length, 0);
+});
+
+test("uses relation-neutral permanent belief terminology", () => {
+  const indexPath = path.join(__dirname, "..", "bayesprobe", "webui_static", "index.html");
+  const index = fs.readFileSync(indexPath, "utf8");
+  const app = fs.readFileSync(APP_PATH, "utf8");
+
+  assert.match(index, /<span class="eyebrow">Belief measure<\/span>/);
+  assert.doesNotMatch(index, /<span class="eyebrow">Posterior<\/span>/);
+  assert.match(app, /cycle_integrated: "Belief updated"/);
+  assert.match(app, /relation === "independent" \? "credence" : "posterior"/);
+});
+
 test("renders independent beliefs as non-normalized credence", () => {
   const { api, elements } = loadApp();
   const event = integratedCycleEvent();

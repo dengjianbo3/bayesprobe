@@ -625,6 +625,63 @@ def test_webui_rejects_secret_caller_framing_input_before_provider_run_or_stream
     assert FakeWebUIChatOpenAI.created_with == []
 
 
+@pytest.mark.parametrize("provider_kind", ["deterministic", "openai_chat_completions"])
+@pytest.mark.parametrize(
+    "context",
+    [
+        "Source includes sk-abcdefghijklmnop",
+        "password = correct-horse-battery-staple",
+        "Authorization: Bearer abcdefghijklmnop",
+        "-----BEGIN PRIVATE KEY-----",
+        "access_key='AKIAEXAMPLEVALUE'",
+    ],
+)
+def test_webui_rejects_secret_compatibility_context_before_run_stream_or_client(
+    provider_kind,
+    context,
+):
+    FakeWebUIChatOpenAI.created_with = []
+    provider = {"kind": "deterministic"}
+    client_factory = None
+    if provider_kind == "openai_chat_completions":
+        provider = {
+            "kind": provider_kind,
+            "api_key": "provider-secret-123",
+            "model": "provider-model",
+        }
+        client_factory = FakeWebUIChatOpenAI
+    payload = {
+        "question": "Which result follows?",
+        "answer_choices": deterministic_answer_choices(),
+        "context": context,
+        "provider": provider,
+    }
+    events = []
+
+    status, response = handle_autonomous_run_request(
+        payload,
+        client_factory=client_factory,
+    )
+    stream_status, stream_response = handle_autonomous_stream_request(
+        payload,
+        event_sink=events.append,
+        client_factory=client_factory,
+    )
+
+    expected_error = {
+        "error": {
+            "type": "validation_error",
+            "message": "compatibility context must not contain secret material",
+        }
+    }
+    assert status == 400
+    assert response == expected_error
+    assert stream_status == 400
+    assert stream_response == expected_error
+    assert events == []
+    assert FakeWebUIChatOpenAI.created_with == []
+
+
 def test_webui_rejects_more_than_six_choices_before_deterministic_run_or_stream():
     payload = {
         "question": "Which result follows?",
@@ -903,6 +960,8 @@ def test_webui_static_assets_define_operational_workbench():
     assert "new TextDecoder()" in script
     assert "function handleProgressEvent(" in script
     assert 'task_context: valueOf("task-context")' in script
+    assert '<span class="eyebrow">Belief measure</span>' in index
+    assert '<span class="eyebrow">Posterior</span>' not in index
     assert 'task_framing_started: "Framing task"' in script
     assert 'task_framing_completed: "Task framed"' in script
     assert "cycle_integrated" in script

@@ -9,16 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-
-_SECRET_KEYS = {
-    "apikey",
-    "authorization",
-    "cookie",
-    "password",
-    "proxyauthorization",
-    "secret",
-    "token",
-}
+from bayesprobe.schemas import redact_secret_material
 
 
 @dataclass(frozen=True)
@@ -143,7 +134,7 @@ def extract_provider_response_metadata(
 
 
 def sanitized_request_sha256(payload: Mapping[str, Any]) -> str:
-    sanitized = _sanitize(payload)
+    sanitized = redact_secret_material(payload)
     serialized = json.dumps(
         sanitized,
         ensure_ascii=False,
@@ -192,21 +183,6 @@ def _token_count(value: Any, *keys: str) -> int | None:
 
 def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
-
-
-def _sanitize(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        sanitized: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            collapsed = "".join(character for character in key_text.lower() if character.isalnum())
-            sanitized[key_text] = (
-                "<redacted>" if collapsed in _SECRET_KEYS else _sanitize(item)
-            )
-        return sanitized
-    if isinstance(value, list | tuple):
-        return [_sanitize(item) for item in value]
-    return value
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:

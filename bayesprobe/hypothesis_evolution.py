@@ -84,6 +84,7 @@ class HypothesisEvolutionEngine:
                     cycle=cycle,
                     previous_belief_state=previous_belief_state,
                     event=event,
+                    relation=relation,
                 )
                 if spawn.hypothesis.id not in {hypothesis.id for hypothesis in hypotheses}:
                     hypotheses.append(spawn.hypothesis)
@@ -123,9 +124,14 @@ class HypothesisEvolutionEngine:
         cycle: CycleRecord,
         previous_belief_state: BeliefState,
         event: EvidenceEvent,
+        relation: HypothesisRelation,
     ) -> _SpawnResult:
         hypothesis_id = f"H_{event.id}_spawned"
-        rival_ids = [hypothesis.id for hypothesis in previous_belief_state.hypotheses]
+        rival_ids = (
+            [hypothesis.id for hypothesis in previous_belief_state.hypotheses]
+            if relation == HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
+            else []
+        )
         reason = "Anomaly has low likelihood under all active hypotheses."
         required_next_probe = "probe anomaly boundary condition"
         evolution = HypothesisEvolution(
@@ -370,12 +376,7 @@ def _reconcile_dynamic_rivals(
     relation: HypothesisRelation,
 ) -> list[Hypothesis]:
     if relation == HypothesisRelation.INDEPENDENT:
-        return [
-            hypothesis.model_copy(update={"rivals": []})
-            if hypothesis.rivals
-            else hypothesis
-            for hypothesis in hypotheses
-        ]
+        return hypotheses
     ids = [hypothesis.id for hypothesis in hypotheses]
     return [
         hypothesis.model_copy(

@@ -33,7 +33,7 @@ const PROGRESS_LABEL_BY_EVENT = {
   probe_execution_started: "Executing probes",
   signals_collected: "Signals collected",
   evidence_integration_started: "Integrating evidence",
-  cycle_integrated: "Posterior updated",
+  cycle_integrated: "Belief updated",
   run_completed: "Run completed",
   run_failed: "Run failed",
 };
@@ -47,6 +47,8 @@ const providerControls = [
 ];
 const streamedCycles = [];
 let runInFlight = false;
+let activeStreamRunId = null;
+let taskFramingCompletedForRun = false;
 
 providerKind.addEventListener("change", syncProviderControls);
 form.addEventListener("submit", handleSubmit);
@@ -220,6 +222,28 @@ async function consumeRunStream(response, eventHandler = handleProgressEvent) {
 function handleProgressEvent(event) {
   const eventName = event.event;
 
+  if (eventName === "run_started") {
+    activeStreamRunId = event.run_id || null;
+    taskFramingCompletedForRun = false;
+  }
+  if (
+    eventName === "task_framing_completed" &&
+    activeStreamRunId !== null &&
+    event.run_id === activeStreamRunId
+  ) {
+    taskFramingCompletedForRun = true;
+  }
+  if (
+    eventName === "initialization_completed" &&
+    (
+      activeStreamRunId === null ||
+      event.run_id !== activeStreamRunId ||
+      !taskFramingCompletedForRun
+    )
+  ) {
+    throw new Error("Belief initialization arrived before task framing completed for this run");
+  }
+
   renderProgressEvent(event);
 
   if (eventName === "run_started") {
@@ -253,6 +277,8 @@ function handleProgressEvent(event) {
 
 function resetRunProgress() {
   streamedCycles.length = 0;
+  activeStreamRunId = null;
+  taskFramingCompletedForRun = false;
   progressList.innerHTML = "";
   progressState.textContent = "Running";
   answerProjectionState.textContent = "Current";

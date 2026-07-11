@@ -14,6 +14,7 @@ from bayesprobe.task_framing import (
     RoutingTaskFramer,
     TaskFramingError,
     TaskFramingInput,
+    TaskFramingRepairPolicy,
     task_frame_from_mapping,
 )
 
@@ -493,7 +494,7 @@ def test_model_task_framer_repairs_once_then_accepts_without_retaining_secrets()
         "repair_task_frame",
     ]
     assert gateway.requests[1].metadata["repair_attempt_index"] == 1
-    assert gateway.requests[1].input["invalid_payload"]["api_key"] == "[REDACTED]"
+    assert "api_key" not in gateway.requests[1].input["invalid_payload"]
     assert "sk-abcdefghijklmnop" not in repr(gateway.requests[1])
     assert frame.framing_trace["repair_attempt_index"] == 1
 
@@ -572,6 +573,135 @@ def test_model_task_framer_fails_after_one_invalid_repair():
         ModelTaskFramer(gateway).frame(
             TaskFramingInput(run_id="run_bad_repair", question="How should this be tested?")
         )
+
+
+@pytest.mark.parametrize("max_attempts", [2, 3, 100])
+def test_task_framing_repair_policy_rejects_more_than_one_repair(max_attempts):
+    with pytest.raises(ValueError, match="at most one"):
+        TaskFramingRepairPolicy(max_attempts=max_attempts)
+
+
+@pytest.mark.parametrize(
+    "policy,expected_tasks",
+    [
+        (TaskFramingRepairPolicy(max_attempts=0), ["frame_open_question"]),
+        (
+            TaskFramingRepairPolicy(max_attempts=1),
+            ["frame_open_question", "repair_task_frame"],
+        ),
+    ],
+)
+def test_model_task_framer_request_order_is_bounded_to_frame_plus_one_repair(
+    policy,
+    expected_tasks,
+):
+    gateway = QueueModelGateway(
+        [
+            {"task_kind": "claim_verification", "hypotheses": []},
+            {"task_kind": "claim_verification", "hypotheses": []},
+        ]
+    )
+
+    with pytest.raises(TaskFramingError):
+        ModelTaskFramer(gateway, repair_policy=policy).frame(
+            TaskFramingInput(run_id="run_bounded_repair", question="How should this be tested?")
+        )
+
+    assert [request.task for request in gateway.requests] == expected_tasks
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("statement", 42),
+        ("type", ["causal_claim"]),
+        ("scope", None),
+        ("falsifiers", "not-a-list"),
+        ("predictions", ("not-a-native-list",)),
+        ("coverage_statement", 42),
+        ("coverage_limitation", {"text": "not-a-string"}),
+    ],
+)
+def test_chat_shaped_malformed_provider_semantics_get_one_repair(field, value):
+    malformed = deepcopy(VALID_OPEN_FRAME)
+    if field in {"coverage_statement", "coverage_limitation"}:
+        malformed[field] = value
+    else:
+        malformed["hypotheses"][0][field] = value
+    gateway = QueueModelGateway([malformed, VALID_OPEN_FRAME])
+
+    frame = ModelTaskFramer(gateway).frame(
+        TaskFramingInput(run_id=f"run_native_{field}", question="How should this be tested?")
+    )
+
+    assert frame.hypothesis_frame.hypotheses[0].statement == (
+        VALID_OPEN_FRAME["hypotheses"][0]["statement"]
+    )
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+
+
+def test_second_chat_shaped_malformed_provider_frame_fails_closed():
+    malformed = deepcopy(VALID_OPEN_FRAME)
+    malformed["hypotheses"][0]["falsifiers"] = "not-a-list"
+    gateway = QueueModelGateway([malformed, malformed])
+
+    with pytest.raises(TaskFramingError, match="invalid after 1 repair attempt"):
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(run_id="run_native_fail_closed", question="How should this be tested?")
+        )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+
+
+def test_repair_request_uses_shared_redaction_for_forbidden_fields_and_values():
+    malformed = deepcopy(VALID_OPEN_FRAME)
+    malformed["hypotheses"][0].update(
+        {
+            "private_key": "private-field-value",
+            "password": "password-field-value",
+            "credential": "credential-field-value",
+            "access_key": "access-field-value",
+        }
+    )
+    gateway = QueueModelGateway([malformed, VALID_OPEN_FRAME])
+
+    ModelTaskFramer(gateway).frame(
+        TaskFramingInput(run_id="run_shared_redaction", question="How should this be tested?")
+    )
+
+    repair_payload = repr(gateway.requests[1].input)
+    for forbidden in (
+        "private_key",
+        "password",
+        "credential",
+        "access_key",
+        "private-field-value",
+        "password-field-value",
+        "credential-field-value",
+        "access-field-value",
+    ):
+        assert forbidden not in repair_payload
+
+
+def test_generic_secret_text_is_redacted_before_repair_and_from_exception_chain():
+    secret = "Authorization: Bearer abcdefghijklmnop"
+    malformed = deepcopy(VALID_OPEN_FRAME)
+    malformed["coverage_statement"] = secret
+    gateway = QueueModelGateway([malformed, malformed])
+
+    with pytest.raises(TaskFramingError) as captured:
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(run_id="run_generic_secret", question="How should this be tested?")
+        )
+
+    assert secret not in repr(gateway.requests[1])
+    _assert_secret_free_exception(captured.value, secret)
 
 
 def test_model_task_framer_hides_initial_gateway_exception_details():
@@ -668,6 +798,83 @@ def test_recorded_task_framer_scopes_trace_to_current_run_and_keeps_provenance()
     assert frame.framing_trace["recorded_from_task_frame_id"] == "fixture_run_task_frame"
     assert frame.framing_trace["source_framing_method"] == "model"
     assert frame.framing_trace["source_trace"]["metadata"]["run_id"] == "fixture_run"
+
+
+def test_recorded_task_framer_uses_current_normalized_question_and_task_context():
+    source_frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="fixture_current_input",
+            question="Fixture question",
+            task_context="Stale fixture context",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation."),
+                HypothesisSeed(statement="The second explanation."),
+            ],
+        )
+    )
+
+    frame = RecordedTaskFramer(source_frame).frame(
+        TaskFramingInput(
+            run_id="replay_current_input",
+            question="  Current replay question  ",
+            task_context="  Current replay context  ",
+        )
+    )
+
+    assert frame.normalized_question == "Current replay question"
+    assert frame.task_context == "Current replay context"
+
+
+@pytest.mark.parametrize(
+    "input",
+    [
+        TaskFramingInput(run_id="replay_empty_question", question="   "),
+        TaskFramingInput(
+            run_id="replay_bad_context",
+            question="Current replay question",
+            task_context=123,
+        ),
+    ],
+)
+def test_recorded_task_framer_rejects_malformed_current_input_with_stable_error(input):
+    source_frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="fixture_bad_current_input",
+            question="Fixture question",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation."),
+                HypothesisSeed(statement="The second explanation."),
+            ],
+        )
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task framing input"):
+        RecordedTaskFramer(source_frame).frame(input)
+
+
+def test_recorded_task_framer_revalidates_the_materialized_task_frame():
+    source_frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="fixture_invalid_copy",
+            question="Fixture question",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation."),
+                HypothesisSeed(statement="The second explanation."),
+            ],
+        )
+    )
+    invalid_source = source_frame.model_copy(
+        update={
+            "answer_contract": source_frame.answer_contract.model_copy(
+                update={"required_sections": []}
+            )
+        }
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(invalid_source).frame(
+            TaskFramingInput(run_id="replay_invalid_copy", question="Current question")
+        )
 
 
 def test_routing_task_framer_keeps_explicit_mcq_off_the_model_gateway():

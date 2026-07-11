@@ -130,7 +130,29 @@ def _normalized_semantic_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
-_SECRET_VALUE_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{12,}", re.IGNORECASE)
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}", re.IGNORECASE),
+    re.compile(
+        r"\b(?:api[ _-]?key|access[ _-]?key|private[ _-]?key|password|passwd|"
+        r"credential(?:s)?|cookie|secret|token)\b\s*(?:=|:)\s*[\"']?"
+        r"(?:Bearer\s+)?[A-Za-z0-9._~+/=-]{6,}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bauthorization\b\s*(?:=|:)\s*[\"']?Bearer\s+"
+        r"[A-Za-z0-9._~+/=-]{8,}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bBearer\s+(?=[A-Za-z0-9._~+/=-]{12,}(?:\s|$))"
+        r"(?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{12,}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----",
+        re.IGNORECASE,
+    ),
+)
 _FORBIDDEN_SECRET_KEY_PARTS = (
     "apikey",
     "authorization",
@@ -142,11 +164,14 @@ _FORBIDDEN_SECRET_KEY_PARTS = (
     "credential",
     "credentials",
     "accesskey",
+    "cookie",
 )
 
 
 def is_secret_like_value(value: str) -> bool:
-    return isinstance(value, str) and _SECRET_VALUE_PATTERN.search(value) is not None
+    return isinstance(value, str) and any(
+        pattern.search(value) is not None for pattern in _SECRET_VALUE_PATTERNS
+    )
 
 
 def is_forbidden_secret_key_name(value: str) -> bool:
@@ -154,6 +179,26 @@ def is_forbidden_secret_key_name(value: str) -> bool:
         return False
     normalized_key = re.sub(r"[^a-z0-9]", "", value.casefold())
     return any(part in normalized_key for part in _FORBIDDEN_SECRET_KEY_PARTS)
+
+
+def redact_secret_material(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return redact_secret_material(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if is_forbidden_secret_key_name(key_text) or is_secret_like_value(key_text):
+                continue
+            sanitized[key_text] = redact_secret_material(item)
+        return sanitized
+    if isinstance(value, list | tuple):
+        return [redact_secret_material(item) for item in value]
+    if isinstance(value, str):
+        return "[REDACTED]" if is_secret_like_value(value) else value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return "[UNSUPPORTED]"
 
 
 def _reject_secret_string(value: str) -> None:
