@@ -79,7 +79,12 @@ class ExplicitTaskFramer:
     def frame(self, input: TaskFramingInput) -> TaskFrame:
         prepared = _prepare_explicit_input(input)
         if prepared.choices:
-            return _frame_choices(input, prepared.choices, prepared.normalized_question)
+            return _frame_choices(
+                input,
+                prepared.choices,
+                prepared.normalized_question,
+                prepared.task_context,
+            )
         return _frame_seeds(input, prepared)
 
 
@@ -110,6 +115,7 @@ def parse_legacy_answer_choice_frame(
 @dataclass(frozen=True)
 class _PreparedExplicitInput:
     normalized_question: str
+    task_context: str = ""
     choices: list[AnswerChoice] = field(default_factory=list)
     seeds: list[HypothesisSeed] = field(default_factory=list)
     task_kind: TaskKind = TaskKind.DECISION
@@ -119,32 +125,39 @@ class _PreparedExplicitInput:
 
 
 def _prepare_explicit_input(input: TaskFramingInput) -> _PreparedExplicitInput:
+    normalized_question = _required_question(input.question)
+    task_context = _normalize_task_context(input.task_context)
+    answer_choices = _required_list(input.answer_choices, "answer_choices")
+    raw_seeds = _required_list(input.hypothesis_seeds, "hypothesis_seeds")
+    _normalize_task_kind(input.task_kind)
+    _normalize_hypothesis_relation(input.hypothesis_relation)
     parsed = (
         None
-        if input.answer_choices
-        else parse_legacy_answer_choice_frame(input.question)
+        if answer_choices
+        else parse_legacy_answer_choice_frame(normalized_question)
     )
-    choices = list(input.answer_choices) if input.answer_choices else (
+    choices = list(answer_choices) if answer_choices else (
         list(parsed.choices) if parsed is not None else []
     )
-    seeds = list(input.hypothesis_seeds)
+    seeds = [_normalize_seed(seed) for seed in raw_seeds]
     if choices and seeds:
         raise TaskFramingError("provide answer choices or hypothesis seeds, not both")
     if choices:
-        normalized_question = parsed.stem if parsed is not None else _required_question(input.question)
+        normalized_question = parsed.stem if parsed is not None else normalized_question
         _validate_choices(choices)
         return _PreparedExplicitInput(
             normalized_question=normalized_question,
+            task_context=task_context,
             choices=choices,
             task_kind=TaskKind.MULTIPLE_CHOICE,
         )
     if seeds:
-        normalized_question = _required_question(input.question)
-        relation = input.hypothesis_relation or HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
-        task_kind = input.task_kind or TaskKind.DECISION
+        relation = _normalize_hypothesis_relation(input.hypothesis_relation)
+        task_kind = _normalize_task_kind(input.task_kind)
         priors = _validate_seeds(seeds, relation, task_kind)
         return _PreparedExplicitInput(
             normalized_question=normalized_question,
+            task_context=task_context,
             seeds=seeds,
             task_kind=task_kind,
             relation=relation,
@@ -162,8 +175,90 @@ def _required_question(value: str) -> str:
     return value.strip()
 
 
+def _normalize_task_context(value: str) -> str:
+    if not isinstance(value, str):
+        raise TaskFramingError("task_context must be a string")
+    return value.strip()
+
+
+def _required_list(value: Any, field_name: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise TaskFramingError(f"{field_name} must be a list")
+    return list(value)
+
+
+def _normalize_task_kind(value: TaskKind | None) -> TaskKind:
+    if value is None:
+        return TaskKind.DECISION
+    try:
+        return TaskKind(value)
+    except (TypeError, ValueError) as error:
+        raise TaskFramingError("task_kind must be a valid TaskKind") from error
+
+
+def _normalize_hypothesis_relation(
+    value: HypothesisRelation | None,
+) -> HypothesisRelation:
+    if value is None:
+        return HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
+    try:
+        return HypothesisRelation(value)
+    except (TypeError, ValueError) as error:
+        raise TaskFramingError(
+            "hypothesis_relation must be a valid HypothesisRelation"
+        ) from error
+
+
+def _normalize_seed(value: Any) -> HypothesisSeed:
+    if not isinstance(value, HypothesisSeed):
+        raise TaskFramingError("hypothesis seeds must be HypothesisSeed instances")
+    return HypothesisSeed(
+        statement=_required_seed_text(value.statement, "hypothesis seed statement"),
+        id=_normalize_seed_id(value.id),
+        scope=_normalize_seed_scope(value.scope),
+        prior=_normalize_seed_prior(value.prior),
+        falsifiers=_normalize_seed_texts(value.falsifiers, "hypothesis seed falsifier"),
+        predictions=_normalize_seed_texts(value.predictions, "hypothesis seed prediction"),
+    )
+
+
+def _normalize_seed_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise TaskFramingError("hypothesis seed id must be a non-empty string")
+    return value.strip()
+
+
+def _normalize_seed_scope(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TaskFramingError("hypothesis seed scope must be a string")
+    return value.strip() or None
+
+
+def _normalize_seed_prior(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TaskFramingError("hypothesis seed prior must be a finite number")
+    prior = float(value)
+    if not math.isfinite(prior) or not 0 <= prior <= 1:
+        raise TaskFramingError("hypothesis seed prior must be between zero and one")
+    return prior
+
+
+def _normalize_seed_texts(value: Any, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise TaskFramingError(f"{field_name}s must be a list")
+    return [_required_seed_text(item, field_name) for item in value]
+
+
 def _validate_choices(choices: list[AnswerChoice]) -> None:
     _validate_hypothesis_count(len(choices))
+    if not all(isinstance(choice, AnswerChoice) for choice in choices):
+        raise TaskFramingError("answer_choices must contain AnswerChoice instances")
     labels = [choice.label for choice in choices]
     if len(labels) != len(set(labels)):
         raise TaskFramingError("answer choice labels must be unique")
@@ -180,9 +275,6 @@ def _validate_seeds(
         statements
     ):
         raise TaskFramingError("hypothesis seed statements must be semantically distinct")
-    for seed in seeds:
-        _validate_optional_seed_texts(seed.falsifiers, "hypothesis seed falsifier")
-        _validate_optional_seed_texts(seed.predictions, "hypothesis seed prediction")
     if (
         task_kind == TaskKind.MULTIPLE_CHOICE
         and relation != HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
@@ -196,11 +288,6 @@ def _validate_hypothesis_count(count: int) -> None:
         raise TaskFramingError("explicit framing requires between two and six hypotheses")
 
 
-def _validate_optional_seed_texts(values: list[str], field_name: str) -> None:
-    for value in values:
-        _required_seed_text(value, field_name)
-
-
 def _normalized_semantic_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
@@ -209,6 +296,7 @@ def _frame_choices(
     input: TaskFramingInput,
     choices: list[AnswerChoice],
     normalized_question: str,
+    task_context: str,
 ) -> TaskFrame:
     ids = [choice.label for choice in choices]
     priors = [1.0 / len(choices)] * len(choices)
@@ -236,7 +324,7 @@ def _frame_choices(
         task_frame_id=f"{input.run_id}_task_frame",
         task_kind=TaskKind.MULTIPLE_CHOICE,
         normalized_question=normalized_question,
-        task_context=input.task_context,
+        task_context=task_context,
         answer_contract=AnswerContract(
             objective="Select the best-supported answer choice.",
             required_sections=["selected_answer", "justification"],
@@ -296,7 +384,7 @@ def _frame_seeds(
         task_frame_id=f"{input.run_id}_task_frame",
         task_kind=task_kind,
         normalized_question=prepared.normalized_question,
-        task_context=input.task_context,
+        task_context=prepared.task_context,
         answer_contract=AnswerContract(
             objective="Assess the explicit hypotheses against available evidence.",
             required_sections=["hypotheses", "evidence", "decision"],

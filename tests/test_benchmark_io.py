@@ -171,6 +171,16 @@ def test_load_benchmark_dataset_rejects_invalid_files(
         load_benchmark_dataset(path)
 
 
+def test_load_benchmark_dataset_rejects_malformed_hypothesis_seed_lists(tmp_path: Path):
+    path = tmp_path / "malformed-seed.json"
+    payload = active_sample_payload()
+    payload["hypothesis_seeds"][0]["falsifiers"] = "not a list"
+    write_json(path, [payload])
+
+    with pytest.raises(ValueError, match="benchmark hypothesis seed falsifiers must be an array"):
+        load_benchmark_dataset(path)
+
+
 def test_write_benchmark_report_round_trips_suite_result(tmp_path: Path):
     dataset_path = tmp_path / "report-suite.json"
     write_json(

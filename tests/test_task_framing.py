@@ -158,3 +158,51 @@ def test_explicit_framer_capability_rejects_invalid_explicit_inputs(input):
     assert not framer.can_frame(input)
     with pytest.raises(TaskFramingError):
         framer.frame(input)
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [
+        HypothesisSeed(statement="First explanation.", prior="0.5"),
+        HypothesisSeed(statement="First explanation.", prior=float("nan")),
+        HypothesisSeed(statement="First explanation.", prior=float("inf")),
+        HypothesisSeed(statement="First explanation.", id=1),
+        HypothesisSeed(statement="First explanation.", scope=object()),
+        HypothesisSeed(statement="First explanation.", falsifiers=["Valid", 3]),
+        HypothesisSeed(statement="First explanation.", predictions="not a list"),
+    ],
+)
+def test_explicit_framer_rejects_malformed_seed_values(seed):
+    companion = HypothesisSeed(
+        statement="Second explanation.",
+        prior=seed.prior if seed.prior is not None else None,
+    )
+    input = TaskFramingInput(
+        run_id="run_malformed_seed",
+        question="Which explanation fits?",
+        hypothesis_seeds=[seed, companion],
+    )
+    framer = ExplicitTaskFramer()
+
+    assert not framer.can_frame(input)
+    with pytest.raises(TaskFramingError):
+        framer.frame(input)
+
+
+def test_explicit_framer_defaults_valid_independent_seed_credences():
+    frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="run_independent",
+            question="Which conditions apply?",
+            task_context="Keep the two conditions separate.",
+            hypothesis_relation=HypothesisRelation.INDEPENDENT,
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first condition applies."),
+                HypothesisSeed(statement="The second condition applies."),
+            ],
+        )
+    )
+
+    assert frame.task_context == "Keep the two conditions separate."
+    assert [item.initial_prior for item in frame.hypothesis_frame.hypotheses] == [0.5, 0.5]
+    assert frame.hypothesis_frame.rival_sets == {"H1": [], "H2": []}

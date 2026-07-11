@@ -155,11 +155,18 @@ def _hypothesis_seed_from_payload(payload: Any) -> HypothesisSeed:
             statement=payload["statement"],
             scope=payload.get("scope"),
             prior=payload.get("prior"),
-            falsifiers=list(payload.get("falsifiers", [])),
-            predictions=list(payload.get("predictions", [])),
+            falsifiers=_seed_text_list(payload, "falsifiers"),
+            predictions=_seed_text_list(payload, "predictions"),
         )
     except KeyError as error:
         raise ValueError("benchmark hypothesis seed requires statement") from error
+
+
+def _seed_text_list(payload: Mapping[str, Any], field_name: str) -> list[Any]:
+    value = payload.get(field_name, [])
+    if not isinstance(value, list):
+        raise ValueError(f"benchmark hypothesis seed {field_name} must be an array")
+    return list(value)
 
 
 def _signal_from_payload(payload: Any) -> BenchmarkSignal:
