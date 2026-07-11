@@ -1,6 +1,7 @@
 import json
 import inspect
 import stat
+import hashlib
 from types import SimpleNamespace
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -131,6 +132,26 @@ def test_artifact_store_uses_hmac_paths_and_atomic_terminal_state(tmp_path: Path
     assert json.loads(paths.result_path.read_text(encoding="utf-8"))["answer_label"] == "A"
     with pytest.raises(ValueError, match="terminal case is immutable"):
         store.write_terminal_result(result)
+
+
+def test_sample_pseudonyms_are_secret_keyed_not_plain_hashes(tmp_path: Path):
+    first = CapabilityArtifactStore(
+        tmp_path / "first",
+        identity(),
+        secret=b"first-fixed-secret" * 2,
+    )
+    second = CapabilityArtifactStore(
+        tmp_path / "second",
+        identity(),
+        secret=b"second-fixed-secret" * 2,
+    )
+    sample_id = "private_sample_1"
+
+    assert first.pseudonym_for(sample_id) == first.pseudonym_for(sample_id)
+    assert first.pseudonym_for(sample_id) != second.pseudonym_for(sample_id)
+    assert first.pseudonym_for(sample_id) != hashlib.sha256(
+        sample_id.encode("utf-8")
+    ).hexdigest()
 
 
 def test_stale_running_case_is_resumable_but_fresh_running_is_not(tmp_path: Path):

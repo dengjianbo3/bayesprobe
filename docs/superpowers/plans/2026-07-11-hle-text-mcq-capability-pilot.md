@@ -488,20 +488,20 @@ git commit -m "feat: run resumable paired capability experiments"
 - Test: `tests/evaluation/test_scoring.py`
 - Test: `tests/evaluation/test_leak_scan.py`
 
-- [ ] Write RED tests that scoring refuses incomplete experiments, manifest/gold hash mismatch, second scoring, invalid labels, and wrong experiment identity.
-- [ ] Write RED metric tests over a known paired fixture including terminal failures, Wilson intervals, paired table/delta/bootstrap/McNemar, calibration coverage, process totals, and category suppression below five cases.
-- [ ] Write RED HMAC tests proving pseudonyms are stable within one experiment, differ across secrets, and cannot be plain sample hashes.
-- [ ] Write RED recursive leak tests for exact restricted question, choice, answer, canary, API key, raw response, Python source/output, and reversible id in every shareable JSON/Markdown string.
-- [ ] Implement score details in restricted storage and aggregate-only `summary.json`, `summary.md`, `paired_metrics.json`, and `provenance.json` in shareable storage.
-- [ ] Include the exploratory, public-set, text-MCQ, and Python-arm asymmetry limitations in generated Markdown.
-- [ ] Run:
+- [x] Write RED tests that scoring refuses incomplete experiments, manifest/gold hash mismatch, second scoring, invalid labels, and wrong experiment identity.
+- [x] Write RED metric tests over a known paired fixture including terminal failures, Wilson intervals, paired table/delta/bootstrap/McNemar, calibration coverage, process totals, and category suppression below five cases.
+- [x] Write RED HMAC tests proving pseudonyms are stable within one experiment, differ across secrets, and cannot be plain sample hashes.
+- [x] Write RED recursive leak tests for exact restricted question, choice, answer, canary, API key, raw response, Python source/output, and reversible id in every shareable JSON/Markdown string.
+- [x] Implement score details in restricted storage and aggregate-only `summary.json`, `summary.md`, `paired_metrics.json`, and `provenance.json` in shareable storage.
+- [x] Include the exploratory, public-set, text-MCQ, and Python-arm asymmetry limitations in generated Markdown.
+- [x] Run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_scoring.py \
   tests/evaluation/test_leak_scan.py -q -p no:cacheprovider
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add bayesprobe/evaluation/scoring.py bayesprobe/evaluation/artifacts.py \
