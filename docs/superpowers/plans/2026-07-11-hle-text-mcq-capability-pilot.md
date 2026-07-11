@@ -375,26 +375,26 @@ class DockerPythonSandbox:
     def execute(self, request: PythonExecutionRequest) -> PythonExecutionRecord: ...
 ```
 
-- [ ] Write RED schema tests for `python` requiring code, `reasoning` forbidding code, supplied target ids only, and one plan repair.
-- [ ] Write RED command-construction tests asserting `--network=none`, `--read-only`, non-root user, all caps dropped, no-new-privileges, pids/memory/cpu/tmpfs limits, fixed thread/hash env, stdin delivery, and no host mounts.
-- [ ] Write RED behavior tests for 30-second timeout, 64 KiB combined output cap, truncation, exit metadata, immutable execution id/hash, and no host fallback when Docker is missing.
-- [ ] Add a pinned Python 3.12 image with `galois==0.4.4`, `gmpy2==2.2.1`, `mpmath==1.3.0`, `networkx==3.4.2`, `numpy==2.1.3`, `scipy==1.15.2`, and `sympy==1.13.3`; create and switch to an unprivileged user.
-- [ ] Implement code repair only for syntax error, non-zero runtime error, or required-but-empty output. Timeout/policy failure never repairs.
-- [ ] Convert reasoning output or Python execution output to an `ExternalSignal` with `source_type` equal to `model_probe_gateway` or `python_sandbox`; do not create evidence or posterior updates in this module.
-- [ ] Run unit tests, then build and resolve the image digest:
+- [x] Write RED schema tests for `python` requiring code, `reasoning` forbidding code, supplied target ids only, and one plan repair.
+- [x] Write RED command-construction tests asserting `--network=none`, `--read-only`, non-root user, all caps dropped, no-new-privileges, pids/memory/cpu/tmpfs limits, fixed thread/hash env, stdin delivery, and no host mounts.
+- [x] Write RED behavior tests for 30-second timeout, 64 KiB combined output cap, truncation, exit metadata, immutable execution id/hash, and no host fallback when Docker is missing.
+- [x] Add a pinned Python 3.12 image with `galois==0.4.4`, `gmpy2==2.2.1`, `mpmath==1.3.0`, `networkx==3.4.2`, `numpy==2.1.3`, `scipy==1.15.2`, and `sympy==1.13.3`; create and switch to an unprivileged user.
+- [x] Implement code repair only for syntax error, non-zero runtime error, or required-but-empty output. Timeout/policy failure never repairs.
+- [x] Convert reasoning output or Python execution output to an `ExternalSignal` with `source_type` equal to `model_probe_gateway` or `python_sandbox`; do not create evidence or posterior updates in this module.
+- [x] Run unit tests, then build and resolve the image digest:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_python_probe.py \
   -q -p no:cacheprovider
 docker build -t bayesprobe-hle-python:v0.1 docker/hle-python-sandbox
-docker image inspect bayesprobe-hle-python:v0.1 --format '{{index .RepoDigests 0}}'
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+docker image inspect bayesprobe-hle-python:v0.1 --format '{{.Id}}'
+BAYESPROBE_RUN_DOCKER_TESTS=1 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   tests/evaluation/test_python_sandbox_integration.py -q -p no:cacheprovider
 ```
 
 Expected: network/host-file/secret access tests fail inside the container; deterministic math succeeds; a digest is resolved.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add docker/hle-python-sandbox/Dockerfile \

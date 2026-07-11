@@ -91,6 +91,36 @@ MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA: dict[str, Any] = {
     },
 }
 
+PYTHON_PROBE_PLAN_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "mode",
+        "purpose",
+        "target_hypotheses",
+        "expected_observation",
+        "code",
+    ],
+    "properties": {
+        "mode": {"type": "string", "enum": ["python", "reasoning"]},
+        "purpose": {"type": "string", "minLength": 1},
+        "target_hypotheses": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+        },
+        "expected_observation": {"type": "string", "minLength": 1},
+        "code": {"type": ["string", "null"]},
+    },
+}
+
+PYTHON_CODE_REPAIR_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["code"],
+    "properties": {"code": {"type": "string", "minLength": 1}},
+}
+
 ENVIRONMENT_VARIABLE_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 EVIDENCE_JUDGMENT_SCHEMA_KEYS = frozenset(
     {"evidence_type", "likelihoods", "interpretation", "quality_overrides"}
@@ -602,6 +632,22 @@ def _instruction_for_task(task: str) -> str:
             "choices, invalid payload, and validation error. Return one valid answer "
             "without adding or removing choice labels."
         )
+    if task == "plan_python_probe":
+        return (
+            "Convert the selected BayesProbe inquiry into a structured probe plan. "
+            "Python is optional: choose python only when bounded computation is useful; "
+            "otherwise choose reasoning. Never select an answer or assign posterior values."
+        )
+    if task == "repair_python_probe_plan":
+        return (
+            "Repair the malformed Python-augmented probe plan using the validation error. "
+            "Python is optional and all target hypotheses must come from the supplied set."
+        )
+    if task == "repair_python_probe_code":
+        return (
+            "Repair the Python probe code using only the original code and sanitized "
+            "execution error. Return one complete replacement script and no answer choice."
+        )
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -612,6 +658,10 @@ def _structured_output_for_task(task: str) -> tuple[str, dict[str, Any]]:
         return "EvidenceJudgment", EVIDENCE_JUDGMENT_JSON_SCHEMA
     if task in {"answer_multiple_choice", "repair_multiple_choice_answer"}:
         return "MultipleChoiceAnswer", MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA
+    if task in {"plan_python_probe", "repair_python_probe_plan"}:
+        return "PythonProbePlan", PYTHON_PROBE_PLAN_JSON_SCHEMA
+    if task == "repair_python_probe_code":
+        return "PythonCodeRepair", PYTHON_CODE_REPAIR_JSON_SCHEMA
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -641,6 +691,17 @@ def _chat_instruction_for_task(task: str) -> str:
             f"{base_instruction} Return only one JSON object with exactly these "
             "top-level keys: answer_label, choice_probabilities, answer_summary. "
             "Do not include markdown."
+        )
+    if task in {"plan_python_probe", "repair_python_probe_plan"}:
+        return (
+            f"{base_instruction} Return only one JSON object with exactly these "
+            "top-level keys: mode, purpose, target_hypotheses, "
+            "expected_observation, code. Do not include markdown."
+        )
+    if task == "repair_python_probe_code":
+        return (
+            f"{base_instruction} Return only one JSON object with exactly one "
+            "top-level key: code. Do not include markdown."
         )
     raise ValueError(f"unsupported openai model task: {task}")
 
@@ -684,6 +745,30 @@ def _required_output_for_task(task: str) -> dict[str, Any]:
                 "choice_probabilities keys must exactly match the supplied labels",
                 "choice_probabilities must sum to one within 1e-3",
             ],
+        }
+    if task in {"plan_python_probe", "repair_python_probe_plan"}:
+        return {
+            "type": "PythonProbePlan",
+            "required_keys": [
+                "mode",
+                "purpose",
+                "target_hypotheses",
+                "expected_observation",
+                "code",
+            ],
+            "json_schema": PYTHON_PROBE_PLAN_JSON_SCHEMA,
+            "notes": [
+                "python mode requires a complete script in code",
+                "reasoning mode requires code to be null",
+                "target_hypotheses must be selected from supplied ids",
+            ],
+        }
+    if task == "repair_python_probe_code":
+        return {
+            "type": "PythonCodeRepair",
+            "required_keys": ["code"],
+            "json_schema": PYTHON_CODE_REPAIR_JSON_SCHEMA,
+            "notes": ["code must be one complete replacement Python script"],
         }
     raise ValueError(f"unsupported openai model task: {task}")
 
@@ -922,6 +1007,8 @@ def _sanitize_provider_error(message: str, api_key: str) -> str:
 __all__ = [
     "EVIDENCE_JUDGMENT_JSON_SCHEMA",
     "MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA",
+    "PYTHON_CODE_REPAIR_JSON_SCHEMA",
+    "PYTHON_PROBE_PLAN_JSON_SCHEMA",
     "PROBE_SIGNAL_JSON_SCHEMA",
     "OpenAIChatCompletionsModelGateway",
     "OpenAIModelGatewayConfig",

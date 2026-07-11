@@ -384,6 +384,40 @@ def test_build_openai_payload_for_multiple_choice_repair_uses_same_schema():
     assert "Repair" in chat_payload["messages"][0]["content"]
 
 
+def test_build_openai_chat_payload_for_python_probe_plan():
+    request = StructuredModelRequest(
+        task="plan_python_probe",
+        input={"probe": {"id": "P1"}, "hypotheses": [{"id": "A"}]},
+    )
+
+    payload = build_openai_chat_completions_payload(
+        request,
+        model="provider-model",
+    )
+
+    assert "Python is optional" in payload["messages"][0]["content"]
+    required = json.loads(payload["messages"][1]["content"])["required_output"]
+    assert required["required_keys"] == [
+        "mode",
+        "purpose",
+        "target_hypotheses",
+        "expected_observation",
+        "code",
+    ]
+
+
+def test_build_openai_payload_for_python_code_repair():
+    request = StructuredModelRequest(
+        task="repair_python_probe_code",
+        input={"original_code": "bad()", "execution_error": {"exit_code": 1}},
+    )
+
+    payload = build_openai_request_payload(request, model="gpt-5.5")
+
+    assert payload["text"]["format"]["name"] == "PythonCodeRepair"
+    assert "Repair" in payload["input"][0]["content"]
+
+
 def valid_payload() -> dict[str, object]:
     return {
         "evidence_type": "supporting",

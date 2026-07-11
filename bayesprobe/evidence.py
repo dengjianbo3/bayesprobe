@@ -84,6 +84,15 @@ class SignalQualityAssessor:
                 specificity=0.65,
                 verifiability=0.3,
             )
+        elif signal.source_type == "python_sandbox":
+            quality = SignalQuality(
+                reliability=0.75,
+                independence=0.35,
+                relevance=0.85,
+                novelty=0.65,
+                specificity=0.9,
+                verifiability=0.9,
+            )
         elif signal.source_type == "external_agent_projection":
             quality = SignalQuality(
                 reliability=0.55,
@@ -532,7 +541,7 @@ class EvidenceIntegrationGate:
         )
         if quality_overrides:
             effective_overrides = quality_overrides
-            if signal.source_type == "model_probe_gateway":
+            if signal.source_type in {"model_probe_gateway", "python_sandbox"}:
                 effective_overrides = {
                     metric: min(value, getattr(quality, metric))
                     for metric, value in quality_overrides.items()
