@@ -247,6 +247,13 @@ def test_initializer_writes_ledger_records_without_evidence_or_answers(tmp_path:
         "Authorization: Bearer abcdefghijklmnop",
         "-----BEGIN PRIVATE KEY-----",
         "access_key='AKIAEXAMPLEVALUE'",
+        "ghp_" + "a" * 36,
+        (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        ),
+        "Bearer abcdefghijklmnopqrstuvwx",
     ],
 )
 def test_initializer_rejects_secret_compatibility_context_before_materialization(
@@ -259,7 +266,7 @@ def test_initializer_rejects_secret_compatibility_context_before_materialization
     with pytest.raises(
         TaskFramingError,
         match="compatibility context must not contain secret material",
-    ):
+    ) as captured:
         BayesProbeInitializer(ledger=ledger).initialize(
             InitializeRunInput(
                 run_id="run_secret_compatibility_context",
@@ -270,6 +277,8 @@ def test_initializer_rejects_secret_compatibility_context_before_materialization
         )
 
     assert not ledger_path.exists()
+    assert context not in str(captured.value)
+    assert context not in repr(captured.value)
 
 
 def test_initializer_preserves_ordinary_compatibility_source_text():

@@ -150,6 +150,37 @@ def test_recorded_model_gateway_rejects_embedded_secret_like_value(tmp_path: Pat
         RecordedModelGateway.from_json(path)
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "ghp_" + "a" * 36,
+        (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        ),
+        "Bearer abcdefghijklmnopqrstuvwx",
+    ],
+)
+def test_recorded_model_gateway_rejects_common_generic_credentials(
+    tmp_path: Path,
+    secret: str,
+):
+    path = tmp_path / "unsafe-generic-credential.json"
+    payload = recorded_fixture_payload()
+    payload["metadata"]["description"] = secret
+    write_fixture(path, payload)
+
+    with pytest.raises(
+        ValueError,
+        match="recorded model fixture must not contain secrets",
+    ) as captured:
+        RecordedModelGateway.from_json(path)
+
+    assert secret not in str(captured.value)
+    assert secret not in repr(captured.value)
+
+
 def test_recorded_model_gateway_rejects_direct_constructor_secret_material():
     with pytest.raises(
         ValueError,
@@ -173,6 +204,27 @@ def test_recorded_model_gateway_accepts_ordinary_tokenization_prose(tmp_path: Pa
     gateway = RecordedModelGateway.from_json(path)
 
     assert gateway.metadata["description"].startswith("Tokenization research")
+
+
+def test_recorded_model_gateway_accepts_benign_secret_vocabulary_keys(tmp_path: Path):
+    path = tmp_path / "ordinary-secret-vocabulary.json"
+    payload = recorded_fixture_payload()
+    payload["metadata"].update(
+        {
+            "tokenization": "word-piece analysis",
+            "token_count": 12,
+            "secretary": "office role",
+            "password_policy": "rotation guidance",
+            "credential_score": 0.8,
+            "cookie_policy": "browser documentation",
+        }
+    )
+    write_fixture(path, payload)
+
+    gateway = RecordedModelGateway.from_json(path)
+
+    assert gateway.metadata["token_count"] == 12
+    assert gateway.metadata["password_policy"] == "rotation guidance"
 
 
 def test_recorded_model_gateway_replays_malformed_response_for_gate_validation(

@@ -183,7 +183,9 @@ seeds, or a recorded frame for open questions.
       "metrics",
       "decision_rule",
       "limitations"
-    ]
+    ],
+    "decision_form": "experimental_protocol",
+    "permits_synthesis": true
   },
   "hypothesis_relation": "independent",
   "hypotheses": [
@@ -202,7 +204,8 @@ seeds, or a recorded frame for open questions.
       "predictions": ["The apparent size effect shrinks under matched-budget and matched-scaffold evaluation."]
     }
   ],
-  "coverage_statement": "These hypotheses test the target causal effect and a major confounding explanation; they are not claimed to exhaust every failure mode."
+  "coverage_statement": "These hypotheses test the target causal effect and a major confounding explanation; they are not claimed to exhaust every failure mode.",
+  "coverage_limitation": "Task-specific interactions and unmodeled deployment conditions may require additional hypotheses."
 }
 ```
 

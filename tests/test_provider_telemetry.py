@@ -4,6 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from bayesprobe.provider_telemetry import (
     JsonlProviderInvocationObserver,
     ProviderInvocationContext,
@@ -171,6 +173,49 @@ def test_sanitized_request_hash_ignores_secret_field_variants_and_secret_text():
     }
 
     assert sanitized_request_sha256(first) == sanitized_request_sha256(second)
+
+
+@pytest.mark.parametrize(
+    "first_secret,second_secret",
+    [
+        ("ghp_" + "a" * 36, "gho_" + "b" * 36),
+        (
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            "eyJ0eXAiOiJKV1QifQ.eyJpc3MiOiJwcm92aWRlciJ9."
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+        ),
+        (
+            "Bearer abcdefghijklmnopqrstuvwx",
+            "Bearer zyxwvutsrqponmlkjihgfedc",
+        ),
+        ("AKIAIOSFODNN7EXAMPLE", "ASIAQWERTYUIOPASDFGH"),
+        (
+            "xox" + "b-123456789012-1234567890123-abcdefghijklmnopqrstuvwx",
+            "xox" + "p-987654321098-9876543210987-zyxwvutsrqponmlkjihgfedc",
+        ),
+    ],
+)
+def test_sanitized_request_hash_is_generic_credential_value_independent(
+    first_secret,
+    second_secret,
+):
+    first = {"model": "provider-model", "metadata": {"value": first_secret}}
+    second = {"model": "provider-model", "metadata": {"value": second_secret}}
+
+    assert sanitized_request_sha256(first) == sanitized_request_sha256(second)
+
+
+def test_sanitized_request_hash_preserves_benign_secret_vocabulary_fields():
+    first = {
+        "token_count": 10,
+        "password_policy": "rotate",
+        "credential_score": 0.5,
+        "cookie_policy": "strict",
+    }
+    second = {**first, "token_count": 11}
+
+    assert sanitized_request_sha256(first) != sanitized_request_sha256(second)
 
 
 def test_provider_error_category_normalizes_common_transport_failures():

@@ -1,11 +1,14 @@
 from copy import deepcopy
+import json
+from pathlib import Path
+import re
 
 import pytest
 
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ScriptedModelGateway, StructuredModelRequest
-from bayesprobe.schemas import AnswerChoice, HypothesisRelation, TaskKind
+from bayesprobe.schemas import AnswerChoice, AnswerContract, HypothesisRelation, TaskKind
 from bayesprobe.task_framing import (
     ExplicitTaskFramer,
     HypothesisSeed,
@@ -659,6 +662,65 @@ def test_second_chat_shaped_malformed_provider_frame_fails_closed():
     ]
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("objective", 123),
+        ("decision_form", ["protocol"]),
+        ("required_sections", ("hypotheses", "decision_rule")),
+        ("required_sections", ["hypotheses", "hypotheses"]),
+        ("permits_synthesis", "false"),
+        ("permits_synthesis", 0),
+        ("permits_synthesis", 1),
+        ("__unknown__", "unexpected"),
+        ("__missing__", "decision_form"),
+    ],
+)
+def test_malformed_provider_answer_contract_consumes_one_repair(field, value):
+    malformed = deepcopy(VALID_OPEN_FRAME)
+    contract = malformed["answer_contract"]
+    if field == "__unknown__":
+        contract["unexpected"] = value
+    elif field == "__missing__":
+        contract.pop(value)
+    else:
+        contract[field] = value
+    gateway = QueueModelGateway([malformed, VALID_OPEN_FRAME])
+
+    frame = ModelTaskFramer(gateway).frame(
+        TaskFramingInput(
+            run_id=f"run_contract_{field}",
+            question="How should this be tested?",
+        )
+    )
+
+    assert frame.answer_contract.permits_synthesis is True
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+
+
+@pytest.mark.parametrize("malformed_bool", ["false", 0, 1])
+def test_second_malformed_provider_answer_contract_fails_closed(malformed_bool):
+    malformed = deepcopy(VALID_OPEN_FRAME)
+    malformed["answer_contract"]["permits_synthesis"] = malformed_bool
+    gateway = QueueModelGateway([malformed, malformed])
+
+    with pytest.raises(TaskFramingError, match="invalid after 1 repair attempt"):
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(
+                run_id="run_contract_fail_closed",
+                question="How should this be tested?",
+            )
+        )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+
+
 def test_repair_request_uses_shared_redaction_for_forbidden_fields_and_values():
     malformed = deepcopy(VALID_OPEN_FRAME)
     malformed["hypotheses"][0].update(
@@ -689,8 +751,22 @@ def test_repair_request_uses_shared_redaction_for_forbidden_fields_and_values():
         assert forbidden not in repair_payload
 
 
-def test_generic_secret_text_is_redacted_before_repair_and_from_exception_chain():
-    secret = "Authorization: Bearer abcdefghijklmnop"
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "Authorization: Bearer abcdefghijklmnop",
+        "ghp_" + "a" * 36,
+        (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        ),
+        "Bearer abcdefghijklmnopqrstuvwx",
+    ],
+)
+def test_generic_secret_text_is_redacted_before_repair_and_from_exception_chain(
+    secret,
+):
     malformed = deepcopy(VALID_OPEN_FRAME)
     malformed["coverage_statement"] = secret
     gateway = QueueModelGateway([malformed, malformed])
@@ -875,6 +951,109 @@ def test_recorded_task_framer_revalidates_the_materialized_task_frame():
         RecordedTaskFramer(invalid_source).frame(
             TaskFramingInput(run_id="replay_invalid_copy", question="Current question")
         )
+
+
+@pytest.mark.parametrize(
+    "malformed_contract",
+    [
+        AnswerContract.model_construct(
+            objective="Assess the hypotheses.",
+            required_sections=["hypotheses", "decision"],
+            decision_form="hypothesis_assessment",
+            permits_synthesis="false",
+        ),
+        AnswerContract.model_construct(
+            objective="Assess the hypotheses.",
+            required_sections=("hypotheses", "decision"),
+            decision_form="hypothesis_assessment",
+            permits_synthesis=False,
+        ),
+        AnswerContract.model_construct(
+            objective=123,
+            required_sections=["hypotheses", "decision"],
+            decision_form="hypothesis_assessment",
+            permits_synthesis=False,
+        ),
+        AnswerContract.model_construct(
+            objective="Assess the hypotheses.",
+            required_sections=["hypotheses", "decision"],
+            permits_synthesis=False,
+        ),
+    ],
+    ids=["string_bool", "tuple_sections", "wrong_text_type", "missing_field"],
+)
+def test_recorded_task_framer_strictly_rejects_model_construct_contracts(
+    malformed_contract,
+):
+    source_frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="fixture_malformed_contract",
+            question="Fixture question",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation."),
+                HypothesisSeed(statement="The second explanation."),
+            ],
+        )
+    ).model_copy(update={"answer_contract": malformed_contract})
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source_frame).frame(
+            TaskFramingInput(
+                run_id="replay_malformed_contract",
+                question="Current question",
+            )
+        )
+
+
+def test_recorded_task_framer_strictly_rejects_unknown_contract_fields():
+    source_frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="fixture_unknown_contract_field",
+            question="Fixture question",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation."),
+                HypothesisSeed(statement="The second explanation."),
+            ],
+        )
+    )
+    malformed_contract = {
+        **source_frame.answer_contract.model_dump(mode="python"),
+        "unexpected": "field",
+    }
+    source_frame = source_frame.model_copy(
+        update={"answer_contract": malformed_contract}
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source_frame).frame(
+            TaskFramingInput(
+                run_id="replay_unknown_contract_field",
+                question="Current question",
+            )
+        )
+
+
+def test_approved_design_provider_example_validates_against_implemented_schema():
+    design = Path(
+        "docs/superpowers/specs/2026-07-11-open-question-architecture-correction-design.md"
+    ).read_text(encoding="utf-8")
+    structured_output_section = design.split("### 6.4 Structured Model Output", 1)[1]
+    match = re.search(r"```json\n(.*?)\n```", structured_output_section, re.DOTALL)
+    assert match is not None
+    payload = json.loads(match.group(1))
+
+    frame = task_frame_from_mapping(
+        payload,
+        run_id="design_example",
+        question="How should the model-scale claim be tested?",
+        task_context="",
+        method="model",
+        trace={},
+    )
+
+    assert frame.answer_contract.decision_form == "experimental_protocol"
+    assert frame.answer_contract.permits_synthesis is True
+    assert frame.hypothesis_frame.coverage_limitation is not None
 
 
 def test_routing_task_framer_keeps_explicit_mcq_off_the_model_gateway():

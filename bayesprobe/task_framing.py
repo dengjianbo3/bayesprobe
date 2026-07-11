@@ -254,7 +254,19 @@ class RecordedTaskFramer:
             raise TaskFramingError("invalid recorded task framing input") from None
 
         try:
-            payload = self._frame.model_dump(mode="python")
+            raw_contract = self._frame.answer_contract
+            contract_payload = (
+                dict(raw_contract.__dict__)
+                if isinstance(raw_contract, AnswerContract)
+                else raw_contract
+            )
+            payload = self._frame.model_dump(
+                mode="python",
+                exclude={"answer_contract"},
+            )
+            payload["answer_contract"] = _answer_contract_from_mapping(
+                contract_payload
+            )
             payload["task_frame_id"] = f"{run_id}_task_frame"
             payload["normalized_question"] = question
             payload["task_context"] = task_context
@@ -332,6 +344,12 @@ _HYPOTHESIS_FIELDS = {
     "scope",
     "falsifiers",
     "predictions",
+}
+_ANSWER_CONTRACT_FIELDS = {
+    "objective",
+    "required_sections",
+    "decision_form",
+    "permits_synthesis",
 }
 _PROVIDER_BELIEF_FIELDS = {
     "id",
@@ -494,11 +512,8 @@ def task_frame_from_mapping(
         )
         for index, item in enumerate(normalized_hypotheses)
     ]
-    contract_payload = payload.get("answer_contract")
-    if not isinstance(contract_payload, Mapping):
-        raise TaskFramingError("answer_contract must be an object")
+    answer_contract = _answer_contract_from_mapping(payload.get("answer_contract"))
     try:
-        answer_contract = AnswerContract.model_validate(contract_payload)
         return TaskFrame(
             task_frame_id=f"{run_id}_task_frame",
             task_kind=task_kind,
@@ -541,6 +556,40 @@ def _native_required_text_list(value: Any, field_name: str) -> list[str]:
             f"provider {field_name} must be a non-empty list of non-empty strings"
         )
     return [item.strip() for item in value]
+
+
+def _answer_contract_from_mapping(payload: Any) -> AnswerContract:
+    if not isinstance(payload, Mapping):
+        raise TaskFramingError("answer_contract must be an object")
+    if set(payload) != _ANSWER_CONTRACT_FIELDS:
+        raise TaskFramingError("answer_contract has missing or unknown fields")
+    objective = _native_required_text(
+        payload["objective"],
+        "answer_contract objective",
+    )
+    decision_form = _native_required_text(
+        payload["decision_form"],
+        "answer_contract decision_form",
+    )
+    required_sections = _native_required_text_list(
+        payload["required_sections"],
+        "answer_contract required_sections",
+    )
+    if len(required_sections) != len(set(required_sections)):
+        raise TaskFramingError(
+            "provider answer_contract required_sections must be unique"
+        )
+    permits_synthesis = payload["permits_synthesis"]
+    if type(permits_synthesis) is not bool:
+        raise TaskFramingError(
+            "provider answer_contract permits_synthesis must be a boolean"
+        )
+    return AnswerContract(
+        objective=objective,
+        required_sections=required_sections,
+        decision_form=decision_form,
+        permits_synthesis=permits_synthesis,
+    )
 
 
 @dataclass(frozen=True)

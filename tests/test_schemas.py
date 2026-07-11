@@ -130,6 +130,36 @@ def test_forbidden_secret_key_name_normalizes_common_variants(key):
     assert is_forbidden_secret_key_name(key)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "provider_api_key",
+        "refresh_token",
+        "client_secret",
+        "db_password",
+        "access_key_id",
+        "proxyAuthorization",
+    ],
+)
+def test_forbidden_secret_key_name_detects_real_affixed_fields(key):
+    assert is_forbidden_secret_key_name(key)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "tokenization",
+        "token_count",
+        "secretary",
+        "password_policy",
+        "credential_score",
+        "cookie_policy",
+    ],
+)
+def test_forbidden_secret_key_name_allows_benign_semantic_fields(key):
+    assert not is_forbidden_secret_key_name(key)
+
+
 def test_secret_predicates_allow_ordinary_tokenization_prose():
     assert not is_secret_like_value("Tokenization is a useful concept.")
 
@@ -152,15 +182,67 @@ def test_secret_value_predicate_detects_credential_text_forms(value):
 @pytest.mark.parametrize(
     "value",
     [
+        "ghp_" + "a" * 36,
+        "gho_" + "b" * 36,
+        "ghu_" + "c" * 36,
+        "ghs_" + "d" * 36,
+        "ghr_" + "e" * 36,
+        "github_pat_" + "A1" * 20,
+        (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        ),
+        "AKIAIOSFODNN7EXAMPLE",
+        "xox" + "b-123456789012-1234567890123-abcdefghijklmnopqrstuvwx",
+        "Bearer abcdefghijklmnopqrstuvwx",
+    ],
+)
+def test_secret_value_predicate_detects_common_generic_credentials(value):
+    assert is_secret_like_value(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
         "Tokenization is a useful concept.",
         "Compare password policies without including a password value.",
         "Bearer authentication should use short-lived credentials.",
         "Private-key cryptography has different trust assumptions.",
         "The source discusses access key rotation practices.",
+        "Bearer authentication",
+        "Bearer authorization scheme",
+        "This source discusses bearer tokens without including one.",
     ],
 )
 def test_secret_value_predicate_preserves_ordinary_source_text(value):
     assert not is_secret_like_value(value)
+
+
+def test_shared_redaction_preserves_benign_keys_and_removes_affixed_secret_keys():
+    redact_secret_material = getattr(schemas, "redact_secret_material")
+    payload = {
+        "provider_api_key": "hidden-provider-value",
+        "refresh_token": "hidden-refresh-value",
+        "client_secret": "hidden-client-value",
+        "db_password": "hidden-password-value",
+        "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+        "tokenization": "kept",
+        "token_count": 12,
+        "secretary": "kept",
+        "password_policy": "kept",
+        "credential_score": 0.8,
+        "cookie_policy": "kept",
+    }
+
+    assert redact_secret_material(payload) == {
+        "tokenization": "kept",
+        "token_count": 12,
+        "secretary": "kept",
+        "password_policy": "kept",
+        "credential_score": 0.8,
+        "cookie_policy": "kept",
+    }
 
 
 def test_shared_redaction_removes_forbidden_fields_and_redacts_secret_strings():
@@ -241,6 +323,27 @@ def test_task_frame_rejects_secret_material_in_semantic_fields(mutator):
 
     with pytest.raises(ValueError, match="secret"):
         TaskFrame.model_validate(mutator(_open_task_frame(), secret).model_dump())
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "ghp_" + "a" * 36,
+        (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        ),
+        "Bearer abcdefghijklmnopqrstuvwx",
+    ],
+)
+def test_task_frame_rejects_common_generic_credentials(secret):
+    frame = _open_task_frame().model_copy(
+        update={"normalized_question": f"Question contains {secret}"}
+    )
+
+    with pytest.raises(ValueError, match="secret"):
+        TaskFrame.model_validate(frame.model_dump())
 
 
 def test_minimal_run_cycle_and_belief_state_round_trip():

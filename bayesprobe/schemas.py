@@ -133,6 +133,20 @@ def _normalized_semantic_text(value: str) -> str:
 _SECRET_VALUE_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}", re.IGNORECASE),
     re.compile(
+        r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|"
+        r"github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])"
+    ),
+    re.compile(
+        r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{10,}\."
+        r"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_-])"
+    ),
+    re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"),
+    re.compile(
+        r"(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{10,}"
+        r"(?![A-Za-z0-9-])",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"\b(?:api[ _-]?key|access[ _-]?key|private[ _-]?key|password|passwd|"
         r"credential(?:s)?|cookie|secret|token)\b\s*(?:=|:)\s*[\"']?"
         r"(?:Bearer\s+)?[A-Za-z0-9._~+/=-]{6,}",
@@ -148,24 +162,40 @@ _SECRET_VALUE_PATTERNS = (
         r"(?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{12,}",
         re.IGNORECASE,
     ),
+    re.compile(r"\bBearer\s+[A-Za-z]{16,}\b", re.IGNORECASE),
     re.compile(
         r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----",
         re.IGNORECASE,
     ),
 )
-_FORBIDDEN_SECRET_KEY_PARTS = (
+_FORBIDDEN_SECRET_KEY_COMPOUNDS = {
     "apikey",
+    "accesskey",
+    "privatekey",
+    "proxyauthorization",
+}
+_FORBIDDEN_SECRET_KEY_WORDS = {
     "authorization",
     "token",
     "secret",
-    "privatekey",
     "password",
     "passwd",
     "credential",
     "credentials",
-    "accesskey",
     "cookie",
-)
+}
+_BENIGN_SECRET_KEY_FOLLOWERS = {
+    "token": {"count"},
+    "password": {"policy"},
+    "credential": {"score"},
+    "credentials": {"score"},
+    "cookie": {"policy"},
+}
+_FORBIDDEN_SECRET_KEY_SEQUENCES = {
+    ("api", "key"),
+    ("access", "key"),
+    ("private", "key"),
+}
 
 
 def is_secret_like_value(value: str) -> bool:
@@ -177,8 +207,26 @@ def is_secret_like_value(value: str) -> bool:
 def is_forbidden_secret_key_name(value: str) -> bool:
     if not isinstance(value, str):
         return False
-    normalized_key = re.sub(r"[^a-z0-9]", "", value.casefold())
-    return any(part in normalized_key for part in _FORBIDDEN_SECRET_KEY_PARTS)
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    parts = re.findall(r"[a-z0-9]+", separated.casefold())
+    if not parts:
+        return False
+    compact = "".join(parts)
+    if compact in _FORBIDDEN_SECRET_KEY_COMPOUNDS:
+        return True
+    if any(
+        tuple(parts[index:index + 2]) in _FORBIDDEN_SECRET_KEY_SEQUENCES
+        for index in range(len(parts) - 1)
+    ):
+        return True
+    for index, part in enumerate(parts):
+        if part not in _FORBIDDEN_SECRET_KEY_WORDS:
+            continue
+        follower = parts[index + 1] if index + 1 < len(parts) else None
+        if follower in _BENIGN_SECRET_KEY_FOLLOWERS.get(part, set()):
+            continue
+        return True
+    return False
 
 
 def redact_secret_material(value: Any) -> Any:

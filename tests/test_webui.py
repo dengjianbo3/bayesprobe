@@ -634,6 +634,13 @@ def test_webui_rejects_secret_caller_framing_input_before_provider_run_or_stream
         "Authorization: Bearer abcdefghijklmnop",
         "-----BEGIN PRIVATE KEY-----",
         "access_key='AKIAEXAMPLEVALUE'",
+        "ghp_" + "a" * 36,
+        (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        ),
+        "Bearer abcdefghijklmnopqrstuvwx",
     ],
 )
 def test_webui_rejects_secret_compatibility_context_before_run_stream_or_client(
@@ -680,6 +687,7 @@ def test_webui_rejects_secret_compatibility_context_before_run_stream_or_client(
     assert stream_response == expected_error
     assert events == []
     assert FakeWebUIChatOpenAI.created_with == []
+    assert context not in json.dumps([response, stream_response, events])
 
 
 def test_webui_rejects_more_than_six_choices_before_deterministic_run_or_stream():
