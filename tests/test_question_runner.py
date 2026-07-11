@@ -6,6 +6,7 @@ from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import StructuredModelRequest
+from bayesprobe.recorded_gateway import RecordedModelGateway
 from bayesprobe.probe_executor import (
     ModelBackedProbeToolGateway,
     ProbeExecutionResult,
@@ -176,6 +177,49 @@ def test_open_question_framing_precedes_belief_initialization():
     assert "independent hypotheses may coexist" in (
         result.final_answer_projection.main_uncertainty
     )
+
+
+def test_recorded_open_question_frames_before_running_cycle():
+    gateway = RecordedModelGateway.from_json(
+        Path("tests/fixtures/open_questions/model_scale_validation_v0.1.json")
+    )
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(model_gateway=gateway),
+        initializer=BayesProbeInitializer(task_framer=ModelTaskFramer(gateway)),
+        executor=ProbeExecutor(ModelBackedProbeToolGateway(gateway)),
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="recorded_model_scale",
+            problem=(
+                "某团队认为‘模型变大一定能提升 agent 的真实任务表现’。"
+                "这个命题应该如何验证？"
+            ),
+        )
+    )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "execute_probe",
+        "judge_evidence",
+    ]
+    statements = [
+        item.statement for item in result.task_frame.hypothesis_frame.hypotheses
+    ]
+    assert len(statements) == len(set(statements)) == 3
+    assert all("这个命题应该如何验证" not in statement for statement in statements)
+    assert any("独立正向效应" in statement for statement in statements)
+    assert any("混杂" in statement for statement in statements)
+    assert any("任务和工具条件" in statement for statement in statements)
+    assert result.initial_belief_state.task_frame == result.task_frame
+    assert result.cycle_results[0].signals[0].source_type == "model_probe_gateway"
+    final_by_id = result.final_belief_state.hypotheses_by_id()
+    assert final_by_id["H1"].posterior > 0.5
+    assert final_by_id["H2"].posterior == 0.5
+    assert final_by_id["H3"].posterior == 0.5
+    assert sum(item.posterior for item in final_by_id.values()) > 1.0
 
 
 def test_question_runner_executes_one_end_to_end_cycle():

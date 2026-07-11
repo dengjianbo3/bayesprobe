@@ -640,33 +640,17 @@ snapshot, and completes the four-phase protocol.
 | Capability evaluation | Strong MVP | Gold-isolated HLE text-MCQ preparation, Direct/BayesProbe paired arms, Docker Python probes, resumable execution, exact scoring, paired/calibration metrics, and leak-safe reports are implemented and synthetic-tested. Formal HLE execution remains pending. |
 | Large benchmark suite | Partial | The HLE text-MCQ-100 runner is ready, but no formal gated run or broader multimodal/exact-answer suite has been completed. |
 
-## 6. Progress Estimate
+## 6. Open-Question Framing Status
 
-Using the final target as:
+Implemented: explicit/model/recorded TaskFrame before Belief State creation.
 
-> configurable, experiment-ready, provider-backed, tool-backed, multi-agent-ready
-> BayesProbe agent engineering kernel
+Implemented: fail-closed open framing with one structured repair.
 
-the current implementation is approximately **88%-91% complete**.
+Implemented: explicit categorical and independent belief-update semantics.
 
-Using the narrower provider-backed MVP target as:
+Not yet implemented: cross-cycle Evidence Memory.
 
-> deterministic/scripted/provider-backed BayesProbe loop with benchmark,
-> config, SDK, and local WebUI support
-
-the current implementation is approximately **98%-99% complete**.
-
-The M0.9 semantic freeze is implemented. The remaining work is depth,
-experimental validity, and production hardening rather than a change of
-direction:
-
-- broader tool adapters for search, retrieval, and domain systems;
-- provider registry and production operations around the implemented
-  per-attempt telemetry;
-- execution of the frozen HLE pilot and interpretation of its paired results;
-- broader multimodal, exact-answer, search, and retrieval evaluation arms;
-- stronger synchronized/multi-agent protocol objects and transport;
-- production-grade persistence and experiment trace packaging.
+Not yet implemented: task-aware ProbeDesigner and open Answer Projection.
 
 ## 7. External Seams and Configuration
 

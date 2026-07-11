@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -107,3 +108,35 @@ def test_recorded_model_gateway_replays_malformed_response_for_gate_validation(
     gateway = RecordedModelGateway.from_json(path)
 
     assert gateway.complete_structured(make_request()) == {"likelihoods": {}}
+
+
+def test_open_question_fixture_is_recursively_secret_free_and_task_only_matched():
+    payload = json.loads(
+        Path(
+            "tests/fixtures/open_questions/model_scale_validation_v0.1.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert _secret_like_entries(payload) == []
+    assert [entry["match"] for entry in payload["responses"]] == [
+        {"task": "frame_open_question"},
+        {"task": "execute_probe"},
+        {"task": "judge_evidence"},
+    ]
+
+
+def _secret_like_entries(value: Any, path: str = "$") -> list[str]:
+    findings: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_path = f"{path}.{key}"
+            normalized_key = str(key).replace("_", "").replace("-", "").lower()
+            if any(part in normalized_key for part in ("apikey", "authorization", "token", "secret")):
+                findings.append(key_path)
+            findings.extend(_secret_like_entries(item, key_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            findings.extend(_secret_like_entries(item, f"{path}[{index}]"))
+    elif isinstance(value, str) and value.lower().startswith("sk-"):
+        findings.append(path)
+    return findings
