@@ -36,7 +36,15 @@ def make_cycle(cycle_id: str = "cycle_1") -> CycleRecord:
     )
 
 
-def make_belief_state(h1_posterior: float = 0.5, h2_posterior: float = 0.5) -> BeliefState:
+def make_belief_state(
+    h1_posterior: float = 0.5,
+    h2_posterior: float = 0.5,
+    *,
+    relation: HypothesisRelation = HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
+) -> BeliefState:
+    rivals = {"H1": ["H2"], "H2": ["H1"]}
+    if relation == HypothesisRelation.INDEPENDENT:
+        rivals = {"H1": [], "H2": []}
     hypotheses = [
         Hypothesis(
             id="H1",
@@ -44,7 +52,7 @@ def make_belief_state(h1_posterior: float = 0.5, h2_posterior: float = 0.5) -> B
             scope="claim verification with broad scope",
             prior=0.5,
             posterior=h1_posterior,
-            rivals=["H2"],
+            rivals=rivals["H1"],
             falsifiers=["Independent counterevidence weakens H1."],
             predictions=["Supporting evidence should be found."],
         ),
@@ -54,7 +62,7 @@ def make_belief_state(h1_posterior: float = 0.5, h2_posterior: float = 0.5) -> B
             scope="claim verification",
             prior=0.5,
             posterior=h2_posterior,
-            rivals=["H1"],
+            rivals=rivals["H2"],
             falsifiers=["Independent support weakens H2."],
             predictions=["Refuting evidence should be found."],
         ),
@@ -76,7 +84,7 @@ def make_belief_state(h1_posterior: float = 0.5, h2_posterior: float = 0.5) -> B
             ),
             hypothesis_frame=HypothesisFrame(
                 frame_id="run_1_hypothesis_frame",
-                relation=HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
+                relation=relation,
                 hypotheses=[
                     FramedHypothesis(
                         id=item.id,
@@ -89,7 +97,7 @@ def make_belief_state(h1_posterior: float = 0.5, h2_posterior: float = 0.5) -> B
                     )
                     for item in hypotheses
                 ],
-                rival_sets={"H1": ["H2"], "H2": ["H1"]},
+                rival_sets=rivals,
                 coverage_statement="The claim is either supported or refuted.",
             ),
             framing_method=FramingMethod.RECORDED,
@@ -149,12 +157,16 @@ def update(
     )
 
 
-def updated_hypotheses(h1_posterior: float) -> list[Hypothesis]:
+def updated_hypotheses(
+    h1_posterior: float,
+    *,
+    relation: HypothesisRelation = HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
+) -> list[Hypothesis]:
     return [
         hypothesis.model_copy(update={"posterior": h1_posterior})
         if hypothesis.id == "H1"
         else hypothesis
-        for hypothesis in make_belief_state().hypotheses
+        for hypothesis in make_belief_state(relation=relation).hypotheses
     ]
 
 
@@ -276,3 +288,162 @@ def test_counterevidence_reframes_scoped_top_hypothesis():
         "H1",
         "H_H1_cycle_1_reframed",
     ]
+
+
+def test_discarded_anomaly_is_evolution_neutral():
+    previous = make_belief_state(1.0 / 3.0, 1.0 / 3.0)
+    discarded = anomaly_event().model_copy(update={"discard_reason": "inadmissible"})
+
+    result = HypothesisEvolutionEngine().evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=previous.hypotheses,
+        evidence_events=[discarded],
+        belief_updates=[],
+    )
+
+    assert result.hypotheses == previous.hypotheses
+    assert result.evolutions == []
+    assert result.probe_candidates == []
+
+
+def test_discarded_counterevidence_cannot_retire_or_reframe():
+    previous = make_belief_state(h1_posterior=0.7, h2_posterior=0.3)
+    discarded_events = [
+        counter_event("E_discarded_1").model_copy(
+            update={"discard_reason": "inadmissible"}
+        ),
+        counter_event("E_discarded_2").model_copy(
+            update={"discard_reason": "inadmissible"}
+        ),
+    ]
+    current = updated_hypotheses(0.12)
+
+    result = HypothesisEvolutionEngine().evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=current,
+        evidence_events=discarded_events,
+        belief_updates=[
+            update(evidence_id="E_discarded_1", prior=0.7, posterior=0.3),
+            update(evidence_id="E_discarded_2", prior=0.3, posterior=0.12),
+        ],
+    )
+
+    assert result.hypotheses == current
+    assert result.evolutions == []
+    assert result.probe_candidates == []
+
+
+def test_seen_anomaly_id_is_ignored_by_direct_evolution_call():
+    previous = make_belief_state().model_copy(
+        update={"ledger_refs": {"evidence_events": ["E_seen_anomaly"]}}
+    )
+
+    result = HypothesisEvolutionEngine().evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=previous.hypotheses,
+        evidence_events=[anomaly_event("E_seen_anomaly")],
+        belief_updates=[],
+    )
+
+    assert result.hypotheses == previous.hypotheses
+    assert result.evolutions == []
+
+
+def test_same_cycle_duplicate_anomaly_id_spawns_once():
+    previous = make_belief_state()
+    duplicate = anomaly_event("E_duplicate_anomaly")
+
+    result = HypothesisEvolutionEngine().evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=previous.hypotheses,
+        evidence_events=[duplicate, duplicate],
+        belief_updates=[],
+    )
+
+    assert [item.operation for item in result.evolutions] == [EvolutionOperation.SPAWN]
+    assert [item.id for item in result.hypotheses].count(
+        "H_E_duplicate_anomaly_spawned"
+    ) == 1
+
+
+def test_independent_spawn_has_no_dynamic_rivals():
+    previous = make_belief_state(relation=HypothesisRelation.INDEPENDENT)
+
+    result = HypothesisEvolutionEngine().evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=previous.hypotheses,
+        evidence_events=[anomaly_event("E_independent_spawn")],
+        belief_updates=[],
+    )
+
+    assert all(not item.rivals for item in result.hypotheses)
+
+
+def test_exclusive_spawn_reconciles_reciprocal_dynamic_rivals():
+    previous = make_belief_state()
+
+    result = HypothesisEvolutionEngine().evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=previous.hypotheses,
+        evidence_events=[anomaly_event("E_exclusive_spawn")],
+        belief_updates=[],
+    )
+
+    ids = {item.id for item in result.hypotheses}
+    assert {
+        item.id: set(item.rivals)
+        for item in result.hypotheses
+    } == {item.id: ids - {item.id} for item in result.hypotheses}
+
+
+def test_independent_reframe_has_no_dynamic_rivals():
+    previous = make_belief_state(
+        h1_posterior=0.7,
+        h2_posterior=0.7,
+        relation=HypothesisRelation.INDEPENDENT,
+    )
+    current = updated_hypotheses(0.55, relation=HypothesisRelation.INDEPENDENT)
+
+    result = HypothesisEvolutionEngine(
+        config=HypothesisEvolutionConfig(retire_posterior_threshold=0.05)
+    ).evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=current,
+        evidence_events=[counter_event("E_independent_reframe")],
+        belief_updates=[
+            update(evidence_id="E_independent_reframe", prior=0.7, posterior=0.55)
+        ],
+    )
+
+    assert any(item.operation == EvolutionOperation.REFRAME for item in result.evolutions)
+    assert all(not item.rivals for item in result.hypotheses)
+
+
+def test_exclusive_reframe_reconciles_reciprocal_dynamic_rivals():
+    previous = make_belief_state(h1_posterior=0.7, h2_posterior=0.3)
+    current = updated_hypotheses(0.55)
+
+    result = HypothesisEvolutionEngine(
+        config=HypothesisEvolutionConfig(retire_posterior_threshold=0.05)
+    ).evolve(
+        cycle=make_cycle(),
+        previous_belief_state=previous,
+        updated_hypotheses=current,
+        evidence_events=[counter_event("E_exclusive_reframe")],
+        belief_updates=[
+            update(evidence_id="E_exclusive_reframe", prior=0.7, posterior=0.55)
+        ],
+    )
+
+    ids = {item.id for item in result.hypotheses}
+    assert {
+        item.id: set(item.rivals)
+        for item in result.hypotheses
+    } == {item.id: ids - {item.id} for item in result.hypotheses}

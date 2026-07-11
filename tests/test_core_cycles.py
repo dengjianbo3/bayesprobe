@@ -1708,6 +1708,89 @@ def test_existing_ledger_refs_are_preserved_and_appended():
     assert result.belief_state.ledger_refs["custom_audit"] == ["keep_me"]
 
 
+class StaticEventGate(EvidenceIntegrationGate):
+    def __init__(self, events: list[EvidenceEvent]) -> None:
+        self.events = events
+        self.seen_framing_methods: list[FramingMethod] = []
+
+    def integrate(self, *, cycle, belief_state, probe_set, signals):
+        assert belief_state.task_frame is not None
+        self.seen_framing_methods.append(belief_state.task_frame.framing_method)
+        return list(self.events)
+
+
+class StaticEventCore(BayesProbeCore):
+    def __init__(self, events: list[EvidenceEvent]) -> None:
+        self.static_gate = StaticEventGate(events)
+        super().__init__()
+
+    def _create_evidence_integration_gate(self):
+        return self.static_gate
+
+
+def test_core_marks_past_evidence_replay_and_preserves_exact_state():
+    replay = EvidenceEvent(
+        id="E_replay",
+        derived_from_signal="S_replay",
+        target_hypotheses=["H1"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content="Replay fixture.",
+        likelihoods={"H1": LikelihoodBand.STRONGLY_CONFIRMING},
+    )
+    core = StaticEventCore([replay])
+    belief_state = make_belief_state(cycle_id="cycle_0").model_copy(
+        update={
+            "hypotheses": [
+                item.model_copy(update={"posterior": 1.0 / 3.0})
+                for item in make_belief_state().hypotheses
+            ],
+            "ledger_refs": {"evidence_events": ["E_replay"]},
+        }
+    )
+
+    result = core.integrate_cycle(
+        cycle=make_cycle("cycle_replay"),
+        belief_state=belief_state,
+        probe_set=make_empty_probe_set("cycle_replay"),
+        signals=[make_active_signal("pending")],
+    )
+
+    assert core.static_gate.seen_framing_methods == [FramingMethod.LEGACY_MIGRATION]
+    assert result.evidence_events[0].discard_reason == "duplicate evidence event id"
+    assert result.belief_state.hypotheses == belief_state.hypotheses
+    assert result.belief_updates == []
+    assert result.hypothesis_evolutions == []
+    assert result.belief_state.ledger_refs["evidence_events"] == ["E_replay"]
+
+
+def test_core_marks_same_cycle_duplicate_event_and_appends_identity_once():
+    duplicate = EvidenceEvent(
+        id="E_same_cycle",
+        derived_from_signal="S_same_cycle",
+        target_hypotheses=["H1"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content="Same-cycle duplicate fixture.",
+        likelihoods={"H1": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+    core = StaticEventCore([duplicate, duplicate])
+
+    result = core.integrate_cycle(
+        cycle=make_cycle("cycle_same_id"),
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set("cycle_same_id"),
+        signals=[make_active_signal("pending")],
+    )
+
+    assert len(result.evidence_events) == 2
+    assert result.evidence_events[0].discard_reason is None
+    assert result.evidence_events[1].discard_reason == "duplicate evidence event id"
+    assert {update.evidence_id for update in result.belief_updates} == {
+        "E_same_cycle"
+    }
+    assert len(result.belief_updates) == 2
+    assert result.belief_state.ledger_refs["evidence_events"] == ["E_same_cycle"]
+
+
 def test_future_cycle_belief_state_is_rejected():
     core = BayesProbeCore()
     cycle = CycleRecord(

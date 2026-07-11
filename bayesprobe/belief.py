@@ -31,6 +31,7 @@ _NON_PARTICIPATING_STATUSES = {
     HypothesisStatus.RETIRED,
     HypothesisStatus.ARCHIVED,
 }
+_REPLAY_DISCARD_REASON = "duplicate evidence event id"
 
 
 def likelihood_band_to_lr(band: LikelihoodBand) -> float:
@@ -248,6 +249,20 @@ def _penalty_deltas(hypothesis: Hypothesis) -> tuple[float, float]:
     )
 
 
+def mark_replayed_evidence_events(
+    belief_state: BeliefState,
+    events: list[EvidenceEvent],
+) -> list[EvidenceEvent]:
+    seen_ids = set(belief_state.ledger_refs.get("evidence_events", []))
+    marked: list[EvidenceEvent] = []
+    for event in events:
+        if event.id in seen_ids and event.discard_reason is None:
+            event = event.model_copy(update={"discard_reason": _REPLAY_DISCARD_REASON})
+        marked.append(event)
+        seen_ids.add(event.id)
+    return marked
+
+
 def solve_updates(
     run_id: str,
     cycle_id: str,
@@ -257,6 +272,9 @@ def solve_updates(
     if belief_state.task_frame is None:
         raise ValueError("belief state requires hypothesis relation metadata")
     relation = belief_state.task_frame.hypothesis_frame.relation
+    events = mark_replayed_evidence_events(belief_state, events)
+    if not any(event.discard_reason is None for event in events):
+        return list(belief_state.hypotheses), []
     working_hypotheses = normalize_hypotheses(
         belief_state.hypotheses,
         relation=relation,
@@ -327,8 +345,14 @@ def solve_updates(
             replacements[hypothesis_id] = hypothesis.model_copy(
                 update={
                     "posterior": posterior,
-                    "applied_complexity_penalty": hypothesis.complexity_penalty,
-                    "applied_ad_hoc_penalty": hypothesis.ad_hoc_penalty,
+                    "applied_complexity_penalty": max(
+                        hypothesis.applied_complexity_penalty,
+                        hypothesis.complexity_penalty,
+                    ),
+                    "applied_ad_hoc_penalty": max(
+                        hypothesis.applied_ad_hoc_penalty,
+                        hypothesis.ad_hoc_penalty,
+                    ),
                 }
             )
             updates.append(
@@ -361,6 +385,7 @@ def solve_updates(
 
 __all__ = [
     "likelihood_band_to_lr",
+    "mark_replayed_evidence_events",
     "normalize_hypotheses",
     "solve_updates",
     "summarize_hypotheses",

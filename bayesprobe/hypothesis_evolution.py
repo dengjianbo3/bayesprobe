@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from bayesprobe.belief import normalize_hypotheses
+from bayesprobe.belief import mark_replayed_evidence_events, normalize_hypotheses
 from bayesprobe.schemas import (
     BeliefState,
     BeliefUpdate,
@@ -12,6 +12,7 @@ from bayesprobe.schemas import (
     EvolutionOperation,
     Hypothesis,
     HypothesisEvolution,
+    HypothesisRelation,
     HypothesisStatus,
     ProbeCandidate,
     ProbeDesign,
@@ -55,6 +56,24 @@ class HypothesisEvolutionEngine:
         if previous_belief_state.task_frame is None:
             raise ValueError("belief state requires hypothesis relation metadata")
         relation = previous_belief_state.task_frame.hypothesis_frame.relation
+        evidence_events = mark_replayed_evidence_events(
+            previous_belief_state,
+            evidence_events,
+        )
+        evidence_events = [
+            event for event in evidence_events if event.discard_reason is None
+        ]
+        if not evidence_events:
+            return HypothesisEvolutionResult(
+                hypotheses=list(updated_hypotheses),
+                evolutions=[],
+            )
+        admitted_event_ids = {event.id for event in evidence_events}
+        belief_updates = [
+            update
+            for update in belief_updates
+            if update.evidence_id in admitted_event_ids
+        ]
         hypotheses = list(updated_hypotheses)
         evolutions: list[HypothesisEvolution] = []
         probe_candidates: list[ProbeCandidate] = []
@@ -89,8 +108,11 @@ class HypothesisEvolutionEngine:
         evolutions.extend(reframe_result.evolutions)
         probe_candidates.extend(reframe_result.probe_candidates)
 
+        if evolutions:
+            hypotheses = _reconcile_dynamic_rivals(hypotheses, relation=relation)
+            hypotheses = normalize_hypotheses(hypotheses, relation=relation)
         return HypothesisEvolutionResult(
-            hypotheses=normalize_hypotheses(hypotheses, relation=relation),
+            hypotheses=hypotheses,
             evolutions=evolutions,
             probe_candidates=probe_candidates,
         )
@@ -340,6 +362,27 @@ class _SpawnResult:
     hypothesis: Hypothesis
     evolution: HypothesisEvolution
     probe_candidate: ProbeCandidate
+
+
+def _reconcile_dynamic_rivals(
+    hypotheses: list[Hypothesis],
+    *,
+    relation: HypothesisRelation,
+) -> list[Hypothesis]:
+    if relation == HypothesisRelation.INDEPENDENT:
+        return [
+            hypothesis.model_copy(update={"rivals": []})
+            if hypothesis.rivals
+            else hypothesis
+            for hypothesis in hypotheses
+        ]
+    ids = [hypothesis.id for hypothesis in hypotheses]
+    return [
+        hypothesis.model_copy(
+            update={"rivals": [other_id for other_id in ids if other_id != hypothesis.id]}
+        )
+        for hypothesis in hypotheses
+    ]
 
 
 __all__ = [

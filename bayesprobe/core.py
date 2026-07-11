@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from bayesprobe.belief import normalize_hypotheses, solve_updates, summarize_hypotheses
+from bayesprobe.belief import (
+    mark_replayed_evidence_events,
+    solve_updates,
+    summarize_hypotheses,
+)
 from bayesprobe.evidence import EvidenceIntegrationGate, EvidenceIntegrationResult
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.inbox import SignalInbox
@@ -88,7 +92,10 @@ class BayesProbeCore:
                 signals=normalized_signals,
             )
         )
-        evidence_events = integration.evidence_events
+        evidence_events = mark_replayed_evidence_events(
+            belief_state,
+            integration.evidence_events,
+        )
         probe_candidates = integration.probe_candidates
         updated_hypotheses, belief_updates = solve_updates(
             run_id=cycle.run_id,
@@ -104,10 +111,7 @@ class BayesProbeCore:
             belief_updates=belief_updates,
         )
         relation = belief_state.task_frame.hypothesis_frame.relation
-        evolved_hypotheses = normalize_hypotheses(
-            evolution_result.hypotheses,
-            relation=relation,
-        )
+        evolved_hypotheses = evolution_result.hypotheses
         evolutions = evolution_result.evolutions
         probe_candidates = [
             *probe_candidates,
@@ -119,10 +123,10 @@ class BayesProbeCore:
             *existing_ledger_refs.get("probe_sets", []),
             probe_set.probe_set_id,
         ]
-        merged_ledger_refs["evidence_events"] = [
-            *existing_ledger_refs.get("evidence_events", []),
-            *(event.id for event in evidence_events),
-        ]
+        merged_ledger_refs["evidence_events"] = _append_unique(
+            existing_ledger_refs.get("evidence_events", []),
+            [event.id for event in evidence_events],
+        )
         merged_ledger_refs["belief_updates"] = [
             *existing_ledger_refs.get("belief_updates", []),
             *(update.update_id for update in belief_updates),
@@ -276,3 +280,13 @@ def _scoped_cycle_key(run_id: str, cycle_id: str) -> str:
     if cycle_id.startswith(f"{run_id}_"):
         return cycle_id
     return f"{run_id}_{cycle_id}"
+
+
+def _append_unique(existing: list[str], additions: list[str]) -> list[str]:
+    result = list(existing)
+    seen = set(result)
+    for item in additions:
+        if item not in seen:
+            result.append(item)
+            seen.add(item)
+    return result
