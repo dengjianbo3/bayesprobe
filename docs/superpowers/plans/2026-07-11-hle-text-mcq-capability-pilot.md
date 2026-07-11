@@ -518,10 +518,10 @@ git commit -m "feat: score and report capability experiments"
 - Modify: `bayesprobe/cli.py`
 - Modify: `bayesprobe/evaluation/__init__.py`
 - Modify: `bayesprobe/__init__.py`
-- Test: `tests/evaluation/test_cli.py`
+- Test: `tests/evaluation/test_evaluation_cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] Write RED parser/handler tests for:
+- [x] Write RED parser/handler tests for:
 
 ```text
 bayesprobe eval prepare --config PATH
@@ -530,24 +530,24 @@ bayesprobe eval score --experiment PATH
 bayesprobe eval report --experiment PATH
 ```
 
-- [ ] Test stable exit codes and sanitized stderr for config, gated access, preflight, provider, Docker, incomplete-run, and leak-scan failures.
-- [ ] Implement thin handlers that delegate to package services. Keep legacy `bayesprobe run --config` behavior unchanged.
-- [ ] Export only stable contracts and service entry points; do not expose HLE raw row types or gold data through top-level convenience APIs.
-- [ ] Run:
+- [x] Test stable exit codes and sanitized stderr for config, gated access, preflight, provider, Docker, incomplete-run, and leak-scan failures.
+- [x] Implement thin handlers that delegate to package services. Keep legacy `bayesprobe run --config` behavior unchanged.
+- [x] Export only stable contracts and service entry points; do not expose HLE raw row types or gold data through top-level convenience APIs.
+- [x] Run:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_cli.py \
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_evaluation_cli.py \
   tests/test_cli.py -q -p no:cacheprovider
 python3 -m bayesprobe.cli --help
 python3 -m bayesprobe.cli eval --help
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add bayesprobe/evaluation/cli.py bayesprobe/cli.py \
   bayesprobe/evaluation/__init__.py bayesprobe/__init__.py \
-  tests/evaluation/test_cli.py tests/test_cli.py
+  tests/evaluation/test_evaluation_cli.py tests/test_cli.py
 git commit -m "feat: expose capability evaluation commands"
 ```
 

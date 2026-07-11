@@ -21,6 +21,11 @@ from bayesprobe.experiment_runner import (
     ExperimentRunResult,
     run_benchmark_experiment,
 )
+from bayesprobe.evaluation import (
+    ArmCaseResult,
+    CapabilityExperimentConfig,
+    EvaluationCase,
+)
 from bayesprobe.initialization import (
     BayesProbeInitializer,
     HypothesisSeed,
@@ -91,6 +96,7 @@ from bayesprobe.synchronized_runner import (
 
 __all__ = [
     "AnswerProjection",
+    "ArmCaseResult",
     "AutonomousQuestionRunConfig",
     "AutonomousQuestionRunResult",
     "AutonomousQuestionRunner",
@@ -109,10 +115,12 @@ __all__ = [
     "BenchmarkSignal",
     "BenchmarkSignalShape",
     "BenchmarkSuiteResult",
+    "CapabilityExperimentConfig",
     "DeterministicModelGateway",
     "DeterministicProbeToolGateway",
     "EvidenceJudgment",
     "EvidenceJudgmentRepairPolicy",
+    "EvaluationCase",
     "ExperimentArtifactBundle",
     "ExperimentRunConfig",
     "ExperimentRunResult",

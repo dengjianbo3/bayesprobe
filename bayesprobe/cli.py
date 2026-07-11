@@ -16,6 +16,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(error.code)
     if args.command == "run":
         return _run_command(args)
+    if args.command == "eval":
+        from bayesprobe.evaluation.cli import run_eval_command
+
+        return run_eval_command(args)
     parser.print_help(sys.stderr)
     return 2
 
@@ -29,6 +33,9 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Path to a BayesProbe experiment JSON config.",
     )
+    from bayesprobe.evaluation.cli import add_eval_subparser
+
+    add_eval_subparser(subparsers)
     return parser
 
 

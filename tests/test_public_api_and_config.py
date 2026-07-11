@@ -6,6 +6,7 @@ import pytest
 
 import bayesprobe
 from bayesprobe import (
+    ArmCaseResult,
     BenchmarkDataset,
     BenchmarkHarness,
     BenchmarkSample,
@@ -13,12 +14,14 @@ from bayesprobe import (
     BenchmarkSignal,
     BenchmarkSignalShape,
     BenchmarkSuiteResult,
+    CapabilityExperimentConfig,
     AutonomousQuestionProgress,
     AutonomousQuestionProgressKind,
     AutonomousQuestionProgressObserver,
     DeterministicModelGateway,
     EvidenceJudgment,
     EvidenceJudgmentRepairPolicy,
+    EvaluationCase,
     ExperimentArtifactBundle,
     ExperimentRunConfig,
     ExperimentRunResult,
@@ -55,6 +58,7 @@ def write_json(path: Path, payload) -> None:
 
 def test_public_sdk_exports_supported_names():
     expected_names = {
+        "ArmCaseResult",
         "BenchmarkDataset",
         "BenchmarkHarness",
         "BenchmarkSample",
@@ -62,9 +66,11 @@ def test_public_sdk_exports_supported_names():
         "BenchmarkSignal",
         "BenchmarkSignalShape",
         "BenchmarkSuiteResult",
+        "CapabilityExperimentConfig",
         "DeterministicModelGateway",
         "EvidenceJudgment",
         "EvidenceJudgmentRepairPolicy",
+        "EvaluationCase",
         "ExperimentArtifactBundle",
         "ExperimentRunConfig",
         "ExperimentRunResult",
@@ -132,9 +138,12 @@ def test_public_sdk_exports_supported_names():
     assert BenchmarkSignal is not None
     assert BenchmarkSignalShape.ACTIVE_ONLY.value == "active_only"
     assert BenchmarkSuiteResult is not None
+    assert ArmCaseResult is not None
+    assert CapabilityExperimentConfig is not None
     assert DeterministicModelGateway is not None
     assert EvidenceJudgment is not None
     assert EvidenceJudgmentRepairPolicy is not None
+    assert EvaluationCase is not None
     assert ExperimentArtifactBundle is not None
     assert ExperimentRunConfig is not None
     assert ExperimentRunResult is not None
