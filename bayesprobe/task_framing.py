@@ -254,33 +254,33 @@ class RecordedTaskFramer:
             raise TaskFramingError("invalid recorded task framing input") from None
 
         try:
-            raw_contract = self._frame.answer_contract
-            contract_payload = (
-                dict(raw_contract.__dict__)
-                if isinstance(raw_contract, AnswerContract)
-                else raw_contract
+            source = _strict_recorded_task_frame(self._frame)
+            hypothesis_frame = HypothesisFrame(
+                frame_id=f"{run_id}_hypothesis_frame",
+                relation=source.hypothesis_frame.relation,
+                hypotheses=source.hypothesis_frame.hypotheses,
+                rival_sets=source.hypothesis_frame.rival_sets,
+                coverage_statement=source.hypothesis_frame.coverage_statement,
+                unresolved_alternative_mass=(
+                    source.hypothesis_frame.unresolved_alternative_mass
+                ),
+                coverage_limitation=source.hypothesis_frame.coverage_limitation,
             )
-            payload = self._frame.model_dump(
-                mode="python",
-                exclude={"answer_contract"},
+            return TaskFrame(
+                task_frame_id=f"{run_id}_task_frame",
+                task_kind=source.task_kind,
+                normalized_question=question,
+                task_context=task_context,
+                answer_contract=source.answer_contract,
+                hypothesis_frame=hypothesis_frame,
+                framing_method=FramingMethod.RECORDED,
+                framing_trace={
+                    "metadata": {"run_id": run_id},
+                    "recorded_from_task_frame_id": source.task_frame_id,
+                    "source_framing_method": source.framing_method.value,
+                    "source_trace": redact_secret_material(source.framing_trace),
+                },
             )
-            payload["answer_contract"] = _answer_contract_from_mapping(
-                contract_payload
-            )
-            payload["task_frame_id"] = f"{run_id}_task_frame"
-            payload["normalized_question"] = question
-            payload["task_context"] = task_context
-            payload["framing_method"] = FramingMethod.RECORDED
-            payload["hypothesis_frame"]["frame_id"] = f"{run_id}_hypothesis_frame"
-            payload["framing_trace"] = {
-                "metadata": {"run_id": run_id},
-                "recorded_from_task_frame_id": self._frame.task_frame_id,
-                "source_framing_method": FramingMethod(
-                    self._frame.framing_method
-                ).value,
-                "source_trace": redact_secret_material(self._frame.framing_trace),
-            }
-            return TaskFrame.model_validate(payload)
         except (AttributeError, KeyError, TypeError, ValueError):
             raise TaskFramingError("invalid recorded task frame") from None
 
@@ -350,6 +350,34 @@ _ANSWER_CONTRACT_FIELDS = {
     "required_sections",
     "decision_form",
     "permits_synthesis",
+}
+_RECORDED_TASK_FRAME_FIELDS = {
+    "task_frame_id",
+    "task_kind",
+    "normalized_question",
+    "task_context",
+    "answer_contract",
+    "hypothesis_frame",
+    "framing_method",
+    "framing_trace",
+}
+_RECORDED_HYPOTHESIS_FRAME_FIELDS = {
+    "frame_id",
+    "relation",
+    "hypotheses",
+    "rival_sets",
+    "coverage_statement",
+    "unresolved_alternative_mass",
+    "coverage_limitation",
+}
+_RECORDED_FRAMED_HYPOTHESIS_FIELDS = {
+    "id",
+    "statement",
+    "type",
+    "scope",
+    "initial_prior",
+    "falsifiers",
+    "predictions",
 }
 _PROVIDER_BELIEF_FIELDS = {
     "id",
@@ -590,6 +618,151 @@ def _answer_contract_from_mapping(payload: Any) -> AnswerContract:
         decision_form=decision_form,
         permits_synthesis=permits_synthesis,
     )
+
+
+def _strict_recorded_task_frame(frame: TaskFrame) -> TaskFrame:
+    payload = _recorded_model_payload(
+        frame,
+        TaskFrame,
+        _RECORDED_TASK_FRAME_FIELDS,
+        "task frame",
+    )
+    if type(payload["task_kind"]) is not TaskKind:
+        raise TaskFramingError("recorded task_kind must be a TaskKind")
+    if type(payload["framing_method"]) is not FramingMethod:
+        raise TaskFramingError("recorded framing_method must be a FramingMethod")
+    if type(payload["task_context"]) is not str:
+        raise TaskFramingError("recorded task_context must be a string")
+    if type(payload["framing_trace"]) is not dict:
+        raise TaskFramingError("recorded framing_trace must be an object")
+
+    raw_contract = payload["answer_contract"]
+    contract_payload = (
+        dict(raw_contract.__dict__)
+        if isinstance(raw_contract, AnswerContract)
+        else raw_contract
+    )
+    return TaskFrame(
+        task_frame_id=_native_required_text(
+            payload["task_frame_id"], "recorded task_frame_id"
+        ),
+        task_kind=payload["task_kind"],
+        normalized_question=_native_required_text(
+            payload["normalized_question"], "recorded normalized_question"
+        ),
+        task_context=payload["task_context"],
+        answer_contract=_answer_contract_from_mapping(contract_payload),
+        hypothesis_frame=_strict_recorded_hypothesis_frame(
+            payload["hypothesis_frame"]
+        ),
+        framing_method=payload["framing_method"],
+        framing_trace=payload["framing_trace"],
+    )
+
+
+def _strict_recorded_hypothesis_frame(value: Any) -> HypothesisFrame:
+    payload = _recorded_model_payload(
+        value,
+        HypothesisFrame,
+        _RECORDED_HYPOTHESIS_FRAME_FIELDS,
+        "hypothesis frame",
+    )
+    if type(payload["relation"]) is not HypothesisRelation:
+        raise TaskFramingError(
+            "recorded hypothesis frame relation must be a HypothesisRelation"
+        )
+    if type(payload["hypotheses"]) is not list:
+        raise TaskFramingError("recorded hypotheses must be a list")
+    if type(payload["rival_sets"]) is not dict:
+        raise TaskFramingError("recorded rival_sets must be an object")
+
+    rival_sets: dict[str, list[str]] = {}
+    for hypothesis_id, rivals in payload["rival_sets"].items():
+        if not isinstance(hypothesis_id, str) or not hypothesis_id.strip():
+            raise TaskFramingError("recorded rival_sets keys must be strings")
+        if type(rivals) is not list or any(
+            not isinstance(rival, str) or not rival.strip() for rival in rivals
+        ):
+            raise TaskFramingError("recorded rival_sets values must be string lists")
+        rival_sets[hypothesis_id] = list(rivals)
+
+    unresolved_mass = payload["unresolved_alternative_mass"]
+    if unresolved_mass is not None and (
+        type(unresolved_mass) is not float
+        or not math.isfinite(unresolved_mass)
+        or not 0 <= unresolved_mass <= 1
+    ):
+        raise TaskFramingError(
+            "recorded unresolved_alternative_mass must be a float or null"
+        )
+    coverage_limitation = payload["coverage_limitation"]
+    if coverage_limitation is not None:
+        coverage_limitation = _native_required_text(
+            coverage_limitation, "recorded coverage_limitation"
+        )
+
+    return HypothesisFrame(
+        frame_id=_native_required_text(payload["frame_id"], "recorded frame_id"),
+        relation=payload["relation"],
+        hypotheses=[
+            _strict_recorded_framed_hypothesis(item)
+            for item in payload["hypotheses"]
+        ],
+        rival_sets=rival_sets,
+        coverage_statement=_native_required_text(
+            payload["coverage_statement"], "recorded coverage_statement"
+        ),
+        unresolved_alternative_mass=unresolved_mass,
+        coverage_limitation=coverage_limitation,
+    )
+
+
+def _strict_recorded_framed_hypothesis(value: Any) -> FramedHypothesis:
+    payload = _recorded_model_payload(
+        value,
+        FramedHypothesis,
+        _RECORDED_FRAMED_HYPOTHESIS_FIELDS,
+        "framed hypothesis",
+    )
+    initial_prior = payload["initial_prior"]
+    if (
+        type(initial_prior) is not float
+        or not math.isfinite(initial_prior)
+        or not 0 <= initial_prior <= 1
+    ):
+        raise TaskFramingError("recorded initial_prior must be a probability float")
+    return FramedHypothesis(
+        id=_native_required_text(payload["id"], "recorded hypothesis id"),
+        statement=_native_required_text(
+            payload["statement"], "recorded hypothesis statement"
+        ),
+        type=_native_required_text(payload["type"], "recorded hypothesis type"),
+        scope=_native_required_text(payload["scope"], "recorded hypothesis scope"),
+        initial_prior=initial_prior,
+        falsifiers=_native_required_text_list(
+            payload["falsifiers"], "recorded hypothesis falsifiers"
+        ),
+        predictions=_native_required_text_list(
+            payload["predictions"], "recorded hypothesis predictions"
+        ),
+    )
+
+
+def _recorded_model_payload(
+    value: Any,
+    model_type: type[Any],
+    exact_fields: set[str],
+    label: str,
+) -> dict[str, Any]:
+    if isinstance(value, model_type):
+        payload = dict(value.__dict__)
+    elif type(value) is dict:
+        payload = dict(value)
+    else:
+        raise TaskFramingError(f"recorded {label} must be an object")
+    if set(payload) != exact_fields:
+        raise TaskFramingError(f"recorded {label} has missing or unknown fields")
+    return payload
 
 
 @dataclass(frozen=True)

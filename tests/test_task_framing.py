@@ -1033,6 +1033,60 @@ def test_recorded_task_framer_strictly_rejects_unknown_contract_fields():
         )
 
 
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "tuple_hypotheses",
+        "tuple_falsifiers",
+        "raw_relation",
+        "bool_unresolved_alternative_mass",
+        "unknown_hypothesis_frame_field",
+        "unknown_framed_hypothesis_field",
+    ],
+)
+def test_recorded_task_framer_rejects_native_malformed_nested_structures(
+    malformation,
+):
+    source_frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="fixture_malformed_nested",
+            question="Fixture question",
+            hypothesis_seeds=[
+                HypothesisSeed(
+                    statement="The first explanation.",
+                    falsifiers=["The first explanation fails."],
+                ),
+                HypothesisSeed(statement="The second explanation."),
+            ],
+        )
+    ).model_copy(deep=True)
+    hypothesis_frame = source_frame.hypothesis_frame
+
+    if malformation == "tuple_hypotheses":
+        hypothesis_frame.__dict__["hypotheses"] = tuple(hypothesis_frame.hypotheses)
+    elif malformation == "tuple_falsifiers":
+        hypothesis = hypothesis_frame.hypotheses[0]
+        hypothesis.__dict__["falsifiers"] = tuple(hypothesis.falsifiers)
+    elif malformation == "raw_relation":
+        hypothesis_frame.__dict__["relation"] = (
+            HypothesisRelation.EXCLUSIVE_EXHAUSTIVE.value
+        )
+    elif malformation == "bool_unresolved_alternative_mass":
+        hypothesis_frame.__dict__["unresolved_alternative_mass"] = True
+    elif malformation == "unknown_hypothesis_frame_field":
+        hypothesis_frame.__dict__["unexpected"] = "field"
+    elif malformation == "unknown_framed_hypothesis_field":
+        hypothesis_frame.hypotheses[0].__dict__["unexpected"] = "field"
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source_frame).frame(
+            TaskFramingInput(
+                run_id="replay_malformed_nested",
+                question="Current question",
+            )
+        )
+
+
 def test_approved_design_provider_example_validates_against_implemented_schema():
     design = Path(
         "docs/superpowers/specs/2026-07-11-open-question-architecture-correction-design.md"
