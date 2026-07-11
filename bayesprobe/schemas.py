@@ -130,8 +130,23 @@ def _normalized_semantic_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+_SECRET_VALUE_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{12,}")
+_FORBIDDEN_SECRET_KEY_PARTS = ("apikey", "authorization", "token", "secret")
+
+
+def is_secret_like_value(value: str) -> bool:
+    return isinstance(value, str) and _SECRET_VALUE_PATTERN.search(value) is not None
+
+
+def is_forbidden_secret_key_name(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized_key = re.sub(r"[^a-z0-9]", "", value.casefold())
+    return any(part in normalized_key for part in _FORBIDDEN_SECRET_KEY_PARTS)
+
+
 def _reject_secret_string(value: str) -> None:
-    if re.search(r"sk-[A-Za-z0-9_-]{12,}", value):
+    if is_secret_like_value(value):
         raise ValueError("TaskFrame must not contain secret values")
 
 
@@ -143,11 +158,7 @@ def _reject_secret_material(value: Any) -> None:
             if not isinstance(key, str):
                 raise ValueError("TaskFrame must contain only JSON-compatible values")
             _reject_secret_string(key)
-            normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
-            if any(
-                part in normalized_key
-                for part in ("apikey", "authorization", "token", "secret")
-            ):
+            if is_forbidden_secret_key_name(key):
                 raise ValueError("TaskFrame must not contain secret fields")
             _reject_secret_material(item)
     elif isinstance(value, list):

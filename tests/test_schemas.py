@@ -24,6 +24,8 @@ from bayesprobe.schemas import (
     SignalKind,
     TaskFrame,
     TaskKind,
+    is_forbidden_secret_key_name,
+    is_secret_like_value,
 )
 
 
@@ -116,6 +118,18 @@ def test_task_frame_rejects_secret_mapping_key():
 
     with pytest.raises(ValueError, match="secret"):
         TaskFrame.model_validate(frame.model_dump())
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["api_key", "Api-Key", "AUTHORIZATION", "access_token", "secret.value"],
+)
+def test_forbidden_secret_key_name_normalizes_common_variants(key):
+    assert is_forbidden_secret_key_name(key)
+
+
+def test_secret_predicates_allow_ordinary_tokenization_prose():
+    assert not is_secret_like_value("Tokenization is a useful concept.")
 
 
 @pytest.mark.parametrize(

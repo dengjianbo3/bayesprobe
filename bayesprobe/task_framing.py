@@ -21,6 +21,8 @@ from bayesprobe.schemas import (
     HypothesisRelation,
     TaskFrame,
     TaskKind,
+    is_forbidden_secret_key_name,
+    is_secret_like_value,
 )
 
 
@@ -55,9 +57,6 @@ class TaskFramingError(ValueError):
     pass
 
 
-_CALLER_SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{12,}")
-
-
 def validate_task_framing_input_security(input: TaskFramingInput) -> None:
     _reject_caller_secret_material(
         {
@@ -73,14 +72,16 @@ def validate_task_framing_input_security(input: TaskFramingInput) -> None:
 
 def _reject_caller_secret_material(value: Any) -> None:
     if isinstance(value, str):
-        if _CALLER_SECRET_PATTERN.search(value):
+        if is_secret_like_value(value):
             raise TaskFramingError("task framing input must not contain secret material")
         return
     if isinstance(value, AnswerChoice):
+        _reject_caller_secret_identifier(value.label)
         _reject_caller_secret_material(value.label)
         _reject_caller_secret_material(value.text)
         return
     if isinstance(value, HypothesisSeed):
+        _reject_caller_secret_identifier(value.id)
         _reject_caller_secret_material(value.id)
         _reject_caller_secret_material(value.statement)
         _reject_caller_secret_material(value.scope)
@@ -89,12 +90,18 @@ def _reject_caller_secret_material(value: Any) -> None:
         return
     if isinstance(value, Mapping):
         for key, item in value.items():
+            _reject_caller_secret_identifier(str(key))
             _reject_caller_secret_material(str(key))
             _reject_caller_secret_material(item)
         return
     if isinstance(value, list | tuple):
         for item in value:
             _reject_caller_secret_material(item)
+
+
+def _reject_caller_secret_identifier(value: str | None) -> None:
+    if value is not None and is_forbidden_secret_key_name(value):
+        raise TaskFramingError("task framing input must not contain secret material")
 
 
 @dataclass(frozen=True)

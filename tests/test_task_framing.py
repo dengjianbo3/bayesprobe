@@ -243,6 +243,106 @@ def test_explicit_framer_wraps_late_task_frame_validation_as_task_framing_error(
 
 
 @pytest.mark.parametrize(
+    ("metadata", "credential"),
+    [
+        ({"api_key": "provider-secret-123"}, "provider-secret-123"),
+        (
+            {"nested": {"Authorization": "Bearer private-value"}},
+            "private-value",
+        ),
+    ],
+)
+def test_explicit_framer_rejects_nested_secret_metadata_before_materialization(
+    metadata,
+    credential,
+):
+    input = TaskFramingInput(
+        run_id="run_secret_metadata",
+        question="Which result follows?",
+        answer_choices=[
+            AnswerChoice(label="A", text="First result"),
+            AnswerChoice(label="B", text="Second result"),
+        ],
+        metadata=metadata,
+    )
+    framer = ExplicitTaskFramer()
+
+    assert not framer.can_frame(input)
+    with pytest.raises(TaskFramingError, match="task framing input must not contain secret material") as captured:
+        framer.frame(input)
+
+    _assert_secret_free_exception(captured.value, credential)
+
+
+@pytest.mark.parametrize(
+    "input",
+    [
+        TaskFramingInput(
+            run_id="run_secret_choice_identifier",
+            question="Which result follows?",
+            answer_choices=[
+                AnswerChoice(label="api-key", text="First result"),
+                AnswerChoice(label="B", text="Second result"),
+            ],
+        ),
+        TaskFramingInput(
+            run_id="run_secret_seed_identifier",
+            question="Which explanation fits?",
+            hypothesis_seeds=[
+                HypothesisSeed(id="authorization", statement="First explanation."),
+                HypothesisSeed(id="H2", statement="Second explanation."),
+            ],
+        ),
+    ],
+)
+def test_explicit_framer_rejects_secret_identifier_fields_during_pure_preflight(input):
+    framer = ExplicitTaskFramer()
+
+    assert not framer.can_frame(input)
+    with pytest.raises(TaskFramingError, match="task framing input must not contain secret material"):
+        framer.frame(input)
+
+
+def test_explicit_framer_allows_ordinary_tokenization_prose():
+    frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="run_tokenization_prose",
+            question="Which tokenization strategy best fits the corpus?",
+            task_context="Discuss tokenization concepts for a general audience.",
+            answer_choices=[
+                AnswerChoice(label="A", text="Word-level tokenization"),
+                AnswerChoice(label="B", text="Subword tokenization"),
+            ],
+        )
+    )
+
+    assert frame.task_kind == TaskKind.MULTIPLE_CHOICE
+
+
+def test_initializer_rejects_secret_metadata_before_run_belief_or_ledger_materialization(
+    tmp_path,
+):
+    ledger_path = tmp_path / "secret-metadata.jsonl"
+    initializer = BayesProbeInitializer(ledger=JsonlLedgerStore(ledger_path))
+
+    with pytest.raises(TaskFramingError, match="task framing input must not contain secret material") as captured:
+        initializer.initialize(
+            InitializeRunInput(
+                run_id="run_secret_metadata_ledger",
+                problem="Which result follows?",
+                answer_choices=[
+                    AnswerChoice(label="A", text="First result"),
+                    AnswerChoice(label="B", text="Second result"),
+                ],
+                metadata={"nested": {"authorization": "Bearer private-value"}},
+            )
+        )
+
+    _assert_secret_free_exception(captured.value, "private-value")
+    assert not ledger_path.exists()
+
+
+@pytest.mark.parametrize(
     "input",
     [
         TaskFramingInput(
