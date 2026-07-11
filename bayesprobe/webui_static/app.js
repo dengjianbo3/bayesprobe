@@ -370,7 +370,7 @@ function renderAnswer(answer) {
 
   answerPanel.appendChild(kv("Best answer / hypothesis", answer.current_best_hypothesis));
   answerPanel.appendChild(kv("Answer", answer.answer));
-  answerPanel.appendChild(kv("Posterior summary", answer.posterior_summary));
+  answerPanel.appendChild(kv("Belief summary", answer.posterior_summary));
   answerPanel.appendChild(kv("Main uncertainty", answer.main_uncertainty));
   answerPanel.appendChild(kv("Weakest assumption", answer.weakest_assumption));
 }
@@ -385,15 +385,29 @@ function renderBeliefs(beliefState) {
   }
 
   const summary = beliefState?.posterior_summary || {};
-  beliefPanel.appendChild(
-    kv("Posterior mass", formatNumber(summary.total_active_posterior))
-  );
-  beliefPanel.appendChild(
-    kv(
-      "Top / gap",
-      `${summary.top_hypothesis || "n/a"} / ${formatNumber(summary.posterior_gap)}`
-    )
-  );
+  const relation = beliefState?.task_frame?.hypothesis_frame?.relation ||
+    "exclusive_exhaustive";
+  if (relation === "independent") {
+    beliefPanel.appendChild(
+      kv("Total credence (not normalized)", formatNumber(summary.total_active_credence))
+    );
+    beliefPanel.appendChild(
+      kv(
+        "Top / credence gap",
+        `${summary.top_hypothesis || "n/a"} / ${formatNumber(summary.credence_gap)}`
+      )
+    );
+  } else {
+    beliefPanel.appendChild(
+      kv("Posterior mass", formatNumber(summary.total_active_posterior))
+    );
+    beliefPanel.appendChild(
+      kv(
+        "Top / posterior gap",
+        `${summary.top_hypothesis || "n/a"} / ${formatNumber(summary.posterior_gap)}`
+      )
+    );
+  }
   beliefPanel.appendChild(
     kv("Current uncertainty", beliefState?.uncertainty_summary || "")
   );
@@ -413,7 +427,7 @@ function renderBeliefs(beliefState) {
     metrics.className = "belief-metrics";
     metrics.textContent = [
       `prior ${formatNumber(hypothesis.prior)}`,
-      `posterior ${formatNumber(hypothesis.posterior)}`,
+      `${relation === "independent" ? "credence" : "posterior"} ${formatNumber(hypothesis.posterior)}`,
     ].join(" | ");
 
     const statement = document.createElement("div");

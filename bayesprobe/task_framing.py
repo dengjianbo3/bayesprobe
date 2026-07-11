@@ -15,6 +15,7 @@ from bayesprobe.model_gateway import (
 from bayesprobe.schemas import (
     AnswerChoice,
     AnswerContract,
+    BeliefState,
     FramedHypothesis,
     FramingMethod,
     HypothesisFrame,
@@ -861,6 +862,58 @@ def _rival_sets(
     return {hypothesis_id: [] for hypothesis_id in ids}
 
 
+def migrate_legacy_belief_state(state: BeliefState) -> BeliefState:
+    if state.task_frame is not None:
+        return state
+    ids = [item.id for item in state.hypotheses]
+    if not ids:
+        raise ValueError("legacy belief state requires at least one hypothesis")
+    prior_total = sum(max(item.prior, 0.0) for item in state.hypotheses)
+    priors = (
+        [item.prior / prior_total for item in state.hypotheses]
+        if prior_total > 0
+        else [1.0 / len(ids)] * len(ids)
+    )
+    frame = TaskFrame(
+        task_frame_id=f"{state.run_id}_legacy_task_frame",
+        task_kind=TaskKind.DECISION,
+        normalized_question="Legacy categorical BayesProbe state.",
+        task_context="",
+        answer_contract=AnswerContract(
+            objective="Preserve legacy categorical belief behavior.",
+            required_sections=["answer", "uncertainty"],
+            decision_form="legacy_selection",
+            permits_synthesis=False,
+        ),
+        hypothesis_frame=HypothesisFrame(
+            frame_id=f"{state.run_id}_legacy_hypothesis_frame",
+            relation=HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
+            hypotheses=[
+                FramedHypothesis(
+                    id=item.id,
+                    statement=item.statement,
+                    type=item.type,
+                    scope=item.scope,
+                    initial_prior=priors[index],
+                    falsifiers=list(item.falsifiers)
+                    or [f"A reliable result falsifies legacy hypothesis {item.id}."],
+                    predictions=list(item.predictions)
+                    or [f"A reliable result supports legacy hypothesis {item.id}."],
+                )
+                for index, item in enumerate(state.hypotheses)
+            ],
+            rival_sets=_rival_sets(ids, HypothesisRelation.EXCLUSIVE_EXHAUSTIVE),
+            coverage_statement="Migrated legacy categorical hypothesis set.",
+            coverage_limitation=(
+                "Relation was assigned by the versioned legacy migration."
+            ),
+        ),
+        framing_method=FramingMethod.LEGACY_MIGRATION,
+        framing_trace={"migration": "legacy_categorical_v0.1"},
+    )
+    return state.model_copy(update={"task_frame": frame})
+
+
 __all__ = [
     "ExplicitTaskFramer",
     "HypothesisSeed",
@@ -872,6 +925,7 @@ __all__ = [
     "TaskFramingError",
     "TaskFramingInput",
     "TaskFramingRepairPolicy",
+    "migrate_legacy_belief_state",
     "parse_legacy_answer_choice_frame",
     "task_frame_from_mapping",
     "validate_task_framing_input_security",

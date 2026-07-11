@@ -8,6 +8,7 @@ from bayesprobe.schemas import (
     BeliefUpdate,
     EvidenceEvent,
     Hypothesis,
+    HypothesisRelation,
     HypothesisStatus,
     LikelihoodBand,
     UpdateDirection,
@@ -79,7 +80,9 @@ def _round_distribution(distribution: dict[str, float]) -> dict[str, float]:
     return rounded
 
 
-def normalize_hypotheses(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+def _normalize_exclusive_hypotheses(
+    hypotheses: list[Hypothesis],
+) -> list[Hypothesis]:
     participants = [
         hypothesis
         for hypothesis in hypotheses
@@ -105,8 +108,20 @@ def normalize_hypotheses(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
     ]
 
 
+def normalize_hypotheses(
+    hypotheses: list[Hypothesis],
+    *,
+    relation: HypothesisRelation,
+) -> list[Hypothesis]:
+    if relation == HypothesisRelation.INDEPENDENT:
+        return list(hypotheses)
+    return _normalize_exclusive_hypotheses(hypotheses)
+
+
 def summarize_hypotheses(
     hypotheses: list[Hypothesis],
+    *,
+    relation: HypothesisRelation,
 ) -> tuple[dict[str, Any], str]:
     participants = sorted(
         (
@@ -119,12 +134,24 @@ def summarize_hypotheses(
     if not participants:
         return (
             {
+                "hypothesis_relation": relation.value,
+                "belief_measure": (
+                    "credence"
+                    if relation == HypothesisRelation.INDEPENDENT
+                    else "posterior_mass"
+                ),
                 "top_hypothesis": None,
-                "top_posterior": 0.0,
                 "runner_up_hypothesis": None,
-                "posterior_gap": 0.0,
-                "entropy": 0.0,
-                "total_active_posterior": 0.0,
+                **(
+                    {"top_credence": 0.0, "credence_gap": 0.0, "total_active_credence": 0.0}
+                    if relation == HypothesisRelation.INDEPENDENT
+                    else {
+                        "top_posterior": 0.0,
+                        "posterior_gap": 0.0,
+                        "entropy": 0.0,
+                        "total_active_posterior": 0.0,
+                    }
+                ),
             },
             "No active hypotheses remain after the current cycle.",
         )
@@ -137,7 +164,25 @@ def summarize_hypotheses(
         if runner_up is not None
         else top.posterior
     )
+    if relation == HypothesisRelation.INDEPENDENT:
+        summary = {
+            "hypothesis_relation": relation.value,
+            "belief_measure": "credence",
+            "top_hypothesis": top.id,
+            "top_credence": top.posterior,
+            "runner_up_hypothesis": runner_up.id if runner_up is not None else None,
+            "credence_gap": round(posterior_gap, 6),
+            "total_active_credence": round(sum(posteriors), 6),
+        }
+        uncertainty = (
+            f"{top.id} has the highest current credence, but independent hypotheses may coexist; "
+            "ranking does not by itself select the answer."
+        )
+        return summary, uncertainty
+
     summary = {
+        "hypothesis_relation": relation.value,
+        "belief_measure": "posterior_mass",
         "top_hypothesis": top.id,
         "top_posterior": top.posterior,
         "runner_up_hypothesis": runner_up.id if runner_up is not None else None,
@@ -161,44 +206,131 @@ def summarize_hypotheses(
     return summary, uncertainty
 
 
+def _logit(probability: float) -> float:
+    bounded = min(max(probability, _MIN_PROBABILITY), 1.0 - _MIN_PROBABILITY)
+    return math.log(bounded / (1.0 - bounded))
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exponential = math.exp(value)
+    return exponential / (1.0 + exponential)
+
+
+def _independent_event_posterior(
+    prior: float,
+    band: LikelihoodBand,
+    weight: float,
+    complexity_delta: float,
+    ad_hoc_delta: float,
+) -> float:
+    score = (
+        _logit(prior)
+        + math.log(likelihood_band_to_lr(band)) * weight
+        - complexity_delta
+        - ad_hoc_delta
+    )
+    return round(_sigmoid(score), _DISTRIBUTION_PRECISION)
+
+
+def _penalty_deltas(hypothesis: Hypothesis) -> tuple[float, float]:
+    return (
+        max(
+            hypothesis.complexity_penalty
+            - hypothesis.applied_complexity_penalty,
+            0.0,
+        ),
+        max(
+            hypothesis.ad_hoc_penalty - hypothesis.applied_ad_hoc_penalty,
+            0.0,
+        ),
+    )
+
+
 def solve_updates(
     run_id: str,
     cycle_id: str,
     belief_state: BeliefState,
     events: list[EvidenceEvent],
 ) -> tuple[list[Hypothesis], list[BeliefUpdate]]:
-    normalized_hypotheses = normalize_hypotheses(belief_state.hypotheses)
-    current_posteriors = {
-        hypothesis.id: hypothesis.posterior
-        for hypothesis in normalized_hypotheses
-    }
+    if belief_state.task_frame is None:
+        raise ValueError("belief state requires hypothesis relation metadata")
+    relation = belief_state.task_frame.hypothesis_frame.relation
+    working_hypotheses = normalize_hypotheses(
+        belief_state.hypotheses,
+        relation=relation,
+    )
     updates: list[BeliefUpdate] = []
 
     for event_index, event in enumerate(events, start=1):
         if event.discard_reason is not None:
             continue
-        participants = [
-            hypothesis
-            for hypothesis in normalized_hypotheses
+        active_by_id = {
+            hypothesis.id: hypothesis
+            for hypothesis in working_hypotheses
             if _participates_in_distribution(hypothesis)
-        ]
+        }
+        participants = (
+            list(active_by_id.values())
+            if relation == HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
+            else [
+                active_by_id[hypothesis_id]
+                for hypothesis_id in dict.fromkeys(event.target_hypotheses)
+                if hypothesis_id in active_by_id
+            ]
+        )
         weight = event.reliability * event.independence * event.relevance * event.novelty
-        scores: dict[str, float] = {}
-        for hypothesis in participants:
-            band = event.likelihoods.get(hypothesis.id, LikelihoodBand.NEUTRAL)
-            scores[hypothesis.id] = (
-                math.log(max(current_posteriors[hypothesis.id], _MIN_PROBABILITY))
-                + math.log(likelihood_band_to_lr(band)) * weight
-                - hypothesis.complexity_penalty
-                - hypothesis.ad_hoc_penalty
+        penalty_deltas = {
+            hypothesis.id: _penalty_deltas(hypothesis)
+            for hypothesis in participants
+        }
+        if relation == HypothesisRelation.EXCLUSIVE_EXHAUSTIVE:
+            event_posteriors = _round_distribution(
+                _softmax(
+                    {
+                        hypothesis.id: (
+                            math.log(max(hypothesis.posterior, _MIN_PROBABILITY))
+                            + math.log(
+                                likelihood_band_to_lr(
+                                    event.likelihoods.get(
+                                        hypothesis.id,
+                                        LikelihoodBand.NEUTRAL,
+                                    )
+                                )
+                            )
+                            * weight
+                            - penalty_deltas[hypothesis.id][0]
+                            - penalty_deltas[hypothesis.id][1]
+                        )
+                        for hypothesis in participants
+                    }
+                )
             )
-        event_posteriors = _round_distribution(_softmax(scores))
+        else:
+            event_posteriors = {
+                hypothesis.id: _independent_event_posterior(
+                    hypothesis.posterior,
+                    event.likelihoods.get(hypothesis.id, LikelihoodBand.NEUTRAL),
+                    weight,
+                    *penalty_deltas[hypothesis.id],
+                )
+                for hypothesis in participants
+            }
+        replacements: dict[str, Hypothesis] = {}
         for hypothesis in participants:
             hypothesis_id = hypothesis.id
             band = event.likelihoods.get(hypothesis_id, LikelihoodBand.NEUTRAL)
-            prior = current_posteriors[hypothesis_id]
+            prior = hypothesis.posterior
             posterior = event_posteriors[hypothesis_id]
-            current_posteriors[hypothesis_id] = posterior
+            complexity_delta, ad_hoc_delta = penalty_deltas[hypothesis_id]
+            replacements[hypothesis_id] = hypothesis.model_copy(
+                update={
+                    "posterior": posterior,
+                    "applied_complexity_penalty": hypothesis.complexity_penalty,
+                    "applied_ad_hoc_penalty": hypothesis.ad_hoc_penalty,
+                }
+            )
             updates.append(
                 BeliefUpdate(
                     update_id=f"{run_id}_{cycle_id}_U{event_index}_{hypothesis_id}",
@@ -214,15 +346,17 @@ def solve_updates(
                         "likelihood_band": band.value,
                         "complexity_penalty": hypothesis.complexity_penalty,
                         "ad_hoc_penalty": hypothesis.ad_hoc_penalty,
+                        "complexity_penalty_delta": round(complexity_delta, 4),
+                        "ad_hoc_penalty_delta": round(ad_hoc_delta, 4),
                     },
                 )
             )
+        working_hypotheses = [
+            replacements.get(hypothesis.id, hypothesis)
+            for hypothesis in working_hypotheses
+        ]
 
-    updated_hypotheses = [
-        hypothesis.model_copy(update={"posterior": round(current_posteriors[hypothesis.id], 4)})
-        for hypothesis in belief_state.hypotheses
-    ]
-    return updated_hypotheses, updates
+    return working_hypotheses, updates
 
 
 __all__ = [

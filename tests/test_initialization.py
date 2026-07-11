@@ -6,7 +6,13 @@ from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.runners import AutonomousLoopConfig, AutonomousLoopRunner, AutonomousStopReason
-from bayesprobe.schemas import ExternalSignal, RunRegime, RunStatus, SignalKind
+from bayesprobe.schemas import (
+    ExternalSignal,
+    HypothesisRelation,
+    RunRegime,
+    RunStatus,
+    SignalKind,
+)
 from bayesprobe.task_framing import TaskFramingError
 
 
@@ -156,6 +162,31 @@ def test_initializer_preserves_seeded_hypotheses():
     assert hypotheses["H2"].falsifiers
     assert hypotheses["H2"].predictions == ["Rollback reduces the error rate."]
     assert hypotheses["H2"].rivals == ["H_network"]
+
+
+def test_initializer_summarizes_independent_values_as_non_normalized_credence():
+    result = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_independent",
+            problem="Which mechanisms remain credible?",
+            hypothesis_relation=HypothesisRelation.INDEPENDENT,
+            hypothesis_seeds=[
+                HypothesisSeed(statement=f"Mechanism {index} remains plausible.")
+                for index in range(1, 4)
+            ],
+        )
+    )
+
+    assert [item.posterior for item in result.belief_state.hypotheses] == [
+        0.5,
+        0.5,
+        0.5,
+    ]
+    summary = result.belief_state.posterior_summary
+    assert summary["belief_measure"] == "credence"
+    assert summary["total_active_credence"] == 1.5
+    assert "total_active_posterior" not in summary
+    assert "top_posterior" not in summary
 
 
 @pytest.mark.parametrize(

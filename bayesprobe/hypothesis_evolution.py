@@ -52,6 +52,9 @@ class HypothesisEvolutionEngine:
         evidence_events: list[EvidenceEvent],
         belief_updates: list[BeliefUpdate],
     ) -> HypothesisEvolutionResult:
+        if previous_belief_state.task_frame is None:
+            raise ValueError("belief state requires hypothesis relation metadata")
+        relation = previous_belief_state.task_frame.hypothesis_frame.relation
         hypotheses = list(updated_hypotheses)
         evolutions: list[HypothesisEvolution] = []
         probe_candidates: list[ProbeCandidate] = []
@@ -87,7 +90,7 @@ class HypothesisEvolutionEngine:
         probe_candidates.extend(reframe_result.probe_candidates)
 
         return HypothesisEvolutionResult(
-            hypotheses=normalize_hypotheses(hypotheses),
+            hypotheses=normalize_hypotheses(hypotheses, relation=relation),
             evolutions=evolutions,
             probe_candidates=probe_candidates,
         )

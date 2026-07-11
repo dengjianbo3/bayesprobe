@@ -7,6 +7,7 @@ from bayesprobe.schemas import (
     BeliefStateProjection,
     ChangeMyMindCondition,
     Hypothesis,
+    HypothesisRelation,
     ProbeCandidate,
     ProbeDesign,
 )
@@ -75,7 +76,13 @@ def _posterior_summary_text(belief_state: BeliefState) -> str:
         key=lambda hypothesis: (-hypothesis.posterior, hypothesis.id),
     )
     parts = [f"{hypothesis.id}={hypothesis.posterior:.3f}" for hypothesis in ranked]
-    return ", ".join(parts)
+    relation = belief_state.task_frame.hypothesis_frame.relation
+    prefix = (
+        "Credences (not normalized):"
+        if relation == HypothesisRelation.INDEPENDENT
+        else "Posterior mass:"
+    )
+    return f"{prefix} {', '.join(parts)}"
 
 
 def _main_uncertainty_text(
@@ -83,6 +90,9 @@ def _main_uncertainty_text(
     previous_belief_state: BeliefState,
     cycle_result: CycleResult,
 ) -> str:
+    relation = cycle_result.belief_state.task_frame.hypothesis_frame.relation
+    if relation == HypothesisRelation.INDEPENDENT:
+        return cycle_result.belief_state.uncertainty_summary
     if cycle_result.evidence_events:
         ranked = sorted(
             cycle_result.belief_state.hypotheses,

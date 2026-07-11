@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from bayesprobe.belief import summarize_hypotheses
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.schemas import (
     AnswerChoice,
@@ -106,6 +107,10 @@ class BayesProbeInitializer:
             current_cycle_id=INITIAL_CYCLE_ID,
             metadata=metadata,
         )
+        belief_summary, uncertainty_summary = summarize_hypotheses(
+            hypotheses,
+            relation=task_frame.hypothesis_frame.relation,
+        )
         belief_state = BeliefState(
             belief_state_id=f"{run_id}_bs_0",
             run_id=run_id,
@@ -114,13 +119,13 @@ class BayesProbeInitializer:
             hypotheses=hypotheses,
             task_frame=task_frame,
             posterior_summary={
+                **belief_summary,
                 "initialization_method": INITIALIZATION_METHOD,
                 "hypothesis_count": len(hypotheses),
-                "top_hypothesis": _top_hypothesis_id(hypotheses),
                 "priors": {hypothesis.id: hypothesis.prior for hypothesis in hypotheses},
             },
             uncertainty_summary=(
-                f"Initial explicit hypotheses for {problem}; no external signals have been integrated yet."
+                f"{uncertainty_summary} No external signals have been integrated yet."
             ),
         )
         probe_candidates = _initial_probe_candidates(
@@ -278,10 +283,6 @@ def _probe_candidate(*, run_id: str, problem: str, hypothesis: Hypothesis) -> Pr
             "target_hypothesis": hypothesis.id,
         },
     )
-
-
-def _top_hypothesis_id(hypotheses: list[Hypothesis]) -> str:
-    return max(hypotheses, key=lambda hypothesis: hypothesis.posterior).id
 
 
 __all__ = [

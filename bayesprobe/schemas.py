@@ -379,10 +379,19 @@ class Hypothesis(BaseModel):
     predictions: list[str] = Field(default_factory=list)
     complexity_penalty: float = 0.0
     ad_hoc_penalty: float = 0.0
+    applied_complexity_penalty: float = 0.0
+    applied_ad_hoc_penalty: float = 0.0
     created_by: Literal["initial", "spawned", "split", "reframed"] = "initial"
     why_existing_hypotheses_failed: str | None = None
 
-    @field_validator("prior", "posterior", "complexity_penalty", "ad_hoc_penalty")
+    @field_validator(
+        "prior",
+        "posterior",
+        "complexity_penalty",
+        "ad_hoc_penalty",
+        "applied_complexity_penalty",
+        "applied_ad_hoc_penalty",
+    )
     @classmethod
     def probability_like(cls, value: float) -> float:
         if value < 0 or value > 1:

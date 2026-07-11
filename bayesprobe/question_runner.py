@@ -27,6 +27,7 @@ from bayesprobe.schemas import (
     EvidenceEvent,
     ExternalSignal,
     Hypothesis,
+    HypothesisRelation,
     HypothesisEvolution,
     ProbeCandidate,
     ProbeSet,
@@ -392,6 +393,11 @@ class AutonomousQuestionRunner:
     def _confidence_reached(self, belief_state: BeliefState) -> bool:
         threshold = self.config.confidence_threshold
         if threshold is None:
+            return False
+        if (
+            belief_state.task_frame.hypothesis_frame.relation
+            == HypothesisRelation.INDEPENDENT
+        ):
             return False
         return _top_hypothesis(belief_state).posterior >= threshold
 

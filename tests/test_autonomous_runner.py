@@ -3,9 +3,16 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore
+from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.runners import AutonomousLoopConfig, AutonomousLoopRunner, AutonomousStopReason
-from bayesprobe.schemas import BeliefState, ExternalSignal, Hypothesis, SignalKind
+from bayesprobe.schemas import (
+    BeliefState,
+    ExternalSignal,
+    Hypothesis,
+    HypothesisRelation,
+    SignalKind,
+)
 
 
 class SequenceSignalProvider:
@@ -167,6 +174,40 @@ def test_runner_stops_when_confidence_threshold_reached():
     assert result.final_answer_projection is not None
     assert result.final_answer_projection.current_best_hypothesis == "H1"
     assert result.final_belief_state.hypotheses_by_id()["H1"].posterior >= 0.6
+
+
+def test_runner_does_not_apply_winner_threshold_to_independent_credences():
+    initial = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_independent_threshold",
+            problem="Which independent claims remain credible?",
+            hypothesis_relation=HypothesisRelation.INDEPENDENT,
+            hypothesis_seeds=[
+                HypothesisSeed(id="H1", statement="Claim one remains credible.", prior=0.8),
+                HypothesisSeed(id="H2", statement="Claim two remains credible.", prior=0.7),
+            ],
+        )
+    ).belief_state
+    provider = SequenceSignalProvider(
+        [
+            [active_signal("S1", "NEUTRAL: No change to either claim.")],
+            [active_signal("S2", "NEUTRAL: Still no change to either claim.")],
+        ]
+    )
+    runner = AutonomousLoopRunner(
+        core=BayesProbeCore(),
+        config=AutonomousLoopConfig(max_cycles=2, confidence_threshold=0.6),
+    )
+
+    result = runner.run(
+        run_id="run_independent_threshold",
+        initial_belief_state=initial,
+        signal_provider=provider,
+    )
+
+    assert result.stop_reason == AutonomousStopReason.MAX_CYCLES
+    assert len(result.cycle_results) == 2
+    assert len(provider.calls) == 2
 
 
 def test_runner_stops_when_posterior_delta_is_stable():

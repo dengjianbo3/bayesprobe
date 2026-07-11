@@ -21,6 +21,7 @@ from bayesprobe.question_runner import (
 from bayesprobe.task_framing import ModelTaskFramer
 from bayesprobe.schemas import (
     CycleSignalShape,
+    HypothesisRelation,
     ProbeSet,
     RunRegime,
     RunStatus,
@@ -169,6 +170,12 @@ def test_open_question_framing_precedes_belief_initialization():
         request for request in gateway.requests if request.task == "execute_probe"
     ).input["task_context"] == "Design an experiment for a research audience."
     assert result.initial_belief_state.task_frame == result.task_frame
+    assert result.final_answer_projection.posterior_summary.startswith(
+        "Credences (not normalized):"
+    )
+    assert "independent hypotheses may coexist" in (
+        result.final_answer_projection.main_uncertainty
+    )
 
 
 def test_question_runner_executes_one_end_to_end_cycle():
@@ -313,6 +320,32 @@ def test_question_runner_stops_on_confidence_threshold():
     assert len(result.cycle_results) == 1
     assert result.final_answer_projection is not None
     assert result.final_belief_state.hypotheses_by_id()["H1"].posterior >= 0.6
+
+
+def test_question_runner_does_not_apply_winner_threshold_to_independent_credences():
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        config=AutonomousQuestionRunConfig(
+            max_cycles=2,
+            max_probes_per_cycle=1,
+            confidence_threshold=0.6,
+        ),
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_question_independent_threshold",
+            problem="Which independent claims remain credible?",
+            hypothesis_relation=HypothesisRelation.INDEPENDENT,
+            hypothesis_seeds=[
+                HypothesisSeed(id="H1", statement="Claim one remains credible.", prior=0.8),
+                HypothesisSeed(id="H2", statement="Claim two remains credible.", prior=0.7),
+            ],
+        )
+    )
+
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert len(result.cycle_results) == 2
 
 
 def test_question_runner_stops_on_no_probes_before_empty_cycle():

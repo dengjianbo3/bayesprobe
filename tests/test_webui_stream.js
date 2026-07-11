@@ -358,6 +358,39 @@ test("keeps beliefs pending until task framing completes initialization", () => 
   assert.ok(elements.get("belief-panel").children.length > 0);
 });
 
+test("renders independent beliefs as non-normalized credence", () => {
+  const { api, elements } = loadApp();
+  const event = integratedCycleEvent();
+  event.data.belief_state = {
+    task_frame: {
+      hypothesis_frame: { relation: "independent" },
+    },
+    hypotheses: [
+      { id: "H1", prior: 0.5, posterior: 0.8, statement: "First claim." },
+      { id: "H2", prior: 0.5, posterior: 0.7, statement: "Second claim." },
+    ],
+    posterior_summary: {
+      total_active_credence: 1.5,
+      top_hypothesis: "H1",
+      credence_gap: 0.1,
+    },
+    uncertainty_summary: "Independent hypotheses may coexist.",
+  };
+
+  api.handleProgressEvent(event);
+
+  const beliefRows = elements.get("belief-panel").children;
+  assert.equal(beliefRows[0].children[0].textContent, "Total credence (not normalized)");
+  assert.equal(beliefRows[0].children[1].textContent, "1.500");
+  assert.equal(beliefRows[1].children[0].textContent, "Top / credence gap");
+  assert.match(beliefRows[3].children[1].children[0].textContent, /credence 0\.800/);
+  assert.doesNotMatch(beliefRows[3].children[1].children[0].textContent, /posterior/);
+  assert.equal(
+    elements.get("answer-panel").children[2].children[0].textContent,
+    "Belief summary"
+  );
+});
+
 test("handleSubmit preserves integrated output after a terminal stream failure", async () => {
   const events = [
     integratedCycleEvent(),

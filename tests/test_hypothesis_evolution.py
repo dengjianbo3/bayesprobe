@@ -1,9 +1,12 @@
+import pytest
+
 from bayesprobe.hypothesis_evolution import (
     HypothesisEvolutionConfig,
     HypothesisEvolutionEngine,
     HypothesisEvolutionResult,
 )
 from bayesprobe.schemas import (
+    AnswerContract,
     BeliefState,
     BeliefUpdate,
     CycleRecord,
@@ -11,9 +14,15 @@ from bayesprobe.schemas import (
     EvidenceEvent,
     EvidenceType,
     EvolutionOperation,
+    FramedHypothesis,
+    FramingMethod,
     Hypothesis,
+    HypothesisFrame,
+    HypothesisRelation,
     HypothesisStatus,
     LikelihoodBand,
+    TaskFrame,
+    TaskKind,
     UpdateDirection,
 )
 
@@ -28,32 +37,63 @@ def make_cycle(cycle_id: str = "cycle_1") -> CycleRecord:
 
 
 def make_belief_state(h1_posterior: float = 0.5, h2_posterior: float = 0.5) -> BeliefState:
+    hypotheses = [
+        Hypothesis(
+            id="H1",
+            statement="The claim is supported in its current scope.",
+            scope="claim verification with broad scope",
+            prior=0.5,
+            posterior=h1_posterior,
+            rivals=["H2"],
+            falsifiers=["Independent counterevidence weakens H1."],
+            predictions=["Supporting evidence should be found."],
+        ),
+        Hypothesis(
+            id="H2",
+            statement="The claim is refuted.",
+            scope="claim verification",
+            prior=0.5,
+            posterior=h2_posterior,
+            rivals=["H1"],
+            falsifiers=["Independent support weakens H2."],
+            predictions=["Refuting evidence should be found."],
+        ),
+    ]
     return BeliefState(
         belief_state_id="bs_1",
         run_id="run_1",
         cycle_id="cycle_0",
-        hypotheses=[
-            Hypothesis(
-                id="H1",
-                statement="The claim is supported in its current scope.",
-                scope="claim verification with broad scope",
-                prior=0.5,
-                posterior=h1_posterior,
-                rivals=["H2"],
-                falsifiers=["Independent counterevidence weakens H1."],
-                predictions=["Supporting evidence should be found."],
+        hypotheses=hypotheses,
+        task_frame=TaskFrame(
+            task_frame_id="run_1_task_frame",
+            task_kind=TaskKind.CLAIM_VERIFICATION,
+            normalized_question="Is the claim supported?",
+            task_context="",
+            answer_contract=AnswerContract(
+                objective="Select the supported claim state.",
+                required_sections=["answer", "uncertainty"],
+                decision_form="claim_selection",
             ),
-            Hypothesis(
-                id="H2",
-                statement="The claim is refuted.",
-                scope="claim verification",
-                prior=0.5,
-                posterior=h2_posterior,
-                rivals=["H1"],
-                falsifiers=["Independent support weakens H2."],
-                predictions=["Refuting evidence should be found."],
+            hypothesis_frame=HypothesisFrame(
+                frame_id="run_1_hypothesis_frame",
+                relation=HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
+                hypotheses=[
+                    FramedHypothesis(
+                        id=item.id,
+                        statement=item.statement,
+                        type=item.type,
+                        scope=item.scope,
+                        initial_prior=item.prior,
+                        falsifiers=list(item.falsifiers),
+                        predictions=list(item.predictions),
+                    )
+                    for item in hypotheses
+                ],
+                rival_sets={"H1": ["H2"], "H2": ["H1"]},
+                coverage_statement="The claim is either supported or refuted.",
             ),
-        ],
+            framing_method=FramingMethod.RECORDED,
+        ),
     )
 
 
@@ -116,6 +156,22 @@ def updated_hypotheses(h1_posterior: float) -> list[Hypothesis]:
         else hypothesis
         for hypothesis in make_belief_state().hypotheses
     ]
+
+
+def test_evolution_rejects_relation_less_direct_input():
+    relation_less = make_belief_state().model_copy(update={"task_frame": None})
+
+    with pytest.raises(
+        ValueError,
+        match="^belief state requires hypothesis relation metadata$",
+    ):
+        HypothesisEvolutionEngine().evolve(
+            cycle=make_cycle(),
+            previous_belief_state=relation_less,
+            updated_hypotheses=relation_less.hypotheses,
+            evidence_events=[],
+            belief_updates=[],
+        )
 
 
 def test_anomaly_spawns_hypothesis_and_probe_candidate():

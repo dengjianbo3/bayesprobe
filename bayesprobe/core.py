@@ -22,6 +22,7 @@ from bayesprobe.schemas import (
     SignalKind,
     utc_now,
 )
+from bayesprobe.task_framing import migrate_legacy_belief_state
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class BayesProbeCore:
         probe_set: ProbeSet,
         signals: list[ExternalSignal],
     ) -> CycleResult:
+        belief_state = migrate_legacy_belief_state(belief_state)
         self._validate_cycle_boundary(cycle=cycle, belief_state=belief_state, probe_set=probe_set)
         inbox = self._create_signal_inbox(cycle)
         for signal in signals:
@@ -101,7 +103,11 @@ class BayesProbeCore:
             evidence_events=evidence_events,
             belief_updates=belief_updates,
         )
-        evolved_hypotheses = normalize_hypotheses(evolution_result.hypotheses)
+        relation = belief_state.task_frame.hypothesis_frame.relation
+        evolved_hypotheses = normalize_hypotheses(
+            evolution_result.hypotheses,
+            relation=relation,
+        )
         evolutions = evolution_result.evolutions
         probe_candidates = [
             *probe_candidates,
@@ -130,7 +136,8 @@ class BayesProbeCore:
             *(candidate.candidate_id for candidate in probe_candidates),
         ]
         posterior_summary, uncertainty_summary = summarize_hypotheses(
-            evolved_hypotheses
+            evolved_hypotheses,
+            relation=relation,
         )
         updated_state = belief_state.model_copy(
             update={

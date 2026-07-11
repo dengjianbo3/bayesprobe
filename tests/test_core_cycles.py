@@ -18,6 +18,7 @@ from bayesprobe.schemas import (
     EvidenceEvent,
     EvidenceType,
     ExternalSignal,
+    FramingMethod,
     Hypothesis,
     HypothesisEvolution,
     EvolutionOperation,
@@ -296,6 +297,8 @@ def test_integrated_belief_state_rebuilds_current_summary():
     assert result.belief_state.posterior_summary[
         "total_active_posterior"
     ] == pytest.approx(1.0)
+    assert result.belief_state.task_frame is not None
+    assert result.belief_state.task_frame.framing_method == FramingMethod.LEGACY_MIGRATION
     assert "no external signals" not in result.belief_state.uncertainty_summary
 
 
