@@ -131,22 +131,24 @@ def _normalized_semantic_text(value: str) -> str:
 
 
 def _reject_secret_string(value: str) -> None:
-    if re.search(r"(?:^|\s)sk-[A-Za-z0-9_-]{12,}", value):
-        raise ValueError("framing_trace must not contain secret values")
+    if re.search(r"sk-[A-Za-z0-9_-]{12,}", value):
+        raise ValueError("TaskFrame must not contain secret values")
 
 
 def _reject_secret_material(value: Any) -> None:
-    if isinstance(value, Mapping):
+    if isinstance(value, BaseModel):
+        _reject_secret_material(value.__dict__)
+    elif isinstance(value, Mapping):
         for key, item in value.items():
             if not isinstance(key, str):
-                raise ValueError("framing_trace must contain only JSON-compatible values")
+                raise ValueError("TaskFrame must contain only JSON-compatible values")
             _reject_secret_string(key)
             normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
             if any(
                 part in normalized_key
                 for part in ("apikey", "authorization", "token", "secret")
             ):
-                raise ValueError("framing_trace must not contain secret fields")
+                raise ValueError("TaskFrame must not contain secret fields")
             _reject_secret_material(item)
     elif isinstance(value, list):
         for item in value:
@@ -154,7 +156,7 @@ def _reject_secret_material(value: Any) -> None:
     elif isinstance(value, str):
         _reject_secret_string(value)
     elif value is not None and not isinstance(value, (bool, int, float, str)):
-        raise ValueError("framing_trace must contain only JSON-compatible values")
+        raise ValueError("TaskFrame must contain only JSON-compatible values")
 
 
 class StrictTaskModel(BaseModel):
@@ -307,7 +309,7 @@ class TaskFrame(StrictTaskModel):
 
     @model_validator(mode="after")
     def validate_frame(self) -> "TaskFrame":
-        _reject_secret_material(self.framing_trace)
+        _reject_secret_material(self)
         if (
             self.framing_method != FramingMethod.LEGACY_MIGRATION
             and len(self.hypothesis_frame.hypotheses) < 2

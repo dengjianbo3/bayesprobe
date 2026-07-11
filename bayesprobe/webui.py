@@ -578,6 +578,8 @@ def _answer_choices_from_payload(value: Any) -> list[AnswerChoice]:
         ) from error
     if len(choices) < 2:
         raise WebUIError("answer_choices must contain at least two choices")
+    if len(choices) > 6:
+        raise WebUIError("answer_choices must contain at most six choices")
     labels = [choice.label for choice in choices]
     if len(labels) != len(set(labels)):
         raise WebUIError("answer_choices labels must be unique")

@@ -1,5 +1,9 @@
+from copy import deepcopy
+
 import pytest
 
+from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ScriptedModelGateway, StructuredModelRequest
 from bayesprobe.schemas import AnswerChoice, HypothesisRelation, TaskKind
 from bayesprobe.task_framing import (
@@ -322,6 +326,68 @@ def test_model_task_framer_repairs_once_then_accepts_without_retaining_secrets()
     assert gateway.requests[1].input["invalid_payload"]["api_key"] == "[REDACTED]"
     assert "sk-abcdefghijklmnop" not in repr(gateway.requests[1])
     assert frame.framing_trace["repair_attempt_index"] == 1
+
+
+def test_model_task_framer_repairs_secret_bearing_semantic_payload_without_leaking_it():
+    secret = "sk-abcdefghijklmnop"
+    secret_payload = deepcopy(VALID_OPEN_FRAME)
+    secret_payload["hypotheses"][0]["statement"] = f"The provider leaked {secret}."
+    gateway = QueueModelGateway([secret_payload, VALID_OPEN_FRAME])
+
+    frame = ModelTaskFramer(gateway).frame(
+        TaskFramingInput(run_id="run_semantic_secret_repair", question="How should this be tested?")
+    )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+    repair_request = gateway.requests[1]
+    assert secret not in repr(repair_request)
+    assert secret not in str(repair_request.input["validation_error"])
+    assert secret not in repr(repair_request.input["invalid_payload"])
+    assert "[REDACTED]" in repair_request.input["invalid_payload"]["hypotheses"][0]["statement"]
+    assert secret not in frame.model_dump_json()
+    assert frame.framing_trace["repair_attempt_index"] == 1
+
+
+def test_model_task_framer_fails_closed_after_second_secret_bearing_payload():
+    secret = "sk-abcdefghijklmnop"
+    secret_payload = deepcopy(VALID_OPEN_FRAME)
+    secret_payload["coverage_statement"] = f"The provider leaked {secret}."
+    gateway = QueueModelGateway([secret_payload, secret_payload])
+
+    with pytest.raises(TaskFramingError, match="invalid after 1 repair attempt") as captured:
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(run_id="run_second_semantic_secret", question="How should this be tested?")
+        )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+    assert secret not in repr(gateway.requests[1])
+    _assert_secret_free_exception(captured.value, secret)
+
+
+def test_secret_bearing_model_frame_never_reaches_task_frame_ledger_or_trace(tmp_path):
+    secret = "sk-abcdefghijklmnop"
+    secret_payload = deepcopy(VALID_OPEN_FRAME)
+    secret_payload["answer_contract"]["objective"] = f"Do not expose {secret}."
+    ledger = JsonlLedgerStore(tmp_path / "task-framing.jsonl")
+    initialized = BayesProbeInitializer(
+        ledger=ledger,
+        task_framer=ModelTaskFramer(QueueModelGateway([secret_payload, VALID_OPEN_FRAME])),
+    ).initialize(
+        InitializeRunInput(
+            run_id="run_ledger_secret_repair",
+            problem="How should this be tested?",
+        )
+    )
+
+    assert secret not in initialized.task_frame.model_dump_json()
+    assert secret not in initialized.belief_state.model_dump_json()
+    assert secret not in (tmp_path / "task-framing.jsonl").read_text(encoding="utf-8")
 
 
 def test_model_task_framer_fails_after_one_invalid_repair():

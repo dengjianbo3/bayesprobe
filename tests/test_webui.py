@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from copy import deepcopy
 import json
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
@@ -292,6 +293,52 @@ class FramingWebUIChatOpenAI:
         self.chat = type("FakeChat", (), {"completions": completions})()
 
 
+class SecretRepairWebUIChatCompletions:
+    secret = "sk-abcdefghijklmnop"
+
+    def __init__(self, *, repair_succeeds: bool) -> None:
+        self.repair_succeeds = repair_succeeds
+        self.tasks = []
+        self.requests = []
+
+    def create(self, **payload):
+        request = json.loads(payload["messages"][1]["content"])
+        self.tasks.append(request["task"])
+        self.requests.append(request)
+        if request["task"] in {"frame_open_question", "repair_task_frame"}:
+            content = deepcopy(valid_open_frame_payload())
+            if request["task"] == "frame_open_question" or not self.repair_succeeds:
+                content["hypotheses"][0]["statement"] = (
+                    f"The provider leaked {self.secret}."
+                )
+        elif request["task"] == "execute_probe":
+            content = {"raw_content": "A matched controlled test is required."}
+        else:
+            content = {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    hypothesis_id: "weakly_confirming"
+                    for hypothesis_id in request["input"]["target_hypotheses"]
+                },
+                "interpretation": "A design suggestion, not an external result.",
+                "quality_overrides": {"independence": 0.2, "verifiability": 0.2},
+            }
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+
+class SecretRepairWebUIChatOpenAI:
+    completions = None
+    repair_succeeds = True
+
+    def __init__(self, **kwargs):
+        del kwargs
+        completions = SecretRepairWebUIChatCompletions(
+            repair_succeeds=self.__class__.repair_succeeds
+        )
+        self.__class__.completions = completions
+        self.chat = type("FakeChat", (), {"completions": completions})()
+
+
 def test_webui_provider_frames_open_question_before_exposing_belief():
     events = []
     status, body = handle_autonomous_stream_request(
@@ -330,6 +377,77 @@ def test_webui_provider_frames_open_question_before_exposing_belief():
     assert "An earlier benchmark showed a scale trend" not in json.dumps(
         FramingWebUIChatOpenAI.completions.requests[0]
     )
+
+
+def test_webui_secret_bearing_frame_is_repaired_without_reaching_stream_or_result():
+    SecretRepairWebUIChatOpenAI.repair_succeeds = True
+    events = []
+    payload = {
+        "question": "How should the scale claim be tested?",
+        "provider": {
+            "kind": "openai_chat_completions",
+            "api_key": "provider-secret-123",
+            "model": "provider-model",
+        },
+        "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+    }
+
+    status, result = handle_autonomous_run_request(
+        payload,
+        client_factory=SecretRepairWebUIChatOpenAI,
+    )
+    stream_status, stream_result = handle_autonomous_stream_request(
+        payload,
+        event_sink=events.append,
+        client_factory=SecretRepairWebUIChatOpenAI,
+    )
+
+    assert status == 200
+    assert stream_status == 200
+    assert stream_result is None
+    assert SecretRepairWebUIChatOpenAI.completions.tasks[:4] == [
+        "frame_open_question",
+        "repair_task_frame",
+        "execute_probe",
+        "judge_evidence",
+    ]
+    assert SecretRepairWebUIChatCompletions.secret not in json.dumps(
+        SecretRepairWebUIChatOpenAI.completions.requests[1]
+    )
+    assert SecretRepairWebUIChatCompletions.secret not in json.dumps(result)
+    assert SecretRepairWebUIChatCompletions.secret not in json.dumps(events)
+
+
+def test_webui_second_secret_bearing_frame_fails_closed_without_serialization_leak():
+    SecretRepairWebUIChatOpenAI.repair_succeeds = False
+    events = []
+    payload = {
+        "question": "How should the scale claim be tested?",
+        "provider": {
+            "kind": "openai_chat_completions",
+            "api_key": "provider-secret-123",
+            "model": "provider-model",
+        },
+    }
+
+    status, result = handle_autonomous_run_request(
+        payload,
+        client_factory=SecretRepairWebUIChatOpenAI,
+    )
+    stream_status, stream_result = handle_autonomous_stream_request(
+        payload,
+        event_sink=events.append,
+        client_factory=SecretRepairWebUIChatOpenAI,
+    )
+
+    assert status == 502
+    assert result["error"]["type"] == "provider_error"
+    assert stream_status == 200
+    assert stream_result is None
+    assert events[-1]["event"] == "run_failed"
+    assert "task_framing_completed" not in [event["event"] for event in events]
+    assert SecretRepairWebUIChatCompletions.secret not in json.dumps(result)
+    assert SecretRepairWebUIChatCompletions.secret not in json.dumps(events)
     assert "provider-secret-123" not in json.dumps(events)
 
 
@@ -415,6 +533,91 @@ def test_webui_rejects_invalid_structured_answer_choices(answer_choices):
 
     assert status == 400
     assert payload["error"]["type"] == "validation_error"
+
+
+def _seven_answer_choices() -> list[dict[str, str]]:
+    return [
+        {"label": chr(ord("A") + index), "text": f"Choice {index + 1}"}
+        for index in range(7)
+    ]
+
+
+def test_webui_rejects_more_than_six_choices_before_deterministic_run_or_stream():
+    payload = {
+        "question": "Which result follows?",
+        "answer_choices": _seven_answer_choices(),
+        "provider": {"kind": "deterministic"},
+    }
+    events = []
+
+    status, response = handle_autonomous_run_request(payload)
+    stream_status, stream_response = handle_autonomous_stream_request(
+        payload,
+        event_sink=events.append,
+    )
+
+    expected_error = {
+        "error": {
+            "type": "validation_error",
+            "message": "answer_choices must contain at most six choices",
+        }
+    }
+    assert status == 400
+    assert response == expected_error
+    assert stream_status == 400
+    assert stream_response == expected_error
+    assert events == []
+
+
+def test_webui_rejects_more_than_six_choices_before_provider_run_or_stream():
+    FakeWebUIChatOpenAI.created_with = []
+    payload = {
+        "question": "Which result follows?",
+        "answer_choices": _seven_answer_choices(),
+        "provider": {
+            "kind": "openai_chat_completions",
+            "api_key": "provider-secret-123",
+            "model": "provider-model",
+        },
+    }
+    events = []
+
+    status, response = handle_autonomous_run_request(
+        payload,
+        client_factory=FakeWebUIChatOpenAI,
+    )
+    stream_status, stream_response = handle_autonomous_stream_request(
+        payload,
+        event_sink=events.append,
+        client_factory=FakeWebUIChatOpenAI,
+    )
+
+    expected_error = {
+        "error": {
+            "type": "validation_error",
+            "message": "answer_choices must contain at most six choices",
+        }
+    }
+    assert status == 400
+    assert response == expected_error
+    assert stream_status == 400
+    assert stream_response == expected_error
+    assert events == []
+    assert FakeWebUIChatOpenAI.created_with == []
+
+
+def test_webui_accepts_six_structured_answer_choices():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Which result follows?",
+            "answer_choices": _seven_answer_choices()[:6],
+            "provider": {"kind": "deterministic"},
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        }
+    )
+
+    assert status == 200
+    assert len(payload["task_frame"]["hypothesis_frame"]["hypotheses"]) == 6
 
 
 def test_webui_invalid_explicit_frame_is_validation_error_before_provider_execution():

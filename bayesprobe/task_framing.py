@@ -355,19 +355,20 @@ def _secret_free_payload(value: Any) -> Any:
     if isinstance(value, Mapping):
         clean: dict[str, Any] = {}
         for key, item in value.items():
+            clean_key = _secret_free_payload(str(key))
             normalized_key = re.sub(r"[^a-z0-9]", "", str(key).casefold())
             if any(
                 part in normalized_key
                 for part in ("apikey", "authorization", "token", "secret")
             ):
-                clean[str(key)] = "[REDACTED]"
+                clean[clean_key] = "[REDACTED]"
             else:
-                clean[str(key)] = _secret_free_payload(item)
+                clean[clean_key] = _secret_free_payload(item)
         return clean
     if isinstance(value, list):
         return [_secret_free_payload(item) for item in value]
     if isinstance(value, str):
-        return re.sub(r"(?:^|\s)sk-[A-Za-z0-9_-]{12,}", " [REDACTED]", value)
+        return re.sub(r"sk-[A-Za-z0-9_-]{12,}", "[REDACTED]", value)
     return value
 
 

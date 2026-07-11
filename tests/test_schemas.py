@@ -93,7 +93,7 @@ def test_task_frame_rejects_invalid_contract(mutator, message):
 
 def test_task_frame_rejects_tuple_secret_material():
     frame = _open_task_frame().model_copy(
-        update={"framing_trace": {"nested": ("sk-123456789012",)}}
+        update={"framing_trace": {"nested": ("not-json-compatible",)}}
     )
 
     with pytest.raises(ValueError, match="JSON-compatible"):
@@ -116,6 +116,52 @@ def test_task_frame_rejects_secret_mapping_key():
 
     with pytest.raises(ValueError, match="secret"):
         TaskFrame.model_validate(frame.model_dump())
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda frame, secret: frame.model_copy(
+            update={"normalized_question": f"Question contains {secret}"}
+        ),
+        lambda frame, secret: frame.model_copy(
+            update={"task_context": f"Context contains {secret}"}
+        ),
+        lambda frame, secret: frame.model_copy(
+            update={
+                "answer_contract": frame.answer_contract.model_copy(
+                    update={"objective": f"Objective contains {secret}"}
+                )
+            }
+        ),
+        lambda frame, secret: frame.model_copy(
+            update={
+                "hypothesis_frame": frame.hypothesis_frame.model_copy(
+                    update={
+                        "hypotheses": [
+                            frame.hypothesis_frame.hypotheses[0].model_copy(
+                                update={"statement": secret}
+                            ),
+                            frame.hypothesis_frame.hypotheses[1],
+                        ]
+                    }
+                )
+            }
+        ),
+        lambda frame, secret: frame.model_copy(
+            update={
+                "hypothesis_frame": frame.hypothesis_frame.model_copy(
+                    update={"coverage_statement": secret}
+                )
+            }
+        ),
+    ],
+)
+def test_task_frame_rejects_secret_material_in_semantic_fields(mutator):
+    secret = "sk-abcdefghijklmnop"
+
+    with pytest.raises(ValueError, match="secret"):
+        TaskFrame.model_validate(mutator(_open_task_frame(), secret).model_dump())
 
 
 def test_minimal_run_cycle_and_belief_state_round_trip():
