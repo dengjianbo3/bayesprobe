@@ -224,18 +224,18 @@ class ArmCaseResult:
     process_metrics: dict[str, int | float | str | None] = field(default_factory=dict)
 ```
 
-- [ ] Write RED validation tests for unique labels, complete finite distributions, normalization within `1e-3`, invalid terminal states, and failures without fabricated probabilities.
-- [ ] Write table-driven RED tests for Wilson 95% intervals, paired contingency counts, exact two-sided McNemar, seeded paired bootstrap, multiclass Brier, clipped log loss, equal-frequency ECE, entropy, and top-two margin.
-- [ ] Implement pure functions with no provider/filesystem imports. Use `statistics.NormalDist().inv_cdf(0.975)` and `math.comb` rather than adding a statistics dependency.
-- [ ] Ensure bootstrap results are byte-stable for seed string `20260711` by deriving an integer through SHA-256.
-- [ ] Run:
+- [x] Write RED validation tests for unique labels, complete finite distributions, normalization within `1e-3`, invalid terminal states, and failures without fabricated probabilities.
+- [x] Write table-driven RED tests for Wilson 95% intervals, paired contingency counts, exact two-sided McNemar, seeded paired bootstrap, multiclass Brier, clipped log loss, equal-frequency ECE, entropy, and top-two margin.
+- [x] Implement pure functions with no provider/filesystem imports. Use `statistics.NormalDist().inv_cdf(0.975)` and `math.comb` rather than adding a statistics dependency.
+- [x] Ensure bootstrap results are byte-stable for seed string `20260711` by deriving an integer through SHA-256.
+- [x] Run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_contracts.py \
   tests/evaluation/test_statistics.py -q -p no:cacheprovider
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add bayesprobe/evaluation tests/evaluation/test_contracts.py \
