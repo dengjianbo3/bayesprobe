@@ -109,6 +109,15 @@ def test_task_frame_rejects_nested_list_secret_material():
         TaskFrame.model_validate(frame.model_dump())
 
 
+def test_task_frame_rejects_secret_mapping_key():
+    frame = _open_task_frame().model_copy(
+        update={"framing_trace": {"sk-123456789012": "metadata"}}
+    )
+
+    with pytest.raises(ValueError, match="secret"):
+        TaskFrame.model_validate(frame.model_dump())
+
+
 def test_minimal_run_cycle_and_belief_state_round_trip():
     run = RunRecord(run_id="run_1", regime=RunRegime.AUTONOMOUS, problem="Decide X")
     cycle = CycleRecord(
