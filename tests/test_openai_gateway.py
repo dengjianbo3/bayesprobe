@@ -1,4 +1,6 @@
 import json
+import io
+import urllib.error
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
@@ -20,6 +22,7 @@ from bayesprobe.openai_gateway import (
     parse_openai_chat_completions_response,
     parse_openai_structured_response,
 )
+from bayesprobe.provider_telemetry import ProviderInvocationRecord
 
 
 def make_judge_request() -> StructuredModelRequest:
@@ -542,6 +545,63 @@ class FakeChatClient:
         self.chat = SimpleNamespace(completions=FakeChatCompletions())
 
 
+class RecordingInvocationObserver:
+    def __init__(self, *, fail: bool = False):
+        self.records: list[ProviderInvocationRecord] = []
+        self.fail = fail
+
+    def observe(self, record: ProviderInvocationRecord) -> None:
+        self.records.append(record)
+        if self.fail:
+            raise RuntimeError("observer must not break inference")
+
+
+class SequencedChatCompletions:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+
+    def create(self, **payload):
+        self.calls.append(payload)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class SequencedChatClient:
+    def __init__(self, outcomes):
+        self.chat = SimpleNamespace(completions=SequencedChatCompletions(outcomes))
+
+
+class RetryableProviderError(RuntimeError):
+    def __init__(self, status_code: int, retry_after: str | None = None):
+        super().__init__(f"provider status {status_code}")
+        self.status_code = status_code
+        headers = {} if retry_after is None else {"Retry-After": retry_after}
+        self.response = SimpleNamespace(headers=headers)
+
+
+def chat_response(*, response_id: str = "chatcmpl_1") -> dict[str, object]:
+    return {
+        "id": response_id,
+        "system_fingerprint": "fp_1",
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"content": json.dumps(valid_payload())},
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 8,
+            "total_tokens": 18,
+            "prompt_tokens_details": {"cached_tokens": 4},
+            "completion_tokens_details": {"reasoning_tokens": 3},
+        },
+    }
+
+
 def test_openai_chat_completions_model_gateway_calls_fake_client_and_returns_dict():
     client = FakeChatClient()
     gateway = OpenAIChatCompletionsModelGateway(
@@ -557,6 +617,116 @@ def test_openai_chat_completions_model_gateway_calls_fake_client_and_returns_dic
     assert result == valid_payload()
     assert client.chat.completions.calls[0]["model"] == "provider-model"
     assert client.chat.completions.calls[0]["max_tokens"] == 128
+
+
+def test_chat_gateway_observes_success_with_usage_and_request_context():
+    observer = RecordingInvocationObserver()
+    client = SequencedChatClient([chat_response()])
+    request = StructuredModelRequest(
+        task="judge_evidence",
+        input=make_judge_request().input,
+        prompt_id="evidence_judgment",
+        prompt_version="v0.1",
+        schema_name="EvidenceJudgment",
+        schema_version="v0.1",
+        metadata={
+            "experiment_id": "experiment_1",
+            "arm": "direct_flash",
+            "sample_id": "sample_pseudonym",
+            "run_id": "run_1",
+        },
+    )
+    gateway = OpenAIChatCompletionsModelGateway(
+        config=OpenAIModelGatewayConfig(
+            model="provider-model",
+            base_url="https://provider.example/v1",
+        ),
+        client=client,
+        invocation_observer=observer,
+    )
+
+    assert gateway.complete_structured(request) == valid_payload()
+    assert len(observer.records) == 1
+    record = observer.records[0]
+    assert record.outcome == "success"
+    assert record.error_category is None
+    assert record.base_host == "provider.example"
+    assert record.usage.input_tokens == 10
+    assert record.usage.cached_input_tokens == 4
+    assert record.usage.reasoning_tokens == 3
+    assert record.finish_reason == "stop"
+    assert record.response_id == "chatcmpl_1"
+    assert record.context.experiment_id == "experiment_1"
+    assert record.context.sample_id == "sample_pseudonym"
+    assert record.context.attempt_index == 1
+
+
+def test_chat_gateway_observes_each_retry_and_honors_retry_after():
+    observer = RecordingInvocationObserver()
+    sleeps = []
+    client = SequencedChatClient(
+        [
+            RetryableProviderError(429, retry_after="2"),
+            RetryableProviderError(503),
+            chat_response(response_id="chatcmpl_after_retry"),
+        ]
+    )
+    gateway = OpenAIChatCompletionsModelGateway(
+        config=OpenAIModelGatewayConfig(model="provider-model"),
+        client=client,
+        invocation_observer=observer,
+        sleep=sleeps.append,
+        random_value=lambda: 0,
+    )
+
+    assert gateway.complete_structured(make_judge_request()) == valid_payload()
+    assert [record.context.attempt_index for record in observer.records] == [1, 2, 3]
+    assert [record.outcome for record in observer.records] == ["error", "error", "success"]
+    assert [record.error_category for record in observer.records] == [
+        "rate_limited",
+        "provider_server_error",
+        None,
+    ]
+    assert sleeps == [2.0, 1.0]
+
+
+def test_chat_gateway_does_not_retry_invalid_structured_output():
+    observer = RecordingInvocationObserver()
+    client = SequencedChatClient(
+        [
+            {
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "not-json"}}
+                ]
+            },
+            chat_response(),
+        ]
+    )
+    gateway = OpenAIChatCompletionsModelGateway(
+        config=OpenAIModelGatewayConfig(model="provider-model"),
+        client=client,
+        invocation_observer=observer,
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(ModelGatewayValidationError):
+        gateway.complete_structured(make_judge_request())
+
+    assert len(client.chat.completions.calls) == 1
+    assert len(observer.records) == 1
+    assert observer.records[0].error_category == "invalid_response"
+
+
+def test_chat_gateway_observer_failure_does_not_change_model_result():
+    observer = RecordingInvocationObserver(fail=True)
+    gateway = OpenAIChatCompletionsModelGateway(
+        config=OpenAIModelGatewayConfig(model="provider-model"),
+        client=SequencedChatClient([chat_response()]),
+        invocation_observer=observer,
+    )
+
+    assert gateway.complete_structured(make_judge_request()) == valid_payload()
+    assert len(observer.records) == 1
 
 
 def test_openai_chat_completions_model_gateway_uses_stdlib_fallback_without_openai(
@@ -605,6 +775,52 @@ def test_openai_chat_completions_model_gateway_uses_stdlib_fallback_without_open
     assert calls[0]["timeout_seconds"] == 7.5
     assert calls[0]["payload"]["model"] == "provider-model"
     assert calls[0]["payload"]["max_tokens"] == 64
+
+
+def test_stdlib_http_error_preserves_retry_metadata_and_redacts_key(monkeypatch):
+    import bayesprobe.openai_gateway as openai_gateway
+
+    error = urllib.error.HTTPError(
+        "https://provider.example/v1/chat/completions",
+        503,
+        "unavailable",
+        {"Retry-After": "3"},
+        io.BytesIO(b'{"error":"failed for sk-provider-secret"}'),
+    )
+
+    def raise_http_error(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_http_error)
+
+    with pytest.raises(RuntimeError) as captured:
+        openai_gateway._post_json(
+            "https://provider.example/v1/chat/completions",
+            {"model": "provider-model"},
+            api_key="sk-provider-secret",
+            timeout_seconds=30,
+        )
+
+    assert captured.value.status_code == 503
+    assert captured.value.response.headers["Retry-After"] == "3"
+    assert "sk-provider-secret" not in str(captured.value)
+
+
+def test_stdlib_url_timeout_remains_retryable_timeout(monkeypatch):
+    import bayesprobe.openai_gateway as openai_gateway
+
+    def raise_timeout(*args, **kwargs):
+        raise urllib.error.URLError(TimeoutError("provider read timed out"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_timeout)
+
+    with pytest.raises(TimeoutError, match="provider read timed out"):
+        openai_gateway._post_json(
+            "https://provider.example/v1/chat/completions",
+            {"model": "provider-model"},
+            api_key="sk-provider-secret",
+            timeout_seconds=30,
+        )
 
 
 def test_openai_responses_model_gateway_propagates_provider_exceptions():

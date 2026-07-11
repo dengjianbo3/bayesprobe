@@ -417,6 +417,20 @@ def test_build_model_gateway_creates_openai_chat_completions_gateway():
     )
 
 
+def test_build_model_gateway_passes_invocation_observer_to_openai_adapter():
+    observer = object()
+
+    gateway = build_model_gateway(
+        {
+            "kind": "openai_chat_completions",
+            "model": "provider-model",
+        },
+        invocation_observer=observer,
+    )
+
+    assert gateway.invocation_observer is observer
+
+
 def test_build_model_gateway_creates_recorded_gateway(tmp_path: Path):
     fixture_path = tmp_path / "recorded.json"
     fixture_path.write_text(

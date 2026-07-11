@@ -168,13 +168,13 @@ class ProviderInvocationObserver(Protocol):
     def observe(self, record: ProviderInvocationRecord) -> None: ...
 ```
 
-- [ ] Write RED tests for mapping/object response usage, DeepSeek/OpenAI usage detail variants, finish reason, response id, and system fingerprint.
-- [ ] Write RED tests proving a successful attempt and an exception each notify the observer exactly once.
-- [ ] Write RED tests proving request hashes are stable, Authorization/API key values never enter records, and observer errors cannot alter model results.
-- [ ] Implement normalization helpers and a lock-safe `JsonlProviderInvocationObserver` with atomic line append and `0600` creation.
-- [ ] Wrap both OpenAI gateway calls with monotonic timing and `try/except/finally` observation while preserving parsed return values.
-- [ ] Add bounded transport retries: at most two retries for 429, 5xx, connect/reset, and read timeout; no retry for `finish_reason=length` or schema errors. Inject sleeper/random functions for deterministic tests and honor integer/date `Retry-After`.
-- [ ] Run:
+- [x] Write RED tests for mapping/object response usage, DeepSeek/OpenAI usage detail variants, finish reason, response id, and system fingerprint.
+- [x] Write RED tests proving a successful attempt and an exception each notify the observer exactly once.
+- [x] Write RED tests proving request hashes are stable, Authorization/API key values never enter records, and observer errors cannot alter model results.
+- [x] Implement normalization helpers and a lock-safe `JsonlProviderInvocationObserver` with atomic line append and `0600` creation.
+- [x] Wrap both OpenAI gateway calls with monotonic timing and `try/except/finally` observation while preserving parsed return values.
+- [x] Add bounded transport retries: at most two retries for 429, 5xx, connect/reset, and read timeout; no retry for `finish_reason=length` or schema errors. Inject sleeper/random functions for deterministic tests and honor integer/date `Retry-After`.
+- [x] Run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
@@ -184,7 +184,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
 
 Expected: all tests pass with exactly one record per attempt.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add bayesprobe/provider_telemetry.py bayesprobe/model_gateway.py \

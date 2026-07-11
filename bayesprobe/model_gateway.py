@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from bayesprobe.schemas import EvidenceType, LikelihoodBand
+from bayesprobe.provider_telemetry import ProviderInvocationObserver
 
 
 class ModelGatewayValidationError(ValueError):
@@ -409,6 +410,8 @@ class ScriptedModelGateway:
 
 def build_model_gateway(
     config: ModelGatewayConfig | Mapping[str, Any] | None = None,
+    *,
+    invocation_observer: ProviderInvocationObserver | None = None,
 ) -> ModelGateway:
     gateway_config = _model_gateway_config_from_input(config)
     if gateway_config.kind == "deterministic":
@@ -433,7 +436,8 @@ def build_model_gateway(
                 max_output_tokens=gateway_config.max_output_tokens,
                 base_url=gateway_config.base_url,
                 request_controls=gateway_config.request_controls,
-            )
+            ),
+            invocation_observer=invocation_observer,
         )
     if gateway_config.kind == "openai_chat_completions":
         if gateway_config.model is None:
@@ -451,7 +455,8 @@ def build_model_gateway(
                 max_output_tokens=gateway_config.max_output_tokens,
                 base_url=gateway_config.base_url,
                 request_controls=gateway_config.request_controls,
-            )
+            ),
+            invocation_observer=invocation_observer,
         )
     if gateway_config.kind == "recorded":
         if gateway_config.fixture_path is None:
