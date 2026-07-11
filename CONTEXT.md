@@ -160,6 +160,50 @@ _Avoid_: deleting failed hypotheses, untracked hypothesis replacement
 The current set of hypotheses, posterior beliefs, scopes, rival relations, uncertainty, and update history maintained by BayesProbe.
 _Avoid_: Plan state, scratchpad, reasoning trace
 
+**Task Frame**:
+The explicit interpretation of a user's task that fixes the task kind, Answer Contract, and Hypothesis Frame before a Belief State is created.
+_Avoid_: prompt classification, implicit binary fallback, question text copied into H1/H2
+
+**Task Context**:
+Non-evidentiary constraints and definitions that shape the Task Frame, such as audience, scope, available resources, and required output form.
+_Avoid_: evidence context, passive signal, source claim
+
+**Answer Contract**:
+The task-facing requirements an Answer Projection must satisfy, including its objective, required sections, decision form, and permitted synthesis.
+_Avoid_: output prompt, answer template, top-hypothesis restatement
+
+**Hypothesis Frame**:
+The task-scoped hypothesis set together with its relation semantics, rival links, coverage limitations, and framing provenance.
+_Avoid_: untyped list of candidates, answer choices assumed for every task
+
+**Hypothesis Relation**:
+The rule describing whether hypotheses form one exclusive and exhaustive partition or carry independently revisable credences.
+_Avoid_: unconditional softmax, automatic all-to-all rivalry
+
+**Signal Provenance**:
+The source, derivation root, correlation group, parent signals, and content identity needed to judge whether a signal is external, derived, repeated, or independent.
+_Avoid_: source label only, cycle-local duplicate flag
+
+**Model Reasoning Signal**:
+A signal produced by model inference without external retrieval, tool observation, or source verification. It may inform belief conservatively but is not independent external-world evidence.
+_Avoid_: search result, verified evidence, tool result
+
+**Probe Designer**:
+The BayesProbe module that proposes hypothesis-conditioned inquiries from the Task Frame, current Belief State, Evidence Memory, uncertainty, and available capabilities.
+_Avoid_: probe selector, generic source-tracing template
+
+**Probe Selector**:
+The budget-aware module that chooses a bounded Probe Set from an existing Probe Candidate Pool without inventing evidence or updating belief.
+_Avoid_: probe designer, tool router
+
+**Evidence Memory**:
+The compact cross-cycle record of accepted evidence identity, provenance, correlation, and lifecycle relevance needed for deterministic future belief revision.
+_Avoid_: raw chain of thought, ledger replacement, cycle-local seen set
+
+**Projection Mode**:
+The declared relationship between a task-facing answer and the current Belief State: `selection` chooses one exclusive hypothesis, `synthesis` combines multiple supported hypotheses, and `abstention` reports that the Answer Contract cannot yet be met.
+_Avoid_: always pick H1, synthesis disguised as winner selection
+
 **Answer Projection**:
 The user-facing compression of BayesProbe's current Belief State for a specific task or decision. An answer is not BayesProbe's primitive target state.
 _Avoid_: final answer as belief state, answer-first agent target
