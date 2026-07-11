@@ -13,6 +13,7 @@ from bayesprobe.model_gateway import (
 )
 from bayesprobe.openai_gateway import (
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
+    OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA,
     PROBE_SIGNAL_JSON_SCHEMA,
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
@@ -23,6 +24,24 @@ from bayesprobe.openai_gateway import (
     parse_openai_structured_response,
 )
 from bayesprobe.provider_telemetry import ProviderInvocationRecord
+
+
+OPEN_QUESTION_TASK_FRAME_REQUIRED_KEYS = [
+    "task_kind",
+    "answer_contract",
+    "hypothesis_relation",
+    "hypotheses",
+    "coverage_statement",
+    "coverage_limitation",
+]
+FORBIDDEN_OPEN_QUESTION_TASK_FRAME_FIELDS = [
+    "id",
+    "prior",
+    "posterior",
+    "api_key",
+    "credential",
+    "secret",
+]
 
 
 def make_judge_request() -> StructuredModelRequest:
@@ -117,6 +136,24 @@ def make_repair_task_frame_request() -> StructuredModelRequest:
     )
 
 
+def assert_open_question_task_frame_schema(schema: dict) -> None:
+    assert schema is OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA
+    assert schema["required"] == OPEN_QUESTION_TASK_FRAME_REQUIRED_KEYS
+    assert list(schema["properties"]) == OPEN_QUESTION_TASK_FRAME_REQUIRED_KEYS
+    serialized_schema = json.dumps(schema).lower()
+    for field in FORBIDDEN_OPEN_QUESTION_TASK_FRAME_FIELDS:
+        assert f'"{field}"' not in serialized_schema
+
+
+def assert_open_question_task_frame_required_output(required_output: dict) -> None:
+    assert required_output["type"] == "OpenQuestionTaskFrame"
+    assert required_output["required_keys"] == OPEN_QUESTION_TASK_FRAME_REQUIRED_KEYS
+    assert required_output["json_schema"] == OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA
+    serialized_required_output = json.dumps(required_output).lower()
+    for field in FORBIDDEN_OPEN_QUESTION_TASK_FRAME_FIELDS:
+        assert f'"{field}"' not in serialized_required_output
+
+
 def test_build_openai_payload_for_open_question_frame():
     payload = build_openai_request_payload(
         make_open_question_frame_request(),
@@ -125,12 +162,35 @@ def test_build_openai_payload_for_open_question_frame():
 
     assert payload["text"]["format"]["name"] == "OpenQuestionTaskFrame"
     schema = payload["text"]["format"]["schema"]
+    assert_open_question_task_frame_schema(schema)
     assert schema["properties"]["hypothesis_relation"]["enum"] == [
         "exclusive_exhaustive",
         "independent",
     ]
-    assert "prior" not in json.dumps(schema)
-    assert "posterior" not in json.dumps(schema)
+    assert json.loads(payload["input"][1]["content"])["task"] == "frame_open_question"
+
+
+def test_build_openai_payload_for_task_frame_repair():
+    payload = build_openai_request_payload(
+        make_repair_task_frame_request(),
+        model="test-model",
+    )
+
+    assert payload["text"]["format"]["name"] == "OpenQuestionTaskFrame"
+    assert_open_question_task_frame_schema(payload["text"]["format"]["schema"])
+    assert json.loads(payload["input"][1]["content"])["task"] == "repair_task_frame"
+
+
+def test_build_chat_payload_for_open_question_frame():
+    payload = build_openai_chat_completions_payload(
+        make_open_question_frame_request(),
+        model="test-model",
+    )
+
+    required_output = json.loads(payload["messages"][1]["content"])["required_output"]
+    assert_open_question_task_frame_required_output(required_output)
+    assert json.loads(payload["messages"][1]["content"])["task"] == "frame_open_question"
+    assert payload["response_format"] == {"type": "json_object"}
 
 
 def test_build_chat_payload_for_task_frame_repair():
@@ -140,7 +200,8 @@ def test_build_chat_payload_for_task_frame_repair():
     )
 
     required_output = json.loads(payload["messages"][1]["content"])["required_output"]
-    assert required_output["type"] == "OpenQuestionTaskFrame"
+    assert_open_question_task_frame_required_output(required_output)
+    assert json.loads(payload["messages"][1]["content"])["task"] == "repair_task_frame"
     assert payload["response_format"] == {"type": "json_object"}
 
 
