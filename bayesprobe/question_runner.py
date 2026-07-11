@@ -33,6 +33,7 @@ from bayesprobe.schemas import (
     RunRecord,
     RunStatus,
     SignalKind,
+    TaskFrame,
     utc_now,
 )
 
@@ -65,6 +66,8 @@ class AutonomousQuestionStopReason(StrEnum):
 
 class AutonomousQuestionProgressKind(StrEnum):
     RUN_STARTED = "run_started"
+    TASK_FRAMING_STARTED = "task_framing_started"
+    TASK_FRAMING_COMPLETED = "task_framing_completed"
     INITIALIZATION_COMPLETED = "initialization_completed"
     CYCLE_STARTED = "cycle_started"
     PROBE_SET_PLANNED = "probe_set_planned"
@@ -92,6 +95,7 @@ class AutonomousQuestionCycleResult:
 @dataclass(frozen=True)
 class AutonomousQuestionRunResult:
     run: RunRecord
+    task_frame: TaskFrame
     initial_belief_state: BeliefState
     final_belief_state: BeliefState
     cycle_results: list[AutonomousQuestionCycleResult]
@@ -103,6 +107,7 @@ class AutonomousQuestionRunResult:
 class AutonomousQuestionProgress:
     kind: AutonomousQuestionProgressKind
     run_id: str
+    task_frame: TaskFrame | None = None
     cycle_id: str | None = None
     cycle_index: int | None = None
     run: RunRecord | None = None
@@ -142,9 +147,19 @@ class AutonomousQuestionRunner:
             AutonomousQuestionProgressKind.RUN_STARTED,
             run_id=input.run_id,
         )
+        self._emit_progress(
+            AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
+            run_id=input.run_id,
+        )
         initialization = self.initializer.initialize(input)
         run = initialization.run
+        task_frame = initialization.task_frame
         initial_belief_state = initialization.belief_state
+        self._emit_progress(
+            AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
+            run_id=run.run_id,
+            task_frame=task_frame,
+        )
         self._emit_progress(
             AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
             run_id=run.run_id,
@@ -195,6 +210,7 @@ class AutonomousQuestionRunner:
             if no_probes_selected and not passive_signals:
                 return self._result(
                     run=run,
+                    task_frame=task_frame,
                     initial_belief_state=initial_belief_state,
                     final_belief_state=current_belief_state,
                     cycle_results=cycle_results,
@@ -218,7 +234,7 @@ class AutonomousQuestionRunner:
                     belief_state=current_belief_state,
                     metadata={
                         "problem": run.problem,
-                        "initial_context": input.context.strip(),
+                        "task_context": input.task_context.strip(),
                     },
                 ),
             )
@@ -295,6 +311,7 @@ class AutonomousQuestionRunner:
             if no_probes_selected:
                 return self._result(
                     run=run,
+                    task_frame=task_frame,
                     initial_belief_state=initial_belief_state,
                     final_belief_state=current_belief_state,
                     cycle_results=cycle_results,
@@ -305,6 +322,7 @@ class AutonomousQuestionRunner:
             if self._confidence_reached(current_belief_state):
                 return self._result(
                     run=run,
+                    task_frame=task_frame,
                     initial_belief_state=initial_belief_state,
                     final_belief_state=current_belief_state,
                     cycle_results=cycle_results,
@@ -315,6 +333,7 @@ class AutonomousQuestionRunner:
             if self._posterior_stable(previous=previous_belief_state, current=current_belief_state):
                 return self._result(
                     run=run,
+                    task_frame=task_frame,
                     initial_belief_state=initial_belief_state,
                     final_belief_state=current_belief_state,
                     cycle_results=cycle_results,
@@ -324,6 +343,7 @@ class AutonomousQuestionRunner:
 
         return self._result(
             run=run,
+            task_frame=task_frame,
             initial_belief_state=initial_belief_state,
             final_belief_state=current_belief_state,
             cycle_results=cycle_results,
@@ -385,6 +405,7 @@ class AutonomousQuestionRunner:
         self,
         *,
         run: RunRecord,
+        task_frame: TaskFrame,
         initial_belief_state: BeliefState,
         final_belief_state: BeliefState,
         cycle_results: list[AutonomousQuestionCycleResult],
@@ -406,6 +427,7 @@ class AutonomousQuestionRunner:
             self.core.ledger.append("run", completed_run)
         result = AutonomousQuestionRunResult(
             run=completed_run,
+            task_frame=task_frame,
             initial_belief_state=initial_belief_state,
             final_belief_state=final_belief_state,
             cycle_results=list(cycle_results),
@@ -428,6 +450,7 @@ class AutonomousQuestionRunner:
         kind: AutonomousQuestionProgressKind,
         *,
         run_id: str,
+        task_frame: TaskFrame | None = None,
         cycle_id: str | None = None,
         cycle_index: int | None = None,
         run: RunRecord | None = None,
@@ -445,6 +468,7 @@ class AutonomousQuestionRunner:
                     AutonomousQuestionProgress(
                         kind=kind,
                         run_id=run_id,
+                        task_frame=task_frame,
                         cycle_id=cycle_id,
                         cycle_index=cycle_index,
                         run=run,

@@ -3,9 +3,14 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore
-from bayesprobe.initialization import HypothesisSeed, InitializeRunInput
+from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.probe_executor import ProbeExecutionResult
+from bayesprobe.model_gateway import StructuredModelRequest
+from bayesprobe.probe_executor import (
+    ModelBackedProbeToolGateway,
+    ProbeExecutionResult,
+    ProbeExecutor,
+)
 from bayesprobe.probe_planner import ProbePlanningResult
 from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
@@ -13,6 +18,7 @@ from bayesprobe.question_runner import (
     AutonomousQuestionProgressKind,
     AutonomousQuestionStopReason,
 )
+from bayesprobe.task_framing import ModelTaskFramer
 from bayesprobe.schemas import (
     CycleSignalShape,
     ProbeSet,
@@ -60,6 +66,109 @@ def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
         HypothesisSeed(id="H1", statement="The fixture's H1 condition holds.", prior=0.5, scope="Deterministic test fixture.", falsifiers=["The fixture emits a reliable H1 refutation."], predictions=["The fixture emits a reliable H1 support cue."]),
         HypothesisSeed(id="H2", statement="The fixture's H2 condition holds instead.", prior=0.5, scope="Deterministic test fixture.", falsifiers=["The fixture emits a reliable H2 refutation."], predictions=["The fixture emits a reliable H2 support cue."]),
     ]
+
+
+def valid_open_frame_payload() -> dict[str, object]:
+    return {
+        "task_kind": "claim_verification",
+        "answer_contract": {
+            "objective": "Design a discriminating validation protocol.",
+            "required_sections": ["hypotheses", "controls", "decision_rule"],
+            "decision_form": "experimental_protocol",
+            "permits_synthesis": True,
+        },
+        "hypothesis_relation": "independent",
+        "hypotheses": [
+            {
+                "statement": "Scale has an independent effect under matched conditions.",
+                "type": "causal_claim",
+                "scope": "Matched task and resource conditions.",
+                "falsifiers": ["The controlled effect is negligible."],
+                "predictions": ["Matched performance rises with size."],
+            },
+            {
+                "statement": "The apparent effect is materially confounded.",
+                "type": "confounding_explanation",
+                "scope": "Unmatched comparisons.",
+                "falsifiers": ["The effect survives matched controls."],
+                "predictions": ["The effect shrinks after matching."],
+            },
+        ],
+        "coverage_statement": "Covers the effect and its primary confounder.",
+        "coverage_limitation": "Task interactions may remain.",
+    }
+
+
+class RecordingOpenQuestionGateway:
+    adapter_kind = "recording_open_question_test"
+
+    def __init__(self) -> None:
+        self.requests: list[StructuredModelRequest] = []
+
+    def complete_structured(self, request: StructuredModelRequest) -> dict[str, object]:
+        self.requests.append(request)
+        if request.task == "frame_open_question":
+            return valid_open_frame_payload()
+        if request.task == "execute_probe":
+            return {"raw_content": "MODEL REASONING: A matched controlled test is required."}
+        if request.task == "judge_evidence":
+            return {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    hypothesis_id: "weakly_confirming"
+                    for hypothesis_id in request.input["target_hypotheses"]
+                },
+                "interpretation": "A design suggestion, not an external result.",
+                "quality_overrides": {"independence": 0.2, "verifiability": 0.2},
+            }
+        raise AssertionError(f"unexpected task: {request.task}")
+
+
+def test_open_question_framing_precedes_belief_initialization():
+    gateway = RecordingOpenQuestionGateway()
+    observed = []
+
+    def observe(event):
+        observed.append((event, [request.task for request in gateway.requests]))
+
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(model_gateway=gateway),
+        initializer=BayesProbeInitializer(task_framer=ModelTaskFramer(gateway)),
+        executor=ProbeExecutor(ModelBackedProbeToolGateway(gateway)),
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+        progress_observer=observe,
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_open_progress",
+            problem="A team claims that a larger model always improves agent performance. How should it be tested?",
+            task_context="Design an experiment for a research audience.",
+            context="SUPPORTS: An earlier benchmark showed a scale trend.",
+        )
+    )
+
+    events = [event for event, _ in observed]
+    assert [event.kind for event in events[:4]] == [
+        AutonomousQuestionProgressKind.RUN_STARTED,
+        AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
+        AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
+        AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
+    ]
+    assert events[1].belief_state is None
+    assert events[2].belief_state is None
+    assert events[2].task_frame is not None
+    assert observed[1][1] == []
+    assert observed[2][1] == ["frame_open_question"]
+    assert gateway.requests[0].task == "frame_open_question"
+    assert gateway.requests[0].input["task_context"] == (
+        "Design an experiment for a research audience."
+    )
+    assert "SUPPORTS: An earlier benchmark" not in str(gateway.requests[0].input)
+    assert next(
+        request for request in gateway.requests if request.task == "execute_probe"
+    ).input["task_context"] == "Design an experiment for a research audience."
+    assert result.initial_belief_state.task_frame == result.task_frame
 
 
 def test_question_runner_executes_one_end_to_end_cycle():
@@ -346,6 +455,8 @@ def test_question_runner_emits_truthful_progress_for_integrated_cycle():
 
     assert [event.kind for event in events] == [
         AutonomousQuestionProgressKind.RUN_STARTED,
+        AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
+        AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
         AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
         AutonomousQuestionProgressKind.CYCLE_STARTED,
         AutonomousQuestionProgressKind.PROBE_SET_PLANNED,
@@ -509,6 +620,8 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
     ]
     assert observed_kinds == [
         AutonomousQuestionProgressKind.RUN_STARTED,
+        AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
+        AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
         AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
         *per_cycle,
         *per_cycle,

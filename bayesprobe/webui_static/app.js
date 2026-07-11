@@ -25,6 +25,8 @@ const OPENAI_COMPATIBLE_PROVIDER_KINDS = new Set([
 ]);
 const PROGRESS_LABEL_BY_EVENT = {
   run_started: "Run started",
+  task_framing_started: "Framing task",
+  task_framing_completed: "Task framed",
   initialization_completed: "Belief initialized",
   cycle_started: "Cycle started",
   probe_set_planned: "Probes planned",
@@ -119,6 +121,7 @@ function buildPayload() {
 
   return {
     question: valueOf("question"),
+    task_context: valueOf("task-context"),
     context: valueOf("context"),
     provider,
     runner: {

@@ -84,7 +84,7 @@ class ModelBackedProbeToolGateway:
             task="execute_probe",
             input={
                 "problem": _metadata_text(context, "problem"),
-                "initial_context": _metadata_text(context, "initial_context"),
+                "task_context": _task_context(context),
                 "probe": {
                     "id": probe.id,
                     "inquiry_goal": probe.inquiry_goal,
@@ -242,6 +242,14 @@ def _deterministic_content_cue(method: str) -> str:
 def _metadata_text(context: ProbeExecutionContext, key: str) -> str:
     value = context.metadata.get(key, "")
     return value.strip() if isinstance(value, str) else ""
+
+
+def _task_context(context: ProbeExecutionContext) -> str:
+    explicit_context = _metadata_text(context, "task_context")
+    if explicit_context:
+        return explicit_context
+    task_frame = context.belief_state.task_frame
+    return task_frame.task_context.strip() if task_frame is not None else ""
 
 
 def _probe_raw_content(payload: dict[str, Any]) -> str:

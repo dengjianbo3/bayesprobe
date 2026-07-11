@@ -177,6 +177,8 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
     )
     event_by_name = {event["event"]: event for event in events}
     assert set(event_by_name["run_started"]["data"]) == set()
+    assert set(event_by_name["task_framing_started"]["data"]) == set()
+    assert set(event_by_name["task_framing_completed"]["data"]) == {"task_frame"}
     assert set(event_by_name["initialization_completed"]["data"]) == {
         "run",
         "belief_state",
@@ -216,46 +218,203 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
         "run",
         "stop_reason",
         "final_answer",
+        "task_frame",
         "initial_belief_state",
         "final_belief_state",
         "cycles",
     }
 
 
-def test_webui_unseeded_open_question_is_framing_validation_before_provider_execution():
-    FakeWebUIChatOpenAI.created_with = []
-    events = []
-    request = {
-        "question": "Can streaming use a Chat Completions provider?",
-        "provider": {
-            "kind": "openai_chat_completions",
-            "api_key": "provider-secret-123",
-            "model": "provider-model",
+def valid_open_frame_payload():
+    return {
+        "task_kind": "claim_verification",
+        "answer_contract": {
+            "objective": "Design a discriminating validation protocol.",
+            "required_sections": ["hypotheses", "controls", "decision_rule"],
+            "decision_form": "experimental_protocol",
+            "permits_synthesis": True,
         },
-        "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        "hypothesis_relation": "independent",
+        "hypotheses": [
+            {
+                "statement": "Scale has an independent effect under matched conditions.",
+                "type": "causal_claim",
+                "scope": "Matched task and resource conditions.",
+                "falsifiers": ["The controlled effect is negligible."],
+                "predictions": ["Matched performance rises with size."],
+            },
+            {
+                "statement": "The apparent effect is materially confounded.",
+                "type": "confounding_explanation",
+                "scope": "Unmatched comparisons.",
+                "falsifiers": ["The effect survives matched controls."],
+                "predictions": ["The effect shrinks after matching."],
+            },
+        ],
+        "coverage_statement": "Covers the effect and its primary confounder.",
+        "coverage_limitation": "Task interactions may remain.",
     }
-    status, response = handle_autonomous_run_request(
-        request,
-        client_factory=FakeWebUIChatOpenAI,
-    )
-    stream_status, error = handle_autonomous_stream_request(
-        request,
+
+
+class FramingWebUIChatCompletions:
+    def __init__(self):
+        self.tasks = []
+        self.requests = []
+
+    def create(self, **payload):
+        request = json.loads(payload["messages"][1]["content"])
+        self.requests.append(request)
+        self.tasks.append(request["task"])
+        if request["task"] == "frame_open_question":
+            content = valid_open_frame_payload()
+        elif request["task"] == "execute_probe":
+            content = {"raw_content": "A matched controlled test is required."}
+        else:
+            content = {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    hypothesis_id: "weakly_confirming"
+                    for hypothesis_id in request["input"]["target_hypotheses"]
+                },
+                "interpretation": "A design suggestion, not an external result.",
+                "quality_overrides": {"independence": 0.2, "verifiability": 0.2},
+            }
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+
+class FramingWebUIChatOpenAI:
+    completions = None
+
+    def __init__(self, **kwargs):
+        del kwargs
+        completions = FramingWebUIChatCompletions()
+        self.__class__.completions = completions
+        self.chat = type("FakeChat", (), {"completions": completions})()
+
+
+def test_webui_provider_frames_open_question_before_exposing_belief():
+    events = []
+    status, body = handle_autonomous_stream_request(
+        {
+            "question": "A team claims that larger models always improve agent performance. How should it be tested?",
+            "task_context": "Design an experimental protocol for a research audience.",
+            "context": "SUPPORTS: An earlier benchmark showed a scale trend.",
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "model": "provider-model",
+            },
+        },
         event_sink=events.append,
-        client_factory=FakeWebUIChatOpenAI,
+        client_factory=FramingWebUIChatOpenAI,
     )
 
-    expected_error = {
-        "error": {
-            "type": "validation_error",
-            "message": "task framing requires explicit answer choices or hypothesis seeds",
+    assert status == 200
+    assert body is None
+    assert [event["event"] for event in events[:4]] == [
+        "run_started",
+        "task_framing_started",
+        "task_framing_completed",
+        "initialization_completed",
+    ]
+    assert "belief_state" not in events[2]["data"]
+    assert events[2]["data"]["task_frame"]["task_kind"] == "claim_verification"
+    assert events[3]["data"]["belief_state"]["task_frame"] is not None
+    assert FramingWebUIChatOpenAI.completions.tasks[0] == "frame_open_question"
+    frame_request = FramingWebUIChatOpenAI.completions.tasks
+    assert frame_request[:3] == ["frame_open_question", "execute_probe", "judge_evidence"]
+    assert FramingWebUIChatOpenAI.completions.requests[0]["input"]["task_context"] == (
+        "Design an experimental protocol for a research audience."
+    )
+    assert "An earlier benchmark showed a scale trend" not in json.dumps(
+        FramingWebUIChatOpenAI.completions.requests[0]
+    )
+    assert "provider-secret-123" not in json.dumps(events)
+
+
+def test_webui_deterministic_open_question_fails_without_binary_fallback():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "A team claims that larger models always improve agent performance. How should it be tested?",
+            "provider": {"kind": "deterministic"},
         }
-    }
+    )
+
     assert status == 400
-    assert response == expected_error
-    assert stream_status == 400
-    assert error == expected_error
-    assert events == []
-    assert FakeWebUIChatOpenAI.created_with == []
+    assert payload["error"]["type"] == "validation_error"
+    assert "requires a model or recorded task framer" in payload["error"]["message"]
+
+
+def test_webui_accepts_structured_answer_choices_without_model_framing():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Which result follows?",
+            "answer_choices": [
+                {"label": "A", "text": "First result"},
+                {"label": "B", "text": "Second result"},
+            ],
+            "provider": {"kind": "deterministic"},
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        }
+    )
+
+    assert status == 200
+    assert payload["task_frame"]["task_kind"] == "multiple_choice"
+    assert [item["id"] for item in payload["initial_belief_state"]["hypotheses"]] == [
+        "A",
+        "B",
+    ]
+
+
+def test_webui_open_question_framing_uses_one_request_scoped_gateway():
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "A team claims that larger models always improve agent performance. How should it be tested?",
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "model": "provider-model",
+            },
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        client_factory=FramingWebUIChatOpenAI,
+    )
+
+    assert status == 200
+    assert FramingWebUIChatOpenAI.completions.tasks[:3] == [
+        "frame_open_question",
+        "execute_probe",
+        "judge_evidence",
+    ]
+    assert "provider-secret-123" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "answer_choices",
+    [
+        {"label": "A", "text": "Not an array"},
+        [{"label": "A", "text": "First"}],
+        [
+            {"label": "A", "text": "First"},
+            {"label": "A", "text": "Second"},
+        ],
+        [
+            {"label": "A", "text": ""},
+            {"label": "B", "text": "Second"},
+        ],
+    ],
+)
+def test_webui_rejects_invalid_structured_answer_choices(answer_choices):
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "Which result follows?",
+            "answer_choices": answer_choices,
+        }
+    )
+
+    assert status == 400
+    assert payload["error"]["type"] == "validation_error"
 
 
 def test_webui_invalid_explicit_frame_is_validation_error_before_provider_execution():
@@ -445,7 +604,8 @@ def test_webui_static_assets_define_operational_workbench():
     assert 'id="progress-panel"' in index
     assert 'id="progress-list"' in index
     assert 'id="answer-projection-state"' in index
-    assert 'id="context" placeholder="Optional external information"' in index
+    assert 'id="task-context" placeholder="Optional scope, constraints, audience, or required output"' in index
+    assert 'id="context" placeholder="Optional observation, source text, log, or expert feedback"' in index
     assert "SUPPORTS: The local deterministic signal supports H1." not in index
     assert "localStorage" not in script
     assert "sessionStorage" not in script
@@ -456,6 +616,9 @@ def test_webui_static_assets_define_operational_workbench():
     assert "response.body.getReader()" in script
     assert "new TextDecoder()" in script
     assert "function handleProgressEvent(" in script
+    assert 'task_context: valueOf("task-context")' in script
+    assert 'task_framing_started: "Framing task"' in script
+    assert 'task_framing_completed: "Task framed"' in script
     assert "cycle_integrated" in script
     assert "run_completed" in script
     assert "run_failed" in script

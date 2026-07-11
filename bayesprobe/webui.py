@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel
 
 from bayesprobe.core import BayesProbeCore
-from bayesprobe.initialization import InitializeRunInput
+from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     ModelGateway,
@@ -40,6 +40,8 @@ from bayesprobe.question_runner import (
 from bayesprobe.schemas import AnswerChoice
 from bayesprobe.task_framing import (
     ExplicitTaskFramer,
+    ModelTaskFramer,
+    RoutingTaskFramer,
     TaskFramingError,
     TaskFramingInput,
 )
@@ -90,8 +92,10 @@ def handle_autonomous_run_request(
         prepared = _prepare_autonomous_run(payload, client_factory=client_factory)
         try:
             result = prepared.runner.run_question(prepared.input)
-        except TaskFramingError:
-            raise
+        except TaskFramingError as error:
+            if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
+                raise ProviderError(_provider_error_message(prepared.provider_kind)) from error
+            raise WebUIError(str(error)) from error
         except Exception as error:
             if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
                 raise ProviderError(
@@ -132,8 +136,13 @@ def handle_autonomous_stream_request(
 
     try:
         prepared.runner.run_question(prepared.input)
-    except TaskFramingError:
-        return int(HTTPStatus.BAD_REQUEST), _task_framing_error_payload()
+    except TaskFramingError as error:
+        if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
+            emitter.emit_failure("provider_error", _provider_error_message(prepared.provider_kind))
+        elif emitter.started:
+            emitter.emit_failure("validation_error", str(error))
+        else:
+            return int(HTTPStatus.BAD_REQUEST), _task_framing_error_payload()
     except Exception as error:
         if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
             emitter.emit_failure(
@@ -156,6 +165,7 @@ def serialize_autonomous_run_result(
         "run": _dump_domain(result.run),
         "stop_reason": result.stop_reason.value,
         "final_answer": _dump_domain(result.final_answer_projection),
+        "task_frame": _dump_domain(result.task_frame),
         "initial_belief_state": _dump_domain(result.initial_belief_state),
         "final_belief_state": _dump_domain(result.final_belief_state),
         "cycles": [
@@ -233,6 +243,10 @@ class _AutonomousProgressEventEmitter:
 def _serialize_progress_data(progress: AutonomousQuestionProgress) -> dict[str, Any]:
     if progress.kind == AutonomousQuestionProgressKind.RUN_STARTED:
         return {}
+    if progress.kind == AutonomousQuestionProgressKind.TASK_FRAMING_STARTED:
+        return {}
+    if progress.kind == AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED:
+        return {"task_frame": _dump_domain(progress.task_frame)}
     if progress.kind == AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED:
         return {
             "run": _dump_domain(progress.run),
@@ -455,19 +469,21 @@ def _prepare_autonomous_run(
     progress_observer: Callable[[AutonomousQuestionProgress], None] | None = None,
 ) -> _PreparedAutonomousRun:
     request = _parse_autonomous_request(payload)
-    input = InitializeRunInput(
-        run_id=_webui_run_id(),
-        problem=request["question"],
-        context=request["context"],
-        answer_choices=request["answer_choices"],
-    )
-    _preflight_task_framing(input)
     provider_kind = _optional_string(
         request["provider"].get("kind"),
         "provider.kind",
         default="deterministic",
     )
     assert provider_kind is not None
+    input = InitializeRunInput(
+        run_id=_webui_run_id(),
+        problem=request["question"],
+        context=request["context"],
+        task_context=request["task_context"],
+        answer_choices=request["answer_choices"],
+    )
+    if provider_kind not in OPENAI_COMPATIBLE_PROVIDER_KINDS:
+        _preflight_task_framing(input)
     gateway = _build_webui_model_gateway(
         request["provider"], client_factory=client_factory
     )
@@ -478,9 +494,19 @@ def _prepare_autonomous_run(
             gateway=ModelBackedProbeToolGateway(gateway),
             ledger=core.ledger,
         )
+        task_framer = RoutingTaskFramer(
+            explicit_framer=ExplicitTaskFramer(),
+            open_framer=ModelTaskFramer(gateway),
+        )
+    else:
+        task_framer = ExplicitTaskFramer()
     return _PreparedAutonomousRun(
         runner=AutonomousQuestionRunner(
             core=core,
+            initializer=BayesProbeInitializer(
+                ledger=core.ledger,
+                task_framer=task_framer,
+            ),
             executor=executor,
             config=request["runner_config"],
             progress_observer=progress_observer,
@@ -494,6 +520,7 @@ def _preflight_task_framing(input: InitializeRunInput) -> None:
     framing_input = TaskFramingInput(
         run_id=input.run_id,
         question=input.problem,
+        task_context=input.task_context,
         answer_choices=list(input.answer_choices),
     )
     if not ExplicitTaskFramer().can_frame(framing_input):
@@ -505,7 +532,7 @@ def _preflight_task_framing(input: InitializeRunInput) -> None:
 def _task_framing_error_payload() -> dict[str, Any]:
     return _error_payload(
         "validation_error",
-        "task framing requires explicit answer choices or hypothesis seeds",
+        "unseeded open question requires a model or recorded task framer",
     )
 
 
@@ -514,7 +541,10 @@ def _parse_autonomous_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise WebUIError("request payload must be an object")
     question = _required_nonempty_string(payload.get("question"), "question")
     context = _optional_string(payload.get("context"), "context", default="")
-    answer_choices = _answer_choices_from_payload(payload.get("answer_choices", []))
+    task_context = _optional_string(
+        payload.get("task_context"), "task_context", default=""
+    )
+    answer_choices = _answer_choices_from_payload(payload.get("answer_choices"))
     provider = payload.get("provider", {"kind": "deterministic"})
     if provider is None:
         provider = {"kind": "deterministic"}
@@ -528,6 +558,7 @@ def _parse_autonomous_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "question": question,
         "context": context,
+        "task_context": task_context,
         "answer_choices": answer_choices,
         "provider": dict(provider),
         "runner_config": _runner_config_from_payload(runner_payload),
@@ -540,9 +571,17 @@ def _answer_choices_from_payload(value: Any) -> list[AnswerChoice]:
     if not isinstance(value, list):
         raise WebUIError("answer_choices must be an array")
     try:
-        return [AnswerChoice.model_validate(choice) for choice in value]
-    except ValueError as error:
-        raise WebUIError("answer_choices must contain valid choices") from error
+        choices = [AnswerChoice.model_validate(choice) for choice in value]
+    except (TypeError, ValueError) as error:
+        raise WebUIError(
+            "answer_choices must contain non-empty label/text objects"
+        ) from error
+    if len(choices) < 2:
+        raise WebUIError("answer_choices must contain at least two choices")
+    labels = [choice.label for choice in choices]
+    if len(labels) != len(set(labels)):
+        raise WebUIError("answer_choices labels must be unique")
+    return choices
 
 
 def _runner_config_from_payload(

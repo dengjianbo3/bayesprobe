@@ -129,6 +129,7 @@ function loadApp({ fetch = () => Promise.reject(new Error("unexpected fetch")) }
     "timeout-seconds",
     "max-output-tokens",
     "question",
+    "task-context",
     "context",
     "max-cycles",
     "max-probes",
@@ -310,6 +311,51 @@ test("preserves an integrated cycle when a sanitized terminal failure arrives", 
   assert.ok(elements.get("belief-panel").children.length > 0);
   assert.equal(elements.get("trace-pane").children.length, 1);
   assert.equal(elements.get("progress-list").children.at(-1).dataset.state, "failed");
+});
+
+test("keeps beliefs pending until task framing completes initialization", () => {
+  const { api, elements } = loadApp();
+  elements.get("belief-panel").textContent = "Run pending.";
+
+  api.handleProgressEvent({
+    event: "run_started",
+    sequence: 1,
+    run_id: "run-1",
+    data: {},
+  });
+  api.handleProgressEvent({
+    event: "task_framing_started",
+    sequence: 2,
+    run_id: "run-1",
+    data: {},
+  });
+  api.handleProgressEvent({
+    event: "task_framing_completed",
+    sequence: 3,
+    run_id: "run-1",
+    data: { task_frame: { task_kind: "claim_verification" } },
+  });
+
+  assert.equal(elements.get("belief-panel").textContent, "Run pending.");
+  assert.equal(
+    elements.get("progress-list").children[1].children[1].textContent,
+    "Framing task"
+  );
+  assert.equal(
+    elements.get("progress-list").children[2].children[1].textContent,
+    "Task framed"
+  );
+
+  api.handleProgressEvent({
+    event: "initialization_completed",
+    sequence: 4,
+    run_id: "run-1",
+    data: {
+      belief_state: integratedCycleEvent().data.belief_state,
+    },
+  });
+
+  assert.ok(elements.get("belief-panel").children.length > 0);
 });
 
 test("handleSubmit preserves integrated output after a terminal stream failure", async () => {

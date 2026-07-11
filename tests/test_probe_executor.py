@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from bayesprobe.probe_executor import (
 )
 from bayesprobe.probe_planner import ProbePlanner, ProbePlanningConfig
 from bayesprobe.schemas import (
+    AnswerChoice,
     BeliefState,
     CycleRecord,
     CycleSignalShape,
@@ -183,7 +185,8 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
         belief_state=make_belief_state(),
         metadata={
             "problem": "Which answer choice is correct?",
-            "initial_context": "Use graph-chain irreducibility and aperiodicity.",
+            "task_context": "Use graph-chain irreducibility and aperiodicity.",
+            "initial_context": "SUPPORTS: This initial signal must remain outside model execution.",
         },
     )
 
@@ -200,15 +203,49 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert request.prompt_id == "probe_execution"
     assert request.schema_name == "ProbeSignal"
     assert request.input["problem"] == "Which answer choice is correct?"
-    assert request.input["initial_context"] == (
+    assert request.input["task_context"] == (
         "Use graph-chain irreducibility and aperiodicity."
     )
+    assert "initial_context" not in request.input
+    assert "SUPPORTS: This initial signal" not in json.dumps(request.input)
     assert request.input["probe"]["target_hypotheses"] == ["H1", "H2"]
     assert request.input["hypotheses"][0]["statement"] == "The claim is supported."
     assert signal.signal_kind == SignalKind.ACTIVE
     assert signal.source_type == "model_probe_gateway"
     assert signal.source == "model_gateway:scripted"
     assert signal.raw_content.startswith("A direct comparison")
+
+
+def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_empty():
+    model_gateway = ScriptedModelGateway(
+        responses={"execute_probe": {"raw_content": "A controlled comparison is required."}}
+    )
+    initialized = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_task_context_fallback",
+            problem="Which answer choice is correct?",
+            task_context="Use the supplied theorem definitions.",
+            answer_choices=[
+                AnswerChoice(label="A", text="First result"),
+                AnswerChoice(label="B", text="Second result"),
+            ],
+        )
+    )
+    probe = make_probe("P_choice", ["A", "B"], method="answer_choice_discrimination")
+
+    ProbeExecutor(ModelBackedProbeToolGateway(model_gateway)).execute_probe_set(
+        probe_set=make_probe_set([probe]),
+        context=ProbeExecutionContext(
+            run_id="run_task_context_fallback",
+            cycle_id="run_exec_cycle_1",
+            belief_state=initialized.belief_state,
+            metadata={"problem": "Which answer choice is correct?"},
+        ),
+    )
+
+    assert model_gateway.requests[0].input["task_context"] == (
+        "Use the supplied theorem definitions."
+    )
 
 
 def test_executor_preserves_probe_and_signal_order():
