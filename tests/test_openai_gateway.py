@@ -67,6 +67,22 @@ def make_probe_request() -> StructuredModelRequest:
     )
 
 
+def make_multiple_choice_request(
+    *, task: str = "answer_multiple_choice"
+) -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task=task,
+        input={
+            "question": "What is 2 + 2?",
+            "choices": {"A": "3", "B": "4", "C": "5"},
+        },
+        prompt_id="direct_multiple_choice",
+        prompt_version="v0.1",
+        schema_name="MultipleChoiceAnswer",
+        schema_version="v0.1",
+    )
+
+
 def test_openai_model_gateway_config_requires_explicit_model():
     config = OpenAIModelGatewayConfig(model="gpt-5.5")
 
@@ -336,6 +352,36 @@ def test_build_openai_chat_completions_payload_for_execute_probe():
             "do not claim external retrieval or verification unless supplied in the input",
         ],
     }
+
+
+def test_build_openai_chat_payload_for_multiple_choice_answer():
+    payload = build_openai_chat_completions_payload(
+        make_multiple_choice_request(),
+        model="provider-model",
+    )
+
+    assert "multiple-choice" in payload["messages"][0]["content"]
+    user_payload = json.loads(payload["messages"][1]["content"])
+    assert user_payload["input"] == make_multiple_choice_request().input
+    assert user_payload["required_output"]["required_keys"] == [
+        "answer_label",
+        "choice_probabilities",
+        "answer_summary",
+    ]
+
+
+def test_build_openai_payload_for_multiple_choice_repair_uses_same_schema():
+    request = make_multiple_choice_request(task="repair_multiple_choice_answer")
+
+    responses_payload = build_openai_request_payload(request, model="gpt-5.5")
+    chat_payload = build_openai_chat_completions_payload(
+        request,
+        model="provider-model",
+    )
+
+    assert responses_payload["text"]["format"]["name"] == "MultipleChoiceAnswer"
+    assert "Repair" in responses_payload["input"][0]["content"]
+    assert "Repair" in chat_payload["messages"][0]["content"]
 
 
 def valid_payload() -> dict[str, object]:

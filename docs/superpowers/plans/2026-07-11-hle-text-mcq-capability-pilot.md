@@ -330,18 +330,18 @@ repair_multiple_choice_answer
 }
 ```
 
-- [ ] Write RED payload tests proving only question and choices are sent and all benchmark metadata/gold fields are absent.
-- [ ] Write RED response tests for exact label keys, finite/range/sum validation, deterministic normalization, one schema repair, and terminal failure after a second invalid response.
-- [ ] Add generic task schemas/instructions for direct MCQ and repair without weakening evidence-judgment validation.
-- [ ] Implement `DirectFlashArm.run_case(...)` using one initial request and at most one schema-repair request; context metadata supplies telemetry ids but not raw benchmark identity in shareable records.
-- [ ] Run:
+- [x] Write RED payload tests proving only question and choices are sent and all benchmark metadata/gold fields are absent.
+- [x] Write RED response tests for exact label keys, finite/range/sum validation, deterministic normalization, one schema repair, and terminal failure after a second invalid response.
+- [x] Add generic task schemas/instructions for direct MCQ and repair without weakening evidence-judgment validation.
+- [x] Implement `DirectFlashArm.run_case(...)` using one initial request and at most one schema-repair request; context metadata supplies telemetry ids but not raw benchmark identity in shareable records.
+- [x] Run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_arms.py \
   tests/test_openai_gateway.py -q -p no:cacheprovider
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add bayesprobe/openai_gateway.py bayesprobe/evaluation/arms.py \

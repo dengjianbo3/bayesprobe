@@ -77,6 +77,20 @@ PROBE_SIGNAL_JSON_SCHEMA: dict[str, Any] = {
     },
 }
 
+MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["answer_label", "choice_probabilities", "answer_summary"],
+    "properties": {
+        "answer_label": {"type": "string"},
+        "choice_probabilities": {
+            "type": "object",
+            "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "answer_summary": {"type": "string", "minLength": 1},
+    },
+}
+
 ENVIRONMENT_VARIABLE_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 EVIDENCE_JUDGMENT_SCHEMA_KEYS = frozenset(
     {"evidence_type", "likelihoods", "interpretation", "quality_overrides"}
@@ -576,6 +590,18 @@ def _instruction_for_task(task: str) -> str:
             "Return exactly one valid EvidenceJudgment JSON object. "
             "Preserve the intended evidence meaning when it can be inferred."
         )
+    if task == "answer_multiple_choice":
+        return (
+            "Answer the supplied multiple-choice problem using only the question and "
+            "choices. Return a complete probability distribution over every supplied "
+            "choice and a concise final justification."
+        )
+    if task == "repair_multiple_choice_answer":
+        return (
+            "Repair the malformed multiple-choice answer using the supplied question, "
+            "choices, invalid payload, and validation error. Return one valid answer "
+            "without adding or removing choice labels."
+        )
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -584,6 +610,8 @@ def _structured_output_for_task(task: str) -> tuple[str, dict[str, Any]]:
         return "ProbeSignal", PROBE_SIGNAL_JSON_SCHEMA
     if task in {"judge_evidence", "repair_evidence_judgment"}:
         return "EvidenceJudgment", EVIDENCE_JUDGMENT_JSON_SCHEMA
+    if task in {"answer_multiple_choice", "repair_multiple_choice_answer"}:
+        return "MultipleChoiceAnswer", MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -607,6 +635,12 @@ def _chat_instruction_for_task(task: str) -> str:
             f"{base_instruction} Return only one JSON object with exactly these "
             "top-level keys: evidence_type, likelihoods, interpretation, "
             "quality_overrides. Do not include markdown."
+        )
+    if task in {"answer_multiple_choice", "repair_multiple_choice_answer"}:
+        return (
+            f"{base_instruction} Return only one JSON object with exactly these "
+            "top-level keys: answer_label, choice_probabilities, answer_summary. "
+            "Do not include markdown."
         )
     raise ValueError(f"unsupported openai model task: {task}")
 
@@ -635,6 +669,20 @@ def _required_output_for_task(task: str) -> dict[str, Any]:
             "notes": [
                 "likelihoods must be an object keyed only by supplied hypothesis ids",
                 "quality_overrides may be an empty object",
+            ],
+        }
+    if task in {"answer_multiple_choice", "repair_multiple_choice_answer"}:
+        return {
+            "type": "MultipleChoiceAnswer",
+            "required_keys": [
+                "answer_label",
+                "choice_probabilities",
+                "answer_summary",
+            ],
+            "json_schema": MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA,
+            "notes": [
+                "choice_probabilities keys must exactly match the supplied labels",
+                "choice_probabilities must sum to one within 1e-3",
             ],
         }
     raise ValueError(f"unsupported openai model task: {task}")
@@ -873,6 +921,7 @@ def _sanitize_provider_error(message: str, api_key: str) -> str:
 
 __all__ = [
     "EVIDENCE_JUDGMENT_JSON_SCHEMA",
+    "MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA",
     "PROBE_SIGNAL_JSON_SCHEMA",
     "OpenAIChatCompletionsModelGateway",
     "OpenAIModelGatewayConfig",
