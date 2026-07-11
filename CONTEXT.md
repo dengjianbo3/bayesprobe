@@ -160,6 +160,14 @@ _Avoid_: deleting failed hypotheses, untracked hypothesis replacement
 The current set of hypotheses, posterior beliefs, scopes, rival relations, uncertainty, and update history maintained by BayesProbe.
 _Avoid_: Plan state, scratchpad, reasoning trace
 
+**Task Admission**:
+The pre-framing decision that a task is epistemically admissible, needs reframing, or is outside BayesProbe's current scope. It prevents non-epistemic prompts from creating a decorative Belief State.
+_Avoid_: universal task routing, framing every prompt, silent rejection
+
+**Epistemic Applicability Gate**:
+The rule that admits only tasks with a definable Answer Contract, revisable claims, and at least one possible discriminating probe.
+_Avoid_: universal language-task support, hypothesis generation as proof of applicability
+
 **Task Frame**:
 The explicit interpretation of a user's task that fixes the task kind, Answer Contract, and Hypothesis Frame before a Belief State is created.
 _Avoid_: prompt classification, implicit binary fallback, question text copied into H1/H2
@@ -172,13 +180,33 @@ _Avoid_: evidence context, passive signal, source claim
 The task-facing requirements an Answer Projection must satisfy, including its objective, required sections, decision form, and permitted synthesis.
 _Avoid_: output prompt, answer template, top-hypothesis restatement
 
+**Answer Relationship**:
+The declared relationship between belief claims and the task-facing answer: `selection` chooses an answer-candidate hypothesis, while `synthesis` constructs an answer from one or more supported claims.
+_Avoid_: hypothesis always equals answer, top claim always wins
+
 **Hypothesis Frame**:
-The task-scoped hypothesis set together with its relation semantics, rival links, coverage limitations, and framing provenance.
+The task-scoped hypothesis set together with its competition and coverage semantics, rival links, coverage limitations, and framing provenance.
 _Avoid_: untyped list of candidates, answer choices assumed for every task
 
-**Hypothesis Relation**:
-The rule describing whether hypotheses form one exclusive and exhaustive partition or carry independently revisable credences.
-_Avoid_: unconditional softmax, automatic all-to-all rivalry
+**Hypothesis Competition**:
+The rule describing whether named hypotheses compete exclusively or carry independently revisable credences.
+_Avoid_: competition implies exhaustiveness, unconditional softmax, automatic all-to-all rivalry
+
+**Hypothesis Coverage**:
+The rule describing whether the named hypothesis space is exhaustive or remains open to missing alternatives.
+_Avoid_: model candidate count as exhaustive proof, coverage inferred from competition
+
+**Unresolved Alternative**:
+The latent reserve for possibilities outside a named exclusive-open hypothesis set. It is not an ordinary hypothesis and cannot be selected as an answer.
+_Avoid_: H-other answer choice, renormalizing unresolved mass into named candidates
+
+**Frame Adequacy**:
+The current assessment of whether a Hypothesis Frame explains enough of the admitted signal history to support its Answer Contract or requires expansion.
+_Avoid_: highest posterior proves adequate, schema validity as epistemic adequacy
+
+**Exact-Answer Task**:
+An admitted task requiring a typed scalar or short-text answer without an explicit closed candidate list.
+_Avoid_: implicit multiple choice, exhaustive model guesses
 
 **Signal Provenance**:
 The source, derivation root, correlation group, parent signals, and content identity needed to judge whether a signal is external, derived, repeated, or independent.
@@ -196,9 +224,21 @@ _Avoid_: probe selector, generic source-tracing template
 The budget-aware module that chooses a bounded Probe Set from an existing Probe Candidate Pool without inventing evidence or updating belief.
 _Avoid_: probe designer, tool router
 
+**Capability Registry**:
+The run-scoped declaration of available probe capabilities and their provenance, cost, latency, and quality policies.
+_Avoid_: model impersonating tools, hidden capability fallback
+
 **Evidence Memory**:
 The compact cross-cycle record of accepted evidence identity, provenance, correlation, and lifecycle relevance needed for deterministic future belief revision.
 _Avoid_: raw chain of thought, ledger replacement, cycle-local seen set
+
+**Discovery Evidence**:
+A signal used to justify creating or expanding a hypothesis, which cannot immediately be reused as independent confirmation of that same hypothesis.
+_Avoid_: candidate proposal as proof, self-confirming hypothesis generation
+
+**Intervention**:
+A world-changing action such as applying a code patch, distinct from a Probe that seeks information. Intervention results may return as External Signals only after execution.
+_Avoid_: code mutation as probe, action result as immediate evidence
 
 **Projection Mode**:
 The declared relationship between a task-facing answer and the current Belief State: `selection` chooses one exclusive hypothesis, `synthesis` combines multiple supported hypotheses, and `abstention` reports that the Answer Contract cannot yet be met.
