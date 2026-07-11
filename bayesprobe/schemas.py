@@ -366,6 +366,15 @@ def _unique_semantic_texts(value: list[str], field_name: str) -> list[str]:
     return items
 
 
+def _unique_optional_semantic_texts(
+    value: list[str],
+    field_name: str,
+) -> list[str]:
+    if not value:
+        return []
+    return _unique_semantic_texts(value, field_name)
+
+
 class AnswerContractOutline(StrictTaskModel):
     objective: str
     answer_value_type: AnswerValueType
@@ -413,6 +422,7 @@ class TaskAdmissionDecision(StrictTaskModel):
 
     @model_validator(mode="after")
     def validate_status_contract(self) -> "TaskAdmissionDecision":
+        _reject_secret_material(self.model_trace)
         if self.status == TaskAdmissionStatus.ADMITTED:
             if self.proposed_task_kind is None:
                 raise ValueError("admitted decisions require proposed_task_kind")
@@ -500,6 +510,30 @@ class EvidenceMemorySnapshot(StrictTaskModel):
             raise ValueError("memory_version must be at least one")
         return value
 
+    @field_validator(
+        "accepted_evidence_ids",
+        "discovery_evidence_ids",
+        "discard_and_schema_history",
+    )
+    @classmethod
+    def clean_identity_lists(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        return _unique_optional_semantic_texts(value, info.field_name)
+
+    @field_validator("counterevidence_ids_by_hypothesis")
+    @classmethod
+    def clean_counterevidence_ids(
+        cls,
+        value: dict[str, list[str]],
+    ) -> dict[str, list[str]]:
+        return {
+            _required_text(hypothesis_id, "counterevidence hypothesis id"):
+            _unique_optional_semantic_texts(
+                evidence_ids,
+                "counterevidence_ids_by_hypothesis",
+            )
+            for hypothesis_id, evidence_ids in value.items()
+        }
+
 
 class SignalProvenance(StrictTaskModel):
     epistemic_origin: EpistemicOrigin
@@ -523,6 +557,11 @@ class SignalProvenance(StrictTaskModel):
     @classmethod
     def clean_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _required_text(value, info.field_name)
+
+    @field_validator("parent_signal_ids", "citations", "artifact_refs")
+    @classmethod
+    def clean_identity_lists(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        return _unique_optional_semantic_texts(value, info.field_name)
 
 
 class FrameMassUpdate(StrictTaskModel):
@@ -636,10 +675,7 @@ class FramedHypothesis(StrictTaskModel):
     @field_validator("falsifiers", "predictions")
     @classmethod
     def clean_semantic_lists(cls, value: list[str], info: ValidationInfo) -> list[str]:
-        items = [_required_text(item, info.field_name) for item in value]
-        if not items:
-            raise ValueError(f"{info.field_name} must not be empty")
-        return items
+        return _unique_semantic_texts(value, info.field_name)
 
 
 def _relation_mapping(
@@ -815,6 +851,20 @@ class TaskFrame(StrictTaskModel):
                 and self.answer_relationship != AnswerRelationship.SELECTION
             ):
                 raise ValueError("answer candidate tasks require selection")
+            if self.task_kind == TaskKind.EXACT_ANSWER:
+                if (
+                    self.hypothesis_frame.competition
+                    != HypothesisCompetition.EXCLUSIVE
+                    or self.hypothesis_frame.coverage != HypothesisCoverage.OPEN
+                ):
+                    raise ValueError(
+                        "exact-answer tasks require an exclusive-open frame"
+                    )
+            elif (
+                self.framing_method != FramingMethod.LEGACY_MIGRATION
+                and len(self.hypothesis_frame.hypotheses) < 2
+            ):
+                raise ValueError("new task frames require at least two hypotheses")
         return self
 
 

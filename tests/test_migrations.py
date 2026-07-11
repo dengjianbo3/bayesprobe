@@ -96,6 +96,14 @@ def test_migration_rejects_unknown_legacy_fields():
         migrate_task_frame_v0_1(payload)
 
 
+def test_migration_rejects_task_kind_absent_from_v01_vocabulary():
+    payload = legacy_mcq_frame_payload()
+    payload["task_kind"] = "exact_answer"
+
+    with pytest.raises(ValueError, match="task_kind"):
+        migrate_task_frame_v0_1(payload)
+
+
 def test_migrates_belief_state_with_frame_and_empty_memory():
     payload = {
         "belief_state_id": "legacy_belief",

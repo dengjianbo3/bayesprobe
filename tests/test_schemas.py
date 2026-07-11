@@ -12,6 +12,8 @@ from bayesprobe.schemas import (
     ChangeMyMindCondition,
     CycleRecord,
     CycleSignalShape,
+    EpistemicOrigin,
+    EvidenceMemorySnapshot,
     EvidenceEvent,
     EvidenceType,
     ExternalSignal,
@@ -30,6 +32,7 @@ from bayesprobe.schemas import (
     RunRecord,
     RunRegime,
     SignalKind,
+    SignalProvenance,
     TaskFrame,
     TaskAdmissionDecision,
     TaskAdmissionStatus,
@@ -118,6 +121,36 @@ def test_exact_answer_frame_accepts_one_initial_candidate():
     )
 
     assert [item.id for item in frame.hypothesis_frame.hypotheses] == ["H1"]
+
+
+@pytest.mark.parametrize(
+    ("competition", "coverage", "unresolved"),
+    [
+        (HypothesisCompetition.INDEPENDENT, HypothesisCoverage.OPEN, None),
+        (HypothesisCompetition.EXCLUSIVE, HypothesisCoverage.EXHAUSTIVE, 0.0),
+    ],
+)
+def test_exact_answer_frame_rejects_non_exclusive_open_shape(
+    competition,
+    coverage,
+    unresolved,
+):
+    with pytest.raises(
+        ValueError,
+        match="exact-answer tasks require an exclusive-open frame",
+    ):
+        make_v02_task_frame(
+            task_kind=TaskKind.EXACT_ANSWER,
+            competition=competition,
+            coverage=coverage,
+            priors=[0.5, 0.5],
+            unresolved=unresolved,
+        )
+
+
+def test_non_exact_v02_frame_rejects_one_initial_candidate():
+    with pytest.raises(ValueError, match="new task frames require at least two hypotheses"):
+        make_v02_task_frame(priors=[0.5], unresolved=0.5)
 
 
 def test_independent_frame_rejects_shared_unresolved_mass():
@@ -232,6 +265,116 @@ def test_task_admission_decision_accepts_complete_admission():
     )
 
     assert decision.status == TaskAdmissionStatus.ADMITTED
+
+
+def test_task_admission_decision_rejects_nested_dynamic_credential_trace():
+    credential_field = "api" + "_key"
+    credential_value = "sk-" + "runtimecredentialvalue"
+
+    with pytest.raises(ValueError, match="secret"):
+        TaskAdmissionDecision(
+            attempt_id="attempt_1",
+            status=TaskAdmissionStatus.ADMITTED,
+            epistemic_basis=["The task requests a bounded answer."],
+            proposed_task_kind=TaskKind.EXACT_ANSWER,
+            answer_contract_outline=AnswerContractOutline(
+                objective="Return the requested scalar.",
+                answer_value_type=AnswerValueType.NUMBER,
+                decision_form="exact_answer",
+                permits_synthesis=False,
+                required_sections=["answer"],
+            ),
+            reason="The task is admissible.",
+            model_trace={"nested": [{credential_field: credential_value}]},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("accepted_evidence_ids", ["E1", " e1 "]),
+        ("discovery_evidence_ids", ["D1", "d1"]),
+        ("discard_and_schema_history", ["accepted", " ACCEPTED "]),
+        ("accepted_evidence_ids", [" "]),
+    ],
+)
+def test_evidence_memory_rejects_invalid_identity_lists(field, value):
+    with pytest.raises(ValueError, match=field):
+        EvidenceMemorySnapshot(**{field: value})
+
+
+@pytest.mark.parametrize("value", [["E1", " e1 "], [""]])
+def test_evidence_memory_rejects_invalid_nested_counterevidence_ids(value):
+    with pytest.raises(ValueError, match="counterevidence_ids_by_hypothesis"):
+        EvidenceMemorySnapshot(counterevidence_ids_by_hypothesis={"H1": value})
+
+
+def _signal_provenance(**overrides) -> SignalProvenance:
+    return SignalProvenance(
+        epistemic_origin=EpistemicOrigin.RETRIEVED_SOURCE,
+        source_identity="source-1",
+        derivation_root_id="root-1",
+        correlation_group="group-1",
+        canonical_content_fingerprint="sha256:abc",
+        **overrides,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("parent_signal_ids", ["S1", " s1 "]),
+        ("citations", ["citation-1", " CITATION-1 "]),
+        ("artifact_refs", ["artifact-1", "artifact-1"]),
+        ("parent_signal_ids", [""]),
+    ],
+)
+def test_signal_provenance_rejects_invalid_identity_lists(field, value):
+    with pytest.raises(ValueError, match=field):
+        _signal_provenance(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("falsifiers", ["Contradicted by source A.", " contradicted BY source a. "]),
+        ("predictions", ["Prediction A.", "PREDICTION A."]),
+        ("falsifiers", [" "]),
+    ],
+)
+def test_framed_hypothesis_rejects_invalid_claim_lists(field, value):
+    payload = {
+        "id": "H1",
+        "statement": "Candidate one explains the observation.",
+        "type": "candidate",
+        "scope": "The stated task.",
+        "initial_prior": 0.5,
+        "falsifiers": ["Contradictory evidence appears."],
+        "predictions": ["The observation is reproduced."],
+        field: value,
+    }
+
+    with pytest.raises(ValueError, match=field):
+        FramedHypothesis(**payload)
+
+
+def test_list_contracts_strip_values_without_reordering():
+    memory = EvidenceMemorySnapshot(accepted_evidence_ids=[" E2 ", "E1"])
+    provenance = _signal_provenance(citations=[" citation-2 ", "citation-1"])
+    hypothesis = FramedHypothesis(
+        id="H1",
+        statement="Candidate one explains the observation.",
+        type="candidate",
+        scope="The stated task.",
+        initial_prior=0.5,
+        falsifiers=[" Second falsifier. ", "First falsifier."],
+        predictions=[" Second prediction. ", "First prediction."],
+    )
+
+    assert memory.accepted_evidence_ids == ["E2", "E1"]
+    assert provenance.citations == ["citation-2", "citation-1"]
+    assert hypothesis.falsifiers == ["Second falsifier.", "First falsifier."]
+    assert hypothesis.predictions == ["Second prediction.", "First prediction."]
 
 
 def test_v02_domain_contracts_are_publicly_exported():

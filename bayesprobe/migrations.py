@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +28,15 @@ from bayesprobe.schemas import (
 
 class _V01Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class _V01TaskKind(StrEnum):
+    MULTIPLE_CHOICE = "multiple_choice"
+    CLAIM_VERIFICATION = "claim_verification"
+    EXPLANATION = "explanation"
+    DIAGNOSIS = "diagnosis"
+    DESIGN = "design"
+    DECISION = "decision"
 
 
 class _V01AnswerContract(_V01Model):
@@ -58,7 +68,7 @@ class _V01HypothesisFrame(_V01Model):
 
 class _V01TaskFrame(_V01Model):
     task_frame_id: str
-    task_kind: TaskKind
+    task_kind: _V01TaskKind
     normalized_question: str
     task_context: str = ""
     answer_contract: _V01AnswerContract
@@ -207,7 +217,7 @@ def migrate_task_frame_v0_1(payload: Any) -> TaskFrame:
         schema_version="v0.2",
         task_frame_id=legacy.task_frame_id,
         admission_decision_id=f"{legacy.task_frame_id}_migration_admission",
-        task_kind=legacy.task_kind,
+        task_kind=TaskKind(legacy.task_kind.value),
         answer_relationship=answer_relationship,
         normalized_question=legacy.normalized_question,
         task_context=legacy.task_context,
