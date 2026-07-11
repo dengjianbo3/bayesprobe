@@ -7,14 +7,18 @@ from pathlib import Path
 import shutil
 import subprocess
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 
 import bayesprobe.webui as webui
+from bayesprobe.question_runner import NeedsReframingResult, OutOfScopeResult
+from bayesprobe.schemas import TaskAdmissionDecision, TaskAdmissionStatus
 from bayesprobe.webui import (
     create_handler_class,
     handle_autonomous_run_request,
     handle_autonomous_stream_request,
+    serialize_autonomous_run_result,
 )
 
 
@@ -77,6 +81,127 @@ def deterministic_answer_choices() -> list[dict[str, str]]:
         {"label": "H1", "text": "The deterministic fixture supports H1."},
         {"label": "H2", "text": "The deterministic fixture supports H2."},
     ]
+
+
+def tagged_admission_result(status: str, *, model_trace=None):
+    admission = TaskAdmissionDecision(
+        attempt_id=f"attempt-{status}",
+        status=TaskAdmissionStatus(status),
+        epistemic_basis=["The request stopped at task admission."],
+        clarification_questions=(
+            ["What concrete answer should BayesProbe evaluate?"]
+            if status == "needs_reframing"
+            else []
+        ),
+        reason="Admission stopped before epistemic framing.",
+        model_trace={},
+    )
+    if model_trace is not None:
+        admission = admission.model_copy(update={"model_trace": model_trace})
+    result_type = (
+        NeedsReframingResult if status == "needs_reframing" else OutOfScopeResult
+    )
+    return result_type(admission=admission)
+
+
+@pytest.mark.parametrize("status", ["needs_reframing", "out_of_scope"])
+def test_webui_serializes_tagged_admission_outcome_without_run_state(status):
+    payload = serialize_autonomous_run_result(tagged_admission_result(status))
+
+    assert payload["result_type"] == status
+    assert payload["admission"]["status"] == status
+    assert set(payload) == {"result_type", "admission"}
+    assert not {
+        "run",
+        "run_id",
+        "stop_reason",
+        "final_answer",
+        "task_frame",
+        "initial_belief_state",
+        "final_belief_state",
+        "cycles",
+    } & payload.keys()
+
+
+def test_webui_recursively_redacts_secrets_from_tagged_admission_outcome():
+    result = tagged_admission_result(
+        "needs_reframing",
+        model_trace={
+            "safe": {"adapter_kind": "openai"},
+            "transport": {
+                "api_key": "sk-abcdefghijklmnop",
+                "headers": [
+                    {"Authorization": "Bearer abcdefghijklmnop1234"},
+                ],
+            },
+        },
+    )
+
+    payload = serialize_autonomous_run_result(result)
+    serialized = json.dumps(payload).lower()
+
+    assert payload["admission"]["model_trace"]["safe"] == {
+        "adapter_kind": "openai"
+    }
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "sk-abcdefghijklmnop" not in serialized
+    assert "abcdefghijklmnop1234" not in serialized
+
+
+@pytest.mark.parametrize("status", ["needs_reframing", "out_of_scope"])
+def test_webui_http_returns_200_for_tagged_admission_outcome(monkeypatch, status):
+    result = tagged_admission_result(status)
+    prepared = SimpleNamespace(
+        runner=SimpleNamespace(run_question=lambda input: result),
+        input=SimpleNamespace(run_id=f"run-{status}"),
+        provider_kind="deterministic",
+    )
+    monkeypatch.setattr(
+        webui, "_prepare_autonomous_run", lambda *args, **kwargs: prepared
+    )
+
+    response_status, payload = handle_autonomous_run_request({"question": "Q"})
+
+    assert response_status == 200
+    assert payload == serialize_autonomous_run_result(result)
+
+
+@pytest.mark.parametrize("status", ["needs_reframing", "out_of_scope"])
+def test_webui_stream_terminates_with_only_tagged_admission_outcome(
+    monkeypatch, status
+):
+    result = tagged_admission_result(status)
+    prepared = SimpleNamespace(
+        runner=SimpleNamespace(run_question=lambda input: result),
+        input=SimpleNamespace(run_id=f"run-{status}"),
+        provider_kind="deterministic",
+    )
+    monkeypatch.setattr(
+        webui, "_prepare_autonomous_run", lambda *args, **kwargs: prepared
+    )
+    events = []
+
+    response_status, error = handle_autonomous_stream_request(
+        {"question": "Q"}, event_sink=events.append
+    )
+
+    assert response_status == 200
+    assert error is None
+    assert [event["event"] for event in events] == ["task_admission_completed"]
+    assert events == [
+        {
+            "event": "task_admission_completed",
+            "sequence": 1,
+            "timestamp": events[0]["timestamp"],
+            "run_id": f"run-{status}",
+            "cycle_id": None,
+            "cycle_index": None,
+            "data": serialize_autonomous_run_result(result),
+        }
+    ]
+    assert "run" not in events[0]["data"]
+    assert "final_belief_state" not in events[0]["data"]
 
 
 def test_webui_deterministic_autonomous_run_returns_trace():

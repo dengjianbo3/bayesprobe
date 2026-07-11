@@ -173,9 +173,12 @@ async function consumeRunStream(response, eventHandler = handleProgressEvent) {
         } catch (error) {
           throw new Error("Server returned an invalid progress event");
         }
+        const isTerminalAdmissionOutcome =
+          event.event === "task_admission_completed" &&
+          ["needs_reframing", "out_of_scope"].includes(event.data?.result_type);
         const isTerminalEvent = ["run_completed", "run_failed"].includes(
           event.event
-        );
+        ) || isTerminalAdmissionOutcome;
         if (isTerminalEvent) {
           terminalEventSeen = true;
           if (event.event === "run_failed") {
@@ -306,8 +309,13 @@ function renderProgressEvent(event) {
   }
 
   const eventName = event.event;
+  const isTerminalAdmissionOutcome =
+    eventName === "task_admission_completed" &&
+    ["needs_reframing", "out_of_scope"].includes(event.data?.result_type);
   const terminalState = eventName === "run_failed" ? "failed" :
-    eventName === "run_completed" ? "complete" : "active";
+    eventName === "run_completed" || isTerminalAdmissionOutcome
+      ? "complete"
+      : "active";
   const item = document.createElement("li");
   item.className = "progress-item";
   item.dataset.state = terminalState;
@@ -328,7 +336,7 @@ function renderProgressEvent(event) {
   item.append(sequence, meta, status);
   progressList.appendChild(item);
 
-  if (eventName === "run_completed") {
+  if (eventName === "run_completed" || isTerminalAdmissionOutcome) {
     progressState.textContent = "Completed";
   } else if (eventName === "run_failed") {
     progressState.textContent = "Failed";

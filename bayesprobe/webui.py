@@ -40,8 +40,10 @@ from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunResult,
     AutonomousQuestionRunner,
+    NeedsReframingResult,
+    OutOfScopeResult,
 )
-from bayesprobe.schemas import AnswerChoice
+from bayesprobe.schemas import AnswerChoice, redact_secret_material
 from bayesprobe.task_admission import (
     ExplicitTaskAdmitter,
     ModelTaskAdmitter,
@@ -148,7 +150,9 @@ def handle_autonomous_stream_request(
         return int(error.status_code), _error_payload(error.error_type, error.message)
 
     try:
-        prepared.runner.run_question(prepared.input)
+        result = prepared.runner.run_question(prepared.input)
+        if isinstance(result, (NeedsReframingResult, OutOfScopeResult)):
+            emitter.emit_admission_result(result, run_id=prepared.input.run_id)
     except TaskFramingError as error:
         if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
             emitter.emit_failure("provider_error", _provider_error_message(prepared.provider_kind))
@@ -171,8 +175,13 @@ def handle_autonomous_stream_request(
 
 
 def serialize_autonomous_run_result(
-    result: AutonomousQuestionRunResult,
+    result: AutonomousQuestionRunResult | NeedsReframingResult | OutOfScopeResult,
 ) -> dict[str, Any]:
+    if isinstance(result, (NeedsReframingResult, OutOfScopeResult)):
+        return {
+            "result_type": result.result_type,
+            "admission": redact_secret_material(result.admission),
+        }
     return {
         "run_id": result.run.run_id,
         "run": _dump_domain(result.run),
@@ -249,6 +258,25 @@ class _AutonomousProgressEventEmitter:
                         "message": _sanitize_error_message(message),
                     }
                 },
+            }
+        )
+
+    def emit_admission_result(
+        self,
+        result: NeedsReframingResult | OutOfScopeResult,
+        *,
+        run_id: str,
+    ) -> None:
+        self.sequence += 1
+        self._sink(
+            {
+                "event": "task_admission_completed",
+                "sequence": self.sequence,
+                "timestamp": _webui_timestamp(),
+                "run_id": run_id,
+                "cycle_id": None,
+                "cycle_index": None,
+                "data": serialize_autonomous_run_result(result),
             }
         )
 

@@ -312,3 +312,93 @@ exit 0
 
 None. WebUI tagged-result serialization and initialization probe design remain
 unchanged under their stated plan boundaries.
+
+## Review Fix 3
+
+### Changed Files
+
+- `bayesprobe/webui.py`
+- `bayesprobe/webui_static/app.js`
+- `tests/test_webui.py`
+- `tests/test_webui_stream.js`
+- `.superpowers/sdd/task-2-report.md`
+
+### RED Evidence
+
+Tagged serializer, HTTP, stream, state-absence, ordering, and recursive secret
+safety regressions:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_webui.py -q -p no:cacheprovider -k 'tagged_admission_outcome or recursively_redacts_secrets'
+7 failed, 87 deselected in 0.29s
+exit 1
+```
+
+Browser terminal-event compatibility:
+
+```text
+node --test tests/test_webui_stream.js
+14 passed, 1 failed in 102.02ms
+exit 1
+```
+
+The Python failures showed completed-run-only attribute access, HTTP 500
+responses, and an empty early-outcome stream. The Node failure showed that the
+browser rejected terminal `task_admission_completed` at EOF.
+
+### GREEN Evidence
+
+Targeted regression slice:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_webui.py -q -p no:cacheprovider -k 'tagged_admission_outcome or recursively_redacts_secrets'
+7 passed, 87 deselected in 0.18s
+exit 0
+```
+
+Complete WebUI Python suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_webui.py -q -p no:cacheprovider
+94 passed in 5.56s
+exit 0
+```
+
+Complete Task 2 focused Python suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py tests/test_initialization.py tests/test_openai_gateway.py tests/test_recorded_model_gateway.py tests/test_question_runner.py -q -p no:cacheprovider
+268 passed in 0.42s
+exit 0
+```
+
+Node stream suite:
+
+```text
+node --test tests/test_webui_stream.js
+15 passed in 100.94ms
+exit 0
+```
+
+### Full Offline Suite
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
+887 passed, 10 skipped in 7.62s
+exit 0
+```
+
+### Diff Hygiene
+
+```text
+git diff --check
+exit 0
+```
+
+### Concerns
+
+None for this compatibility fix. Task 11 still owns admitted-task admission
+progress, kernel policy/capability controls, complete v0.2 observability, and
+rich admission outcome presentation. The `app.js` change only recognizes the
+two tagged admission outcomes as successful terminal events and marks progress
+complete.

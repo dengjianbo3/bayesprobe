@@ -257,6 +257,33 @@ test("consumes split NDJSON chunks and unlocks a completed stream", async () => 
   assert.equal(stream.locked, false);
 });
 
+test("accepts a tagged task admission outcome as a successful terminal event", async () => {
+  const { api } = loadApp();
+  const event = {
+    event: "task_admission_completed",
+    sequence: 1,
+    run_id: "run-needs-reframing",
+    cycle_id: null,
+    cycle_index: null,
+    data: {
+      result_type: "needs_reframing",
+      admission: {
+        status: "needs_reframing",
+        clarification_questions: ["What concrete answer should be evaluated?"],
+      },
+    },
+  };
+  const stream = streamFromText(`${JSON.stringify(event)}\n`);
+  const received = [];
+
+  await api.consumeRunStream({ body: stream }, (progress) => {
+    received.push(progress.event);
+  });
+
+  assert.deepEqual(received, ["task_admission_completed"]);
+  assert.equal(stream.locked, false);
+});
+
 test("cancels and unlocks a stream after a malformed progress event", async () => {
   const { api } = loadApp();
   let cancelCalls = 0;
