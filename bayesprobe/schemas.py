@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+import math
+import re
+from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 def utc_now() -> datetime:
@@ -89,6 +99,220 @@ class EvolutionOperation(StrEnum):
     REACTIVATE = "reactivate"
 
 
+class TaskKind(StrEnum):
+    MULTIPLE_CHOICE = "multiple_choice"
+    CLAIM_VERIFICATION = "claim_verification"
+    EXPLANATION = "explanation"
+    DIAGNOSIS = "diagnosis"
+    DESIGN = "design"
+    DECISION = "decision"
+
+
+class HypothesisRelation(StrEnum):
+    EXCLUSIVE_EXHAUSTIVE = "exclusive_exhaustive"
+    INDEPENDENT = "independent"
+
+
+class FramingMethod(StrEnum):
+    EXPLICIT = "explicit"
+    MODEL = "model"
+    RECORDED = "recorded"
+    LEGACY_MIGRATION = "legacy_migration"
+
+
+def _required_text(value: str, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+    return value.strip()
+
+
+def _normalized_semantic_text(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def _reject_secret_material(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            if any(
+                part in normalized_key
+                for part in ("apikey", "authorization", "token", "secret")
+            ):
+                raise ValueError("framing_trace must not contain secret fields")
+            _reject_secret_material(item)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_secret_material(item)
+    elif isinstance(value, str) and re.search(
+        r"(?:^|\s)sk-[A-Za-z0-9_-]{12,}", value
+    ):
+        raise ValueError("framing_trace must not contain secret values")
+
+
+class StrictTaskModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AnswerChoice(StrictTaskModel):
+    label: str
+    text: str
+
+    @field_validator("label")
+    @classmethod
+    def clean_label(cls, value: str) -> str:
+        return _required_text(value, "answer choice label").upper()
+
+    @field_validator("text")
+    @classmethod
+    def clean_text(cls, value: str) -> str:
+        return _required_text(value, "answer choice text")
+
+
+class AnswerContract(StrictTaskModel):
+    objective: str
+    required_sections: list[str]
+    decision_form: str
+    permits_synthesis: bool = False
+
+    @field_validator("objective", "decision_form")
+    @classmethod
+    def clean_required_text(cls, value: str, info: ValidationInfo) -> str:
+        return _required_text(value, info.field_name)
+
+    @field_validator("required_sections")
+    @classmethod
+    def clean_required_sections(cls, value: list[str]) -> list[str]:
+        sections = [_required_text(item, "required section") for item in value]
+        if not sections or len(sections) != len(set(sections)):
+            raise ValueError("required_sections must be non-empty and unique")
+        return sections
+
+
+class FramedHypothesis(StrictTaskModel):
+    id: str
+    statement: str
+    type: str
+    scope: str
+    initial_prior: float
+    falsifiers: list[str]
+    predictions: list[str]
+
+    @field_validator("id", "statement", "type", "scope")
+    @classmethod
+    def clean_required_text(cls, value: str, info: ValidationInfo) -> str:
+        return _required_text(value, info.field_name)
+
+    @field_validator("initial_prior")
+    @classmethod
+    def validate_initial_prior(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("initial_prior must be between zero and one")
+        return value
+
+    @field_validator("falsifiers", "predictions")
+    @classmethod
+    def clean_semantic_lists(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        items = [_required_text(item, info.field_name) for item in value]
+        if not items:
+            raise ValueError(f"{info.field_name} must not be empty")
+        return items
+
+
+class HypothesisFrame(StrictTaskModel):
+    frame_id: str
+    relation: HypothesisRelation
+    hypotheses: list[FramedHypothesis]
+    rival_sets: dict[str, list[str]]
+    coverage_statement: str
+    unresolved_alternative_mass: float | None = None
+    coverage_limitation: str | None = None
+
+    @field_validator("frame_id", "coverage_statement")
+    @classmethod
+    def clean_required_text(cls, value: str, info: ValidationInfo) -> str:
+        return _required_text(value, info.field_name)
+
+    @field_validator("coverage_limitation")
+    @classmethod
+    def clean_optional_text(cls, value: str | None) -> str | None:
+        return None if value is None else _required_text(value, "coverage_limitation")
+
+    @field_validator("unresolved_alternative_mass")
+    @classmethod
+    def validate_alternative_mass(cls, value: float | None) -> float | None:
+        if value is not None and not 0 <= value <= 1:
+            raise ValueError("unresolved_alternative_mass must be between zero and one")
+        return value
+
+    @model_validator(mode="after")
+    def validate_frame(self) -> "HypothesisFrame":
+        if not 1 <= len(self.hypotheses) <= 6:
+            raise ValueError("hypothesis frame must contain between 1 and 6 hypotheses")
+        ids = [item.id for item in self.hypotheses]
+        if len(ids) != len(set(ids)):
+            raise ValueError("hypothesis ids must be unique")
+        statements = [_normalized_semantic_text(item.statement) for item in self.hypotheses]
+        if len(statements) != len(set(statements)):
+            raise ValueError("hypothesis statements must be semantically distinct")
+        if set(self.rival_sets) != set(ids):
+            raise ValueError("rival_sets must contain every hypothesis id exactly once")
+        for hypothesis_id, rivals in self.rival_sets.items():
+            unknown = set(rivals).difference(ids)
+            if unknown:
+                raise ValueError(f"unknown rival ids for {hypothesis_id}: {sorted(unknown)}")
+            if hypothesis_id in rivals:
+                raise ValueError("a hypothesis cannot rival itself")
+        if self.relation == HypothesisRelation.EXCLUSIVE_EXHAUSTIVE:
+            for hypothesis_id, rivals in self.rival_sets.items():
+                if set(rivals) != set(ids).difference({hypothesis_id}):
+                    raise ValueError("exclusive frames require all-to-all rival sets")
+            if not math.isclose(
+                sum(item.initial_prior for item in self.hypotheses),
+                1.0,
+                abs_tol=1e-6,
+            ):
+                raise ValueError("exclusive frame initial priors must sum to one")
+        return self
+
+
+class TaskFrame(StrictTaskModel):
+    task_frame_id: str
+    task_kind: TaskKind
+    normalized_question: str
+    task_context: str = ""
+    answer_contract: AnswerContract
+    hypothesis_frame: HypothesisFrame
+    framing_method: FramingMethod
+    framing_trace: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("task_frame_id", "normalized_question")
+    @classmethod
+    def clean_required_text(cls, value: str, info: ValidationInfo) -> str:
+        return _required_text(value, info.field_name)
+
+    @field_validator("task_context")
+    @classmethod
+    def clean_task_context(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("task_context must be a string")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_frame(self) -> "TaskFrame":
+        _reject_secret_material(self.framing_trace)
+        if (
+            self.framing_method != FramingMethod.LEGACY_MIGRATION
+            and len(self.hypothesis_frame.hypotheses) < 2
+        ):
+            raise ValueError("new task frames require at least two hypotheses")
+        if (
+            self.task_kind == TaskKind.MULTIPLE_CHOICE
+            and self.hypothesis_frame.relation != HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
+        ):
+            raise ValueError("multiple-choice tasks require an exclusive frame")
+        return self
+
+
 class RunBudget(BaseModel):
     max_cycles: int = 5
     max_tool_calls: int = 20
@@ -154,6 +378,7 @@ class BeliefState(BaseModel):
     posterior_summary: dict[str, Any] = Field(default_factory=dict)
     uncertainty_summary: str = ""
     ledger_refs: dict[str, list[str]] = Field(default_factory=dict)
+    task_frame: TaskFrame | None = None
 
     def hypotheses_by_id(self) -> dict[str, Hypothesis]:
         return {hypothesis.id: hypothesis for hypothesis in self.hypotheses}

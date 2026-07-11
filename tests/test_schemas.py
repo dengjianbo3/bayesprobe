@@ -1,12 +1,19 @@
+import pytest
+
 from bayesprobe.schemas import (
     BeliefState,
+    AnswerContract,
     ChangeMyMindCondition,
     CycleRecord,
     CycleSignalShape,
     EvidenceEvent,
     EvidenceType,
     ExternalSignal,
+    FramedHypothesis,
+    FramingMethod,
     Hypothesis,
+    HypothesisFrame,
+    HypothesisRelation,
     HypothesisStatus,
     LikelihoodBand,
     ProbeCandidate,
@@ -15,7 +22,73 @@ from bayesprobe.schemas import (
     RunRecord,
     RunRegime,
     SignalKind,
+    TaskFrame,
+    TaskKind,
 )
+
+
+def _open_task_frame() -> TaskFrame:
+    return TaskFrame(
+        task_frame_id="run_frame_task_frame",
+        task_kind=TaskKind.CLAIM_VERIFICATION,
+        normalized_question="How should the model-scale claim be tested?",
+        task_context="Evaluate on a frozen real-task distribution.",
+        answer_contract=AnswerContract(
+            objective="Design a discriminating validation protocol.",
+            required_sections=["hypotheses", "controls", "decision_rule"],
+            decision_form="experimental_protocol",
+            permits_synthesis=True,
+        ),
+        hypothesis_frame=HypothesisFrame(
+            frame_id="run_frame_hypothesis_frame",
+            relation=HypothesisRelation.INDEPENDENT,
+            hypotheses=[
+                FramedHypothesis(
+                    id="H1",
+                    statement="Scale has an independent positive effect.",
+                    type="causal_claim",
+                    scope="Matched agent and compute conditions.",
+                    initial_prior=0.5,
+                    falsifiers=["The controlled effect is negligible."],
+                    predictions=["Performance rises under matched controls."],
+                ),
+                FramedHypothesis(
+                    id="H2",
+                    statement="The apparent effect is caused by confounding.",
+                    type="confounding_explanation",
+                    scope="Unmatched published comparisons.",
+                    initial_prior=0.5,
+                    falsifiers=["The effect survives all matched controls."],
+                    predictions=["The effect shrinks after matching resources."],
+                ),
+            ],
+            rival_sets={"H1": [], "H2": []},
+            coverage_statement="Tests the causal claim and its main confounder.",
+            coverage_limitation="Other task-specific interactions may exist.",
+        ),
+        framing_method=FramingMethod.MODEL,
+        framing_trace={"task": "frame_open_question", "schema_version": "v0.1"},
+    )
+
+
+def test_task_frame_accepts_independent_open_hypotheses():
+    frame = _open_task_frame()
+    assert frame.hypothesis_frame.relation == HypothesisRelation.INDEPENDENT
+    assert [item.id for item in frame.hypothesis_frame.hypotheses] == ["H1", "H2"]
+
+
+@pytest.mark.parametrize(
+    "mutator, message",
+    [
+        (lambda frame: frame.model_copy(update={"answer_contract": frame.answer_contract.model_copy(update={"required_sections": []})}), "required_sections"),
+        (lambda frame: frame.model_copy(update={"hypothesis_frame": frame.hypothesis_frame.model_copy(update={"hypotheses": [frame.hypothesis_frame.hypotheses[0], frame.hypothesis_frame.hypotheses[1].model_copy(update={"id": "H1"})]})}), "ids must be unique"),
+        (lambda frame: frame.model_copy(update={"hypothesis_frame": frame.hypothesis_frame.model_copy(update={"rival_sets": {"H1": ["missing"], "H2": []}})}), "unknown rival"),
+        (lambda frame: frame.model_copy(update={"framing_trace": {"api_key": "forbidden"}}), "secret"),
+    ],
+)
+def test_task_frame_rejects_invalid_contract(mutator, message):
+    with pytest.raises(ValueError, match=message):
+        TaskFrame.model_validate(mutator(_open_task_frame()).model_dump())
 
 
 def test_minimal_run_cycle_and_belief_state_round_trip():
