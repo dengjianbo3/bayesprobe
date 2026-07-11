@@ -258,6 +258,27 @@ def test_webui_unseeded_open_question_is_framing_validation_before_provider_exec
     assert FakeWebUIChatOpenAI.created_with == []
 
 
+def test_webui_invalid_explicit_frame_is_validation_error_before_provider_execution():
+    FakeWebUIChatOpenAI.created_with = []
+
+    status, response = handle_autonomous_run_request(
+        {
+            "question": "Does one choice form a valid task frame?",
+            "answer_choices": [{"label": "A", "text": "Only choice"}],
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "model": "provider-model",
+            },
+        },
+        client_factory=FakeWebUIChatOpenAI,
+    )
+
+    assert status == 400
+    assert response["error"]["type"] == "validation_error"
+    assert FakeWebUIChatOpenAI.created_with == []
+
+
 def test_webui_materializes_explicit_frames_once_and_unseeded_frames_never(monkeypatch):
     materializations = 0
     original_frame = webui.ExplicitTaskFramer.frame

@@ -107,3 +107,54 @@ def test_explicit_framer_can_frame_without_materializing(monkeypatch):
         TaskFramingInput(run_id="run_open", question="How should this claim be tested?")
     )
     assert materializations == 0
+
+
+@pytest.mark.parametrize(
+    "input",
+    [
+        TaskFramingInput(
+            run_id="run_one_choice",
+            question="Which result follows?",
+            answer_choices=[AnswerChoice(label="A", text="First result")],
+        ),
+        TaskFramingInput(
+            run_id="run_one_seed",
+            question="Which explanation fits?",
+            hypothesis_seeds=[HypothesisSeed(statement="The only explanation.")],
+        ),
+        TaskFramingInput(
+            run_id="run_conflict",
+            question="Which explanation fits?",
+            answer_choices=[
+                AnswerChoice(label="A", text="First result"),
+                AnswerChoice(label="B", text="Second result"),
+            ],
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation.", prior=0.5),
+                HypothesisSeed(statement="The second explanation.", prior=0.5),
+            ],
+        ),
+        TaskFramingInput(
+            run_id="run_partial_priors",
+            question="Which explanation fits?",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation.", prior=0.5),
+                HypothesisSeed(statement="The second explanation."),
+            ],
+        ),
+        TaskFramingInput(
+            run_id="run_invalid_priors",
+            question="Which explanation fits?",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation.", prior=0.7),
+                HypothesisSeed(statement="The second explanation.", prior=0.7),
+            ],
+        ),
+    ],
+)
+def test_explicit_framer_capability_rejects_invalid_explicit_inputs(input):
+    framer = ExplicitTaskFramer()
+
+    assert not framer.can_frame(input)
+    with pytest.raises(TaskFramingError):
+        framer.frame(input)
