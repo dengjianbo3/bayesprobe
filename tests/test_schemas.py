@@ -17,6 +17,8 @@ from bayesprobe.schemas import (
     EvidenceEvent,
     EvidenceType,
     ExternalSignal,
+    FrameAdequacyStatus,
+    FrameState,
     FramedHypothesis,
     FramingMethod,
     HypothesisCompetition,
@@ -175,6 +177,58 @@ def test_independent_exhaustive_frame_is_valid_without_shared_mass():
     )
 
     assert frame.hypothesis_frame.coverage == HypothesisCoverage.EXHAUSTIVE
+
+
+def test_exhaustive_frame_rejects_positive_unresolved_mass():
+    with pytest.raises(
+        ValueError,
+        match="unresolved mass is legal only for exclusive-open frames",
+    ):
+        FrameState(
+            frame_id="frame_1",
+            competition=HypothesisCompetition.EXCLUSIVE,
+            coverage=HypothesisCoverage.EXHAUSTIVE,
+            active_hypothesis_ids=["H1", "H2"],
+            unresolved_alternative_mass=0.1,
+            adequacy_status=FrameAdequacyStatus.ADEQUATE,
+        )
+
+
+@pytest.mark.parametrize(
+    "native_fields",
+    [
+        {
+            "competition": HypothesisCompetition.EXCLUSIVE,
+            "coverage": HypothesisCoverage.EXHAUSTIVE,
+        },
+        {
+            "competition": HypothesisCompetition.INDEPENDENT,
+            "coverage": HypothesisCoverage.OPEN,
+        },
+    ],
+    ids=["consistent", "contradictory"],
+)
+def test_hypothesis_frame_rejects_mixed_legacy_and_native_relation_input(
+    native_fields,
+):
+    frame = make_v02_task_frame(
+        competition=HypothesisCompetition.EXCLUSIVE,
+        coverage=HypothesisCoverage.EXHAUSTIVE,
+        priors=[0.5, 0.5],
+        unresolved=0.0,
+    ).hypothesis_frame
+
+    with pytest.raises(
+        ValueError,
+        match="legacy relation cannot be combined with competition or coverage",
+    ):
+        HypothesisFrame.model_validate(
+            {
+                **frame.model_dump(mode="python"),
+                "relation": HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
+                **native_fields,
+            }
+        )
 
 
 def test_v02_belief_state_requires_frame_state_and_evidence_memory():
@@ -453,6 +507,33 @@ def test_task_frame_accepts_independent_open_hypotheses():
     frame = _open_task_frame()
     assert frame.hypothesis_frame.relation == HypothesisRelation.INDEPENDENT
     assert [item.id for item in frame.hypothesis_frame.hypotheses] == ["H1", "H2"]
+
+
+def test_v02_belief_state_rejects_nested_v01_task_frame():
+    legacy_frame = _open_task_frame()
+
+    with pytest.raises(
+        ValueError,
+        match="v0.2 belief state requires a v0.2 task_frame",
+    ):
+        BeliefState(
+            schema_version="v0.2",
+            belief_state_id="bs_1",
+            run_id="run_1",
+            cycle_id="cycle_1",
+            hypotheses=[],
+            task_frame=legacy_frame,
+            frame_state=FrameState(
+                frame_id=legacy_frame.hypothesis_frame.frame_id,
+                competition=legacy_frame.hypothesis_frame.competition,
+                coverage=legacy_frame.hypothesis_frame.coverage,
+                active_hypothesis_ids=[
+                    item.id for item in legacy_frame.hypothesis_frame.hypotheses
+                ],
+                adequacy_status=FrameAdequacyStatus.PROVISIONAL,
+            ),
+            evidence_memory=EvidenceMemorySnapshot(),
+        )
 
 
 @pytest.mark.parametrize(

@@ -489,6 +489,11 @@ class FrameState(StrictTaskModel):
         if self.competition == HypothesisCompetition.INDEPENDENT:
             if self.unresolved_alternative_mass is not None:
                 raise ValueError("independent frames do not use shared unresolved mass")
+        elif (
+            self.coverage == HypothesisCoverage.EXHAUSTIVE
+            and self.unresolved_alternative_mass not in {None, 0.0}
+        ):
+            raise ValueError("unresolved mass is legal only for exclusive-open frames")
         return self
 
 
@@ -704,10 +709,14 @@ class HypothesisFrame(StrictTaskModel):
         if not isinstance(value, Mapping) or "relation" not in value:
             return value
         payload = dict(value)
+        if "competition" in payload or "coverage" in payload:
+            raise ValueError(
+                "legacy relation cannot be combined with competition or coverage"
+            )
         relation = HypothesisRelation(payload.pop("relation"))
         competition, coverage = _relation_mapping(relation)
-        payload.setdefault("competition", competition)
-        payload.setdefault("coverage", coverage)
+        payload["competition"] = competition
+        payload["coverage"] = coverage
         return payload
 
     @field_validator("frame_id", "coverage_statement")
@@ -956,6 +965,12 @@ class BeliefState(BaseModel):
             raise ValueError("v0.2 belief state requires evidence_memory")
         if self.schema_version == "v0.2" and self.task_frame is None:
             raise ValueError("v0.2 belief state requires task_frame")
+        if (
+            self.schema_version == "v0.2"
+            and self.task_frame is not None
+            and self.task_frame.schema_version != "v0.2"
+        ):
+            raise ValueError("v0.2 belief state requires a v0.2 task_frame")
         return self
 
     def hypotheses_by_id(self) -> dict[str, Hypothesis]:
