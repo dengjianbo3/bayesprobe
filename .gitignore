@@ -13,3 +13,7 @@ venv/
 build/
 dist/
 *.egg-info/
+artifacts/restricted/
+.cache/huggingface/
+**/selection_manifest.json
+**/gold_store.json

@@ -265,13 +265,13 @@ class HLESelectionConfig:
     seed: str = "20260711"
 ```
 
-- [ ] Write synthetic RED tests for every eligibility rejection reason, choice parsing, literal `Answer Choices:` canonicalization, ambiguous/missing gold, and fewer-than-100 failure.
-- [ ] Write RED tests for floor-plus-largest-remainder category quotas, category-name tie-breaks, seeded within-category ranking, and final manifest order.
-- [ ] Write RED tests proving runtime cases omit gold/category/source metadata and `gold_store.json` contains only sample id plus canonical label.
-- [ ] Write RED tests that a non-full revision SHA is rejected and that lazy import emits an actionable `bayesprobe[hle]` error.
-- [ ] Implement a row-oriented pure `prepare_rows(...)` path first; make `load_dataset("cais/hle", split="test", revision=...)` a thin lazy adapter so unit tests never access Hugging Face.
-- [ ] Write restricted files with `os.open(..., 0o600)`, fsync, and atomic rename; create directories with `0o700`.
-- [ ] Add optional dependency:
+- [x] Write synthetic RED tests for every eligibility rejection reason, choice parsing, literal `Answer Choices:` canonicalization, ambiguous/missing gold, and fewer-than-100 failure.
+- [x] Write RED tests for floor-plus-largest-remainder category quotas, category-name tie-breaks, seeded within-category ranking, and final manifest order.
+- [x] Write RED tests proving runtime cases omit gold/category/source metadata and `gold_store.json` contains only sample id plus canonical label.
+- [x] Write RED tests that a non-full revision SHA is rejected and that lazy import emits an actionable `bayesprobe[hle]` error.
+- [x] Implement a row-oriented pure `prepare_rows(...)` path first; make `load_dataset("cais/hle", split="test", revision=...)` a thin lazy adapter so unit tests never access Hugging Face.
+- [x] Write restricted files with `os.open(..., 0o600)`, fsync, and atomic rename; create directories with `0o700`.
+- [x] Add optional dependency:
 
 ```toml
 hle = [
@@ -279,7 +279,7 @@ hle = [
 ]
 ```
 
-- [ ] Add ignore rules:
+- [x] Add ignore rules:
 
 ```gitignore
 artifacts/restricted/
@@ -288,7 +288,7 @@ artifacts/restricted/
 **/gold_store.json
 ```
 
-- [ ] Run:
+- [x] Run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_hle.py \
@@ -296,7 +296,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_hle.py \
 git check-ignore artifacts/restricted/hle-pilot-v0.1/gold_store.json
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add bayesprobe/evaluation/hle.py bayesprobe/evaluation/artifacts.py \

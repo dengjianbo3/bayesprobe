@@ -192,6 +192,16 @@ def test_pyproject_declares_optional_openai_extra_without_required_dependency():
     assert optional_dependencies["openai"] == ["openai>=1.0,<3"]
 
 
+def test_pyproject_declares_hle_dataset_loader_as_optional_dependency():
+    metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    dependencies = metadata["project"]["dependencies"]
+    optional_dependencies = metadata["project"]["optional-dependencies"]
+
+    assert all(not dependency.startswith("datasets") for dependency in dependencies)
+    assert optional_dependencies["hle"] == ["datasets>=3,<5"]
+
+
 def test_load_experiment_config_resolves_paths_relative_to_config_file(tmp_path: Path):
     config_dir = tmp_path / "experiments"
     config_dir.mkdir()
