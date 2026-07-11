@@ -42,12 +42,20 @@ from bayesprobe.question_runner import (
     AutonomousQuestionRunner,
 )
 from bayesprobe.schemas import AnswerChoice
+from bayesprobe.task_admission import (
+    ExplicitTaskAdmitter,
+    ModelTaskAdmitter,
+    RoutingTaskAdmitter,
+    TaskAdmissionError,
+    TaskAdmissionInput,
+)
 from bayesprobe.task_framing import (
     ExplicitTaskFramer,
     ModelTaskFramer,
     RoutingTaskFramer,
     TaskFramingError,
     TaskFramingInput,
+    parse_legacy_answer_choice_frame,
     validate_task_framing_input_security,
 )
 
@@ -503,18 +511,25 @@ def _prepare_autonomous_run(
             explicit_framer=ExplicitTaskFramer(),
             open_framer=ModelTaskFramer(gateway),
         )
+        task_admitter = RoutingTaskAdmitter(
+            explicit_admitter=ExplicitTaskAdmitter(),
+            open_admitter=ModelTaskAdmitter(gateway),
+        )
     else:
         task_framer = ExplicitTaskFramer()
+        task_admitter = ExplicitTaskAdmitter()
     return _PreparedAutonomousRun(
         runner=AutonomousQuestionRunner(
             core=core,
             initializer=BayesProbeInitializer(
                 ledger=core.ledger,
                 task_framer=task_framer,
+                task_admitter=task_admitter,
             ),
             executor=executor,
             config=request["runner_config"],
             progress_observer=progress_observer,
+            task_admitter=task_admitter,
         ),
         input=input,
         provider_kind=provider_kind,
@@ -522,11 +537,32 @@ def _prepare_autonomous_run(
 
 
 def _preflight_task_framing(input: InitializeRunInput) -> None:
+    answer_choices = list(input.answer_choices)
+    if not answer_choices:
+        parsed = parse_legacy_answer_choice_frame(input.problem)
+        if parsed is not None:
+            answer_choices = list(parsed.choices)
+    try:
+        admission = ExplicitTaskAdmitter().assess(
+            TaskAdmissionInput(
+                attempt_id=f"{input.run_id}_admission",
+                question=input.problem,
+                task_context=input.task_context,
+                answer_choices=answer_choices,
+                hypothesis_seeds=list(input.hypothesis_seeds),
+            )
+        )
+    except TaskAdmissionError:
+        raise TaskFramingError(
+            "unseeded open question requires a model or recorded task framer"
+        ) from None
     framing_input = TaskFramingInput(
         run_id=input.run_id,
         question=input.problem,
+        admission_decision=admission,
         task_context=input.task_context,
-        answer_choices=list(input.answer_choices),
+        answer_choices=answer_choices,
+        hypothesis_seeds=list(input.hypothesis_seeds),
     )
     if not ExplicitTaskFramer().can_frame(framing_input):
         raise TaskFramingError(
@@ -554,17 +590,31 @@ def _parse_autonomous_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         payload.get("task_context"), "task_context", default=""
     )
     answer_choices = _answer_choices_from_payload(payload.get("answer_choices"))
-    try:
-        validate_task_framing_input_security(
-            TaskFramingInput(
-                run_id="webui_request_validation",
-                question=question,
-                task_context=task_context,
-                answer_choices=answer_choices,
+    if answer_choices:
+        try:
+            admission = ExplicitTaskAdmitter().assess(
+                TaskAdmissionInput(
+                    attempt_id="webui_request_validation_admission",
+                    question=question,
+                    task_context=task_context,
+                    answer_choices=answer_choices,
+                )
             )
-        )
-    except TaskFramingError as error:
-        raise WebUIError(str(error)) from None
+            validate_task_framing_input_security(
+                TaskFramingInput(
+                    run_id="webui_request_validation",
+                    question=question,
+                    admission_decision=admission,
+                    task_context=task_context,
+                    answer_choices=answer_choices,
+                )
+            )
+        except TaskAdmissionError:
+            raise WebUIError(
+                "task framing input must not contain secret material"
+            ) from None
+        except TaskFramingError as error:
+            raise WebUIError(str(error)) from None
     provider = payload.get("provider", {"kind": "deterministic"})
     if provider is None:
         provider = {"kind": "deterministic"}

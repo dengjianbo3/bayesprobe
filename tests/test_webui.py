@@ -226,16 +226,37 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
     }
 
 
+def valid_admission_payload():
+    return {
+        "status": "admitted",
+        "epistemic_basis": ["The claim can be tested with discriminating hypotheses."],
+        "proposed_task_kind": "claim_verification",
+        "answer_contract_outline": {
+            "objective": "Return a discriminating validation protocol.",
+            "answer_value_type": "structured_text",
+            "decision_form": "experimental_protocol",
+            "permits_synthesis": True,
+            "required_sections": ["answer", "basis", "uncertainty"],
+        },
+        "clarification_questions": [],
+        "reason": "The task is verifiable.",
+    }
+
+
 def valid_open_frame_payload():
     return {
         "task_kind": "claim_verification",
+        "answer_relationship": "synthesis",
         "answer_contract": {
             "objective": "Design a discriminating validation protocol.",
+            "answer_value_type": "structured_text",
+            "answer_format": "structured validation protocol",
             "required_sections": ["hypotheses", "controls", "decision_rule"],
             "decision_form": "experimental_protocol",
             "permits_synthesis": True,
         },
-        "hypothesis_relation": "independent",
+        "competition": "independent",
+        "coverage": "open",
         "hypotheses": [
             {
                 "statement": "Scale has an independent effect under matched conditions.",
@@ -243,6 +264,7 @@ def valid_open_frame_payload():
                 "scope": "Matched task and resource conditions.",
                 "falsifiers": ["The controlled effect is negligible."],
                 "predictions": ["Matched performance rises with size."],
+                "answer_value": None,
             },
             {
                 "statement": "The apparent effect is materially confounded.",
@@ -250,6 +272,7 @@ def valid_open_frame_payload():
                 "scope": "Unmatched comparisons.",
                 "falsifiers": ["The effect survives matched controls."],
                 "predictions": ["The effect shrinks after matching."],
+                "answer_value": None,
             },
         ],
         "coverage_statement": "Covers the effect and its primary confounder.",
@@ -266,7 +289,9 @@ class FramingWebUIChatCompletions:
         request = json.loads(payload["messages"][1]["content"])
         self.requests.append(request)
         self.tasks.append(request["task"])
-        if request["task"] == "frame_open_question":
+        if request["task"] == "assess_task_admission":
+            content = valid_admission_payload()
+        elif request["task"] == "frame_open_question":
             content = valid_open_frame_payload()
         elif request["task"] == "execute_probe":
             content = {"raw_content": "A matched controlled test is required."}
@@ -305,7 +330,9 @@ class SecretRepairWebUIChatCompletions:
         request = json.loads(payload["messages"][1]["content"])
         self.tasks.append(request["task"])
         self.requests.append(request)
-        if request["task"] in {"frame_open_question", "repair_task_frame"}:
+        if request["task"] == "assess_task_admission":
+            content = valid_admission_payload()
+        elif request["task"] in {"frame_open_question", "repair_task_frame"}:
             content = deepcopy(valid_open_frame_payload())
             if request["task"] == "frame_open_question" or not self.repair_succeeds:
                 content["hypotheses"][0]["statement"] = (
@@ -368,14 +395,19 @@ def test_webui_provider_frames_open_question_before_exposing_belief():
     assert "belief_state" not in events[2]["data"]
     assert events[2]["data"]["task_frame"]["task_kind"] == "claim_verification"
     assert events[3]["data"]["belief_state"]["task_frame"] is not None
-    assert FramingWebUIChatOpenAI.completions.tasks[0] == "frame_open_question"
+    assert FramingWebUIChatOpenAI.completions.tasks[0] == "assess_task_admission"
     frame_request = FramingWebUIChatOpenAI.completions.tasks
-    assert frame_request[:3] == ["frame_open_question", "execute_probe", "judge_evidence"]
-    assert FramingWebUIChatOpenAI.completions.requests[0]["input"]["task_context"] == (
+    assert frame_request[:4] == [
+        "assess_task_admission",
+        "frame_open_question",
+        "execute_probe",
+        "judge_evidence",
+    ]
+    assert FramingWebUIChatOpenAI.completions.requests[1]["input"]["task_context"] == (
         "Design an experimental protocol for a research audience."
     )
     assert "An earlier benchmark showed a scale trend" not in json.dumps(
-        FramingWebUIChatOpenAI.completions.requests[0]
+        FramingWebUIChatOpenAI.completions.requests[1]
     )
 
 
@@ -405,14 +437,15 @@ def test_webui_secret_bearing_frame_is_repaired_without_reaching_stream_or_resul
     assert status == 200
     assert stream_status == 200
     assert stream_result is None
-    assert SecretRepairWebUIChatOpenAI.completions.tasks[:4] == [
+    assert SecretRepairWebUIChatOpenAI.completions.tasks[:5] == [
+        "assess_task_admission",
         "frame_open_question",
         "repair_task_frame",
         "execute_probe",
         "judge_evidence",
     ]
     assert SecretRepairWebUIChatCompletions.secret not in json.dumps(
-        SecretRepairWebUIChatOpenAI.completions.requests[1]
+        SecretRepairWebUIChatOpenAI.completions.requests[2]
     )
     assert SecretRepairWebUIChatCompletions.secret not in json.dumps(result)
     assert SecretRepairWebUIChatCompletions.secret not in json.dumps(events)
@@ -500,7 +533,8 @@ def test_webui_open_question_framing_uses_one_request_scoped_gateway():
     )
 
     assert status == 200
-    assert FramingWebUIChatOpenAI.completions.tasks[:3] == [
+    assert FramingWebUIChatOpenAI.completions.tasks[:4] == [
+        "assess_task_admission",
         "frame_open_question",
         "execute_probe",
         "judge_evidence",

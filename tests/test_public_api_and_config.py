@@ -213,10 +213,22 @@ def test_public_sdk_runs_autonomous_question_without_internal_imports():
 
 
 def test_public_sdk_configures_recorded_open_framing_without_internal_imports():
+    admission = bayesprobe.ExplicitTaskAdmitter().assess(
+        bayesprobe.TaskAdmissionInput(
+            attempt_id="public_recorded_fixture_admission",
+            question="Which explanation fits?",
+            task_context="Fixture context",
+            hypothesis_seeds=[
+                bayesprobe.HypothesisSeed(statement="The first explanation fits."),
+                bayesprobe.HypothesisSeed(statement="The second explanation fits."),
+            ],
+        )
+    )
     source_frame = bayesprobe.ExplicitTaskFramer().frame(
         bayesprobe.TaskFramingInput(
             run_id="public_recorded_fixture",
             question="Which explanation fits?",
+            admission_decision=admission,
             task_context="Fixture context",
             hypothesis_seeds=[
                 bayesprobe.HypothesisSeed(statement="The first explanation fits."),
@@ -239,7 +251,8 @@ def test_public_sdk_configures_recorded_open_framing_without_internal_imports():
             run_id="public_recorded_replay",
             problem="How should this open question be framed?",
             task_context="Current external caller context",
-        )
+        ),
+        admission_decision=admission,
     )
 
     assert model_framer is not None
