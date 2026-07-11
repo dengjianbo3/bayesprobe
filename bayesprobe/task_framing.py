@@ -279,10 +279,15 @@ class RecordedTaskFramer:
                 if source.answer_contract.permits_synthesis
                 else AnswerRelationship.SELECTION
             )
-            _validate_native_frame_invariants(
+            answer_contract = _canonicalize_native_frame(
                 task_kind=source.task_kind,
                 answer_relationship=answer_relationship,
                 answer_contract=source.answer_contract,
+                competition=source.hypothesis_frame.competition,
+                coverage=source.hypothesis_frame.coverage,
+                unresolved_alternative_mass=(
+                    source.hypothesis_frame.unresolved_alternative_mass
+                ),
                 hypotheses=source.hypothesis_frame.hypotheses,
                 admission_decision=input.admission_decision,
             )
@@ -306,7 +311,7 @@ class RecordedTaskFramer:
                 answer_relationship=answer_relationship,
                 normalized_question=question,
                 task_context=task_context,
-                answer_contract=source.answer_contract,
+                answer_contract=answer_contract,
                 hypothesis_frame=hypothesis_frame,
                 framing_method=FramingMethod.RECORDED,
                 framing_trace={
@@ -597,10 +602,13 @@ def task_frame_from_mapping(
         }
         for item in raw_hypotheses
     ]
-    _validate_native_frame_invariants(
+    answer_contract = _canonicalize_native_frame(
         task_kind=task_kind,
         answer_relationship=answer_relationship,
         answer_contract=answer_contract,
+        competition=competition,
+        coverage=coverage,
+        unresolved_alternative_mass=unresolved_mass,
         hypotheses=normalized_hypotheses,
         admission_decision=admission_decision,
     )
@@ -690,7 +698,7 @@ def _answer_value_matches_type(
     if answer_value_type == AnswerValueType.INTEGER:
         return type(value) is int
     if answer_value_type == AnswerValueType.NUMBER:
-        return type(value) in {int, float}
+        return type(value) in {int, float} and math.isfinite(value)
     if answer_value_type in {
         AnswerValueType.CHOICE_LABEL,
         AnswerValueType.SHORT_TEXT,
@@ -711,14 +719,17 @@ def _validate_native_hypothesis_count(task_kind: TaskKind, count: int) -> None:
         raise TaskFramingError("task frame must contain between 2 and 6 hypotheses")
 
 
-def _validate_native_frame_invariants(
+def _canonicalize_native_frame(
     *,
     task_kind: TaskKind,
     answer_relationship: AnswerRelationship,
     answer_contract: AnswerContract,
+    competition: HypothesisCompetition,
+    coverage: HypothesisCoverage,
+    unresolved_alternative_mass: float | None,
     hypotheses: list[FramedHypothesis] | list[dict[str, Any]],
     admission_decision: TaskAdmissionDecision,
-) -> None:
+) -> AnswerContract:
     if (
         admission_decision.status != TaskAdmissionStatus.ADMITTED
         or admission_decision.proposed_task_kind != task_kind
@@ -763,9 +774,18 @@ def _validate_native_frame_invariants(
 
     _validate_native_hypothesis_count(task_kind, len(hypotheses))
     if task_kind != TaskKind.EXACT_ANSWER:
-        return
+        return answer_contract.model_copy(update={"objective": outline.objective})
     if answer_relationship != AnswerRelationship.SELECTION:
         raise TaskFramingError("exact-answer framing requires answer selection")
+    if (
+        competition != HypothesisCompetition.EXCLUSIVE
+        or coverage != HypothesisCoverage.OPEN
+    ):
+        raise TaskFramingError("exact-answer framing requires exclusive-open coverage")
+    if unresolved_alternative_mass != 0.50:
+        raise TaskFramingError(
+            "exact-answer framing requires initial unresolved mass 0.50"
+        )
     answer_values = [
         hypothesis.answer_value
         if isinstance(hypothesis, FramedHypothesis)
@@ -786,6 +806,7 @@ def _validate_native_frame_invariants(
         answer_values
     ):
         raise TaskFramingError("exact-answer candidate values must be unique")
+    return answer_contract.model_copy(update={"objective": outline.objective})
 
 
 def _exclusive_open_priors(

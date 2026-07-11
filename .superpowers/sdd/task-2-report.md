@@ -507,3 +507,85 @@ requires the admitted sections as a subset, and still rejects replacement of
 answer value type, decision form, synthesis permission, task kind, answer
 relationship, or answer-candidate invariants. Open-task contracts retain their
 existing outline-to-native section refinement.
+
+## Review Fix 5
+
+### Changed Files
+
+- `bayesprobe/task_framing.py`
+- `tests/test_task_framing.py`
+- `.superpowers/sdd/task-2-report.md`
+
+### RED Evidence
+
+Exact-answer shape, admission-owned objective, and finite-number regressions:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_framing.py -q -p no:cacheprovider -k 'uses_admitted_objective or invalid_exact_answer_shape or non_finite_number or recorded_exact_answer_rejects_invalid_shape'
+15 failed, 9 passed, 114 deselected in 0.31s
+exit 1
+```
+
+The failures showed that model and recorded contracts retained provider-owned
+objectives, model and recorded number candidates accepted `NaN` and infinities,
+and recorded exact-answer frames accepted absent or non-default unresolved mass.
+The nine passing cases confirmed that existing construction-time validation
+already routed invalid competition, coverage, and relationship classifications
+through the model repair loop or rejected them for recorded replay.
+
+### GREEN Evidence
+
+Focused approval-gate regressions:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_framing.py -q -p no:cacheprovider -k 'uses_admitted_objective or invalid_exact_answer_shape or non_finite_number or recorded_exact_answer_rejects_invalid_shape'
+24 passed, 114 deselected in 0.14s
+exit 0
+```
+
+Complete framing suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_framing.py -q -p no:cacheprovider
+138 passed in 0.23s
+exit 0
+```
+
+Complete Task 2 focused suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py tests/test_initialization.py tests/test_openai_gateway.py tests/test_recorded_model_gateway.py tests/test_question_runner.py -q -p no:cacheprovider
+297 passed in 0.42s
+exit 0
+```
+
+WebUI Python integration suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_webui.py -q -p no:cacheprovider
+94 passed in 5.58s
+exit 0
+```
+
+Node stream integration suite:
+
+```text
+node --test tests/test_webui_stream.js
+15 passed in 90.50ms
+exit 0
+```
+
+Full offline suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
+916 passed, 10 skipped in 7.63s
+exit 0
+```
+
+### Concerns
+
+None. Model and recorded framing share one native canonicalization path for
+admission continuity, exact-answer shape, and candidate validation. Provider
+and recorded `answer_format` values and required-section supersets remain
+preserved; only the admitted objective is authoritative in the final contract.
