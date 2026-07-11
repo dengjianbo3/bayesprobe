@@ -121,6 +121,89 @@ PYTHON_CODE_REPAIR_JSON_SCHEMA: dict[str, Any] = {
     "properties": {"code": {"type": "string", "minLength": 1}},
 }
 
+OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "task_kind",
+        "answer_contract",
+        "hypothesis_relation",
+        "hypotheses",
+        "coverage_statement",
+        "coverage_limitation",
+    ],
+    "properties": {
+        "task_kind": {
+            "type": "string",
+            "enum": [
+                "claim_verification",
+                "explanation",
+                "diagnosis",
+                "design",
+                "decision",
+            ],
+        },
+        "answer_contract": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "objective",
+                "required_sections",
+                "decision_form",
+                "permits_synthesis",
+            ],
+            "properties": {
+                "objective": {"type": "string", "minLength": 1},
+                "required_sections": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                    "uniqueItems": True,
+                },
+                "decision_form": {"type": "string", "minLength": 1},
+                "permits_synthesis": {"type": "boolean"},
+            },
+        },
+        "hypothesis_relation": {
+            "type": "string",
+            "enum": ["exclusive_exhaustive", "independent"],
+        },
+        "hypotheses": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 6,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "statement",
+                    "type",
+                    "scope",
+                    "falsifiers",
+                    "predictions",
+                ],
+                "properties": {
+                    "statement": {"type": "string", "minLength": 1},
+                    "type": {"type": "string", "minLength": 1},
+                    "scope": {"type": "string", "minLength": 1},
+                    "falsifiers": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "minItems": 1,
+                    },
+                    "predictions": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "minItems": 1,
+                    },
+                },
+            },
+        },
+        "coverage_statement": {"type": "string", "minLength": 1},
+        "coverage_limitation": {"type": ["string", "null"]},
+    },
+}
+
 ENVIRONMENT_VARIABLE_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 EVIDENCE_JUDGMENT_SCHEMA_KEYS = frozenset(
     {"evidence_type", "likelihoods", "interpretation", "quality_overrides"}
@@ -648,6 +731,17 @@ def _instruction_for_task(task: str) -> str:
             "Repair the Python probe code using only the original code and sanitized "
             "execution error. Return one complete replacement script and no answer choice."
         )
+    if task == "frame_open_question":
+        return (
+            "Frame the supplied open question for BayesProbe before belief initialization. "
+            "Return 2-6 distinct, falsifiable hypotheses and an AnswerContract. "
+            "Do not assign ids, priors, posteriors, or claim external evidence."
+        )
+    if task == "repair_task_frame":
+        return (
+            "Repair the malformed BayesProbe open-question frame using the validation "
+            "error. Return one complete frame without ids, priors, or posteriors."
+        )
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -662,6 +756,8 @@ def _structured_output_for_task(task: str) -> tuple[str, dict[str, Any]]:
         return "PythonProbePlan", PYTHON_PROBE_PLAN_JSON_SCHEMA
     if task == "repair_python_probe_code":
         return "PythonCodeRepair", PYTHON_CODE_REPAIR_JSON_SCHEMA
+    if task in {"frame_open_question", "repair_task_frame"}:
+        return "OpenQuestionTaskFrame", OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -702,6 +798,12 @@ def _chat_instruction_for_task(task: str) -> str:
         return (
             f"{base_instruction} Return only one JSON object with exactly one "
             "top-level key: code. Do not include markdown."
+        )
+    if task in {"frame_open_question", "repair_task_frame"}:
+        return (
+            f"{base_instruction} Return only one JSON object with exactly these "
+            "top-level keys: task_kind, answer_contract, hypothesis_relation, "
+            "hypotheses, coverage_statement, coverage_limitation. Do not include markdown."
         )
     raise ValueError(f"unsupported openai model task: {task}")
 
@@ -769,6 +871,23 @@ def _required_output_for_task(task: str) -> dict[str, Any]:
             "required_keys": ["code"],
             "json_schema": PYTHON_CODE_REPAIR_JSON_SCHEMA,
             "notes": ["code must be one complete replacement Python script"],
+        }
+    if task in {"frame_open_question", "repair_task_frame"}:
+        return {
+            "type": "OpenQuestionTaskFrame",
+            "required_keys": [
+                "task_kind",
+                "answer_contract",
+                "hypothesis_relation",
+                "hypotheses",
+                "coverage_statement",
+                "coverage_limitation",
+            ],
+            "json_schema": OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA,
+            "notes": [
+                "hypotheses are semantic candidates rather than answer labels",
+                "do not assign hypothesis ids, priors, or posteriors",
+            ],
         }
     raise ValueError(f"unsupported openai model task: {task}")
 

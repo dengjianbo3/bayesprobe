@@ -83,6 +83,67 @@ def make_multiple_choice_request(
     )
 
 
+def make_open_question_frame_request() -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task="frame_open_question",
+        input={
+            "question": "How should this claim be tested?",
+            "task_context": "Use a frozen task distribution.",
+            "supported_task_kinds": ["claim_verification", "design"],
+            "supported_relations": ["exclusive_exhaustive", "independent"],
+            "hypothesis_count": {"minimum": 2, "maximum": 6},
+        },
+        prompt_id="open_question_task_framing",
+        prompt_version="v0.1",
+        schema_name="OpenQuestionTaskFrame",
+        schema_version="v0.1",
+    )
+
+
+def make_repair_task_frame_request() -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task="repair_task_frame",
+        input={
+            "original_request": make_open_question_frame_request().input,
+            "invalid_payload": {"hypotheses": []},
+            "validation_error": "at least two hypotheses are required",
+            "attempt_index": 1,
+        },
+        prompt_id="open_question_task_framing_repair",
+        prompt_version="v0.1",
+        schema_name="OpenQuestionTaskFrame",
+        schema_version="v0.1",
+        metadata={"repair_attempt_index": 1},
+    )
+
+
+def test_build_openai_payload_for_open_question_frame():
+    payload = build_openai_request_payload(
+        make_open_question_frame_request(),
+        model="test-model",
+    )
+
+    assert payload["text"]["format"]["name"] == "OpenQuestionTaskFrame"
+    schema = payload["text"]["format"]["schema"]
+    assert schema["properties"]["hypothesis_relation"]["enum"] == [
+        "exclusive_exhaustive",
+        "independent",
+    ]
+    assert "prior" not in json.dumps(schema)
+    assert "posterior" not in json.dumps(schema)
+
+
+def test_build_chat_payload_for_task_frame_repair():
+    payload = build_openai_chat_completions_payload(
+        make_repair_task_frame_request(),
+        model="test-model",
+    )
+
+    required_output = json.loads(payload["messages"][1]["content"])["required_output"]
+    assert required_output["type"] == "OpenQuestionTaskFrame"
+    assert payload["response_format"] == {"type": "json_object"}
+
+
 def test_openai_model_gateway_config_requires_explicit_model():
     config = OpenAIModelGatewayConfig(model="gpt-5.5")
 
