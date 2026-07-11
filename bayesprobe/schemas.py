@@ -422,7 +422,7 @@ class TaskAdmissionDecision(StrictTaskModel):
 
     @model_validator(mode="after")
     def validate_status_contract(self) -> "TaskAdmissionDecision":
-        _reject_secret_material(self.model_trace)
+        _reject_secret_material(self)
         if self.status == TaskAdmissionStatus.ADMITTED:
             if self.proposed_task_kind is None:
                 raise ValueError("admitted decisions require proposed_task_kind")

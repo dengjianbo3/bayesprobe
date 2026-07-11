@@ -265,6 +265,11 @@ class RecordedTaskFramer:
 
     def frame(self, input: TaskFramingInput) -> TaskFrame:
         validate_task_framing_input_security(input)
+        if self._frame.schema_version != "v0.2":
+            raise TaskFramingError(
+                "RecordedTaskFramer accepts only schema_version v0.2; "
+                "send v0.1 frames through the explicit migration API first"
+            )
         try:
             run_id = _required_seed_text(input.run_id, "run_id")
             question = _required_question(input.question)
@@ -463,6 +468,9 @@ def _open_frame_request(input: TaskFramingInput) -> StructuredModelRequest:
                 if kind != TaskKind.MULTIPLE_CHOICE
             ],
             "admitted_task_kind": input.admission_decision.proposed_task_kind.value,
+            "admitted_answer_contract_outline": (
+                _admitted_answer_contract_outline(input.admission_decision)
+            ),
             "supported_competition": [item.value for item in HypothesisCompetition],
             "supported_coverage": [item.value for item in HypothesisCoverage],
             "hypothesis_count": {"minimum": 1, "maximum": 6},
@@ -500,6 +508,9 @@ def _repair_frame_request(
                 if kind != TaskKind.MULTIPLE_CHOICE
             ],
             "admitted_task_kind": input.admission_decision.proposed_task_kind.value,
+            "admitted_answer_contract_outline": (
+                _admitted_answer_contract_outline(input.admission_decision)
+            ),
             "supported_competition": [item.value for item in HypothesisCompetition],
             "supported_coverage": [item.value for item in HypothesisCoverage],
             "hypothesis_count": {"minimum": 1, "maximum": 6},
@@ -525,6 +536,18 @@ def _trace_for(
             adapter_kind=adapter_kind,
         ).to_dict()
     )
+
+
+def _admitted_answer_contract_outline(
+    admission_decision: TaskAdmissionDecision,
+) -> dict[str, Any]:
+    outline = admission_decision.answer_contract_outline
+    if outline is None:
+        raise TaskFramingError("admitted task requires an answer contract outline")
+    sanitized = redact_secret_material(outline.model_dump(mode="json"))
+    if not isinstance(sanitized, dict):
+        raise TaskFramingError("admitted answer contract outline must be an object")
+    return sanitized
 
 
 def task_frame_from_mapping(
@@ -691,6 +714,15 @@ def _native_answer_value(value: Any) -> str | int | float | None:
     return value.strip() if isinstance(value, str) else value
 
 
+def _answer_value_uniqueness_key(
+    value: str | int | float,
+    answer_value_type: AnswerValueType,
+) -> tuple[str, str | int | float]:
+    if answer_value_type == AnswerValueType.NUMBER:
+        return ("number", value)
+    return (type(value).__name__, value)
+
+
 def _answer_value_matches_type(
     value: str | int | float,
     answer_value_type: AnswerValueType,
@@ -802,10 +834,24 @@ def _canonicalize_native_frame(
         raise TaskFramingError(
             "exact-answer candidate values must match answer_value_type"
         )
-    if len({(type(value).__name__, value) for value in answer_values}) != len(
-        answer_values
-    ):
+    if len(
+        {
+            _answer_value_uniqueness_key(value, answer_contract.answer_value_type)
+            for value in answer_values
+            if value is not None
+        }
+    ) != len(answer_values):
         raise TaskFramingError("exact-answer candidate values must be unique")
+    if all(isinstance(hypothesis, FramedHypothesis) for hypothesis in hypotheses):
+        expected_prior = round(0.50 / len(hypotheses), 12)
+        if any(
+            hypothesis.initial_prior != expected_prior
+            for hypothesis in hypotheses
+            if isinstance(hypothesis, FramedHypothesis)
+        ):
+            raise TaskFramingError(
+                "recorded exact-answer named priors must equal 0.50 / candidate count"
+            )
     return answer_contract.model_copy(update={"objective": outline.objective})
 
 
@@ -917,22 +963,16 @@ def _strict_recorded_task_frame(frame: TaskFrame) -> TaskFrame:
     )
     if type(payload["task_kind"]) is not TaskKind:
         raise TaskFramingError("recorded task_kind must be a TaskKind")
-    if payload["schema_version"] not in {"v0.1", "v0.2"}:
-        raise TaskFramingError("recorded schema_version must be v0.1 or v0.2")
-    if payload["schema_version"] == "v0.1":
-        if payload["admission_decision_id"] is not None:
-            raise TaskFramingError("recorded v0.1 admission_decision_id must be null")
-        if payload["answer_relationship"] is not None:
-            raise TaskFramingError("recorded v0.1 answer_relationship must be null")
-    else:
-        _native_required_text(
-            payload["admission_decision_id"],
-            "recorded admission_decision_id",
+    if payload["schema_version"] != "v0.2":
+        raise TaskFramingError("recorded schema_version must be v0.2")
+    _native_required_text(
+        payload["admission_decision_id"],
+        "recorded admission_decision_id",
+    )
+    if type(payload["answer_relationship"]) is not AnswerRelationship:
+        raise TaskFramingError(
+            "recorded answer_relationship must be an AnswerRelationship"
         )
-        if type(payload["answer_relationship"]) is not AnswerRelationship:
-            raise TaskFramingError(
-                "recorded answer_relationship must be an AnswerRelationship"
-            )
     if type(payload["framing_method"]) is not FramingMethod:
         raise TaskFramingError("recorded framing_method must be a FramingMethod")
     if type(payload["task_context"]) is not str:
@@ -1039,9 +1079,7 @@ def _strict_recorded_framed_hypothesis(value: Any) -> FramedHypothesis:
         or not 0 <= initial_prior <= 1
     ):
         raise TaskFramingError("recorded initial_prior must be a probability float")
-    answer_value = payload["answer_value"]
-    if answer_value is not None and type(answer_value) not in {str, int, float}:
-        raise TaskFramingError("recorded answer_value must be scalar or null")
+    answer_value = _native_answer_value(payload["answer_value"])
     return FramedHypothesis(
         id=_native_required_text(payload["id"], "recorded hypothesis id"),
         statement=_native_required_text(

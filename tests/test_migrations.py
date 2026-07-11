@@ -80,6 +80,16 @@ def test_migrates_legacy_exclusive_frame_to_exclusive_exhaustive():
     assert "relation" not in migrated.hypothesis_frame.model_dump()
 
 
+def test_explicit_migration_keeps_v01_fixture_compatibility():
+    payload = legacy_mcq_frame_payload()
+
+    migrated = migrate_task_frame_v0_1(payload)
+
+    assert payload["framing_trace"] == {"schema_version": "v0.1"}
+    assert migrated.schema_version == "v0.2"
+    assert migrated.task_frame_id == "legacy_task_frame"
+
+
 def test_migrates_legacy_independent_frame_to_independent_open():
     migrated = migrate_task_frame_v0_1(legacy_independent_frame_payload())
 

@@ -240,6 +240,33 @@ def test_exact_answer_framing_preserves_open_coverage():
     assert [item.answer_value for item in frame.hypothesis_frame.hypotheses] == [7, 9]
 
 
+def test_initial_and_repair_requests_include_secret_free_admitted_contract_outline():
+    decision = admitted_decision()
+    malformed = deepcopy(EXACT_ANSWER_FRAME)
+    malformed["task_kind"] = "decision"
+    gateway = QueueModelGateway([malformed, deepcopy(EXACT_ANSWER_FRAME)])
+
+    ModelTaskFramer(gateway).frame(
+        TaskFramingInput(
+            run_id="run_contract_request",
+            question="Which integer satisfies the constraints?",
+            admission_decision=decision,
+        )
+    )
+
+    expected = decision.answer_contract_outline.model_dump(mode="json")
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+    for request in gateway.requests:
+        assert request.input["admitted_answer_contract_outline"] == expected
+        serialized = json.dumps(request.input, sort_keys=True)
+        assert "sk-" not in serialized
+        assert "api_key" not in serialized
+        assert "password=" not in serialized
+
+
 def _exact_answer_frame_with_values(
     answer_value_type: str,
     values: list[str | int | float | bool],
@@ -1016,6 +1043,20 @@ def test_model_task_framer_calls_gateway_before_returning_frame():
             "decision",
         ],
         "admitted_task_kind": "claim_verification",
+        "admitted_answer_contract_outline": {
+            "objective": "Design a discriminating validation protocol.",
+            "answer_value_type": "structured_text",
+            "decision_form": "experimental_protocol",
+            "permits_synthesis": True,
+            "required_sections": [
+                "hypotheses",
+                "experimental_design",
+                "controls",
+                "metrics",
+                "decision_rule",
+                "limitations",
+            ],
+        },
         "supported_competition": ["exclusive", "independent"],
         "supported_coverage": ["exhaustive", "open"],
         "hypothesis_count": {"minimum": 1, "maximum": 6},
@@ -1406,6 +1447,25 @@ def _recorded_exact_answer_source():
     return frame, decision
 
 
+def test_recorded_task_framer_rejects_v01_with_explicit_migration_direction():
+    source, decision = _recorded_exact_answer_source()
+    source.__dict__["schema_version"] = "v0.1"
+    source.__dict__["admission_decision_id"] = None
+    source.__dict__["answer_relationship"] = None
+
+    with pytest.raises(
+        TaskFramingError,
+        match="v0.1.*explicit migration",
+    ):
+        RecordedTaskFramer(source).frame(
+            TaskFramingInput(
+                run_id="recorded_v01_replay",
+                question="Which integer satisfies the constraints?",
+                admission_decision=decision,
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "answer_values",
     [
@@ -1438,6 +1498,120 @@ def test_recorded_exact_answer_candidates_enforce_model_invariants(answer_values
             TaskFramingInput(
                 run_id="recorded_exact_replay",
                 question="Which integer satisfies the constraints?",
+                admission_decision=decision,
+            )
+        )
+
+
+def test_recorded_exact_answer_rejects_skewed_named_priors_with_unit_total_mass():
+    source, decision = _recorded_exact_answer_source()
+    source.hypothesis_frame.hypotheses[0].__dict__["initial_prior"] = 0.4
+    source.hypothesis_frame.hypotheses[1].__dict__["initial_prior"] = 0.1
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source).frame(
+            TaskFramingInput(
+                run_id="recorded_skewed_priors",
+                question="Which integer satisfies the constraints?",
+                admission_decision=decision,
+            )
+        )
+
+
+def test_recorded_text_answer_values_are_trimmed_before_materialization():
+    decision = admitted_decision(answer_value_type=AnswerValueType.SHORT_TEXT)
+    source = task_frame_from_mapping(
+        _exact_answer_frame_with_values("short_text", ["alpha", "beta"]),
+        run_id="recorded_text_fixture",
+        question="Which label satisfies the constraints?",
+        task_context="",
+        admission_decision=decision,
+        method="model",
+        trace={},
+    )
+    source.hypothesis_frame.hypotheses[0].__dict__["answer_value"] = "  alpha  "
+
+    frame = RecordedTaskFramer(source).frame(
+        TaskFramingInput(
+            run_id="recorded_trimmed_text",
+            question="Which label satisfies the constraints?",
+            admission_decision=decision,
+        )
+    )
+
+    assert [item.answer_value for item in frame.hypothesis_frame.hypotheses] == [
+        "alpha",
+        "beta",
+    ]
+
+
+def test_recorded_text_answer_values_reject_whitespace_only():
+    decision = admitted_decision(answer_value_type=AnswerValueType.SHORT_TEXT)
+    source = task_frame_from_mapping(
+        _exact_answer_frame_with_values("short_text", ["alpha", "beta"]),
+        run_id="recorded_blank_text_fixture",
+        question="Which label satisfies the constraints?",
+        task_context="",
+        admission_decision=decision,
+        method="model",
+        trace={},
+    )
+    source.hypothesis_frame.hypotheses[0].__dict__["answer_value"] = "   "
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source).frame(
+            TaskFramingInput(
+                run_id="recorded_blank_text",
+                question="Which label satisfies the constraints?",
+                admission_decision=decision,
+            )
+        )
+
+
+def test_number_candidates_treat_integer_and_equal_float_as_duplicates():
+    invalid = _exact_answer_frame_with_values("number", [7, 7.0])
+    gateway = QueueModelGateway(
+        [invalid, _exact_answer_frame_with_values("number", [7, 9.0])]
+    )
+
+    frame = ModelTaskFramer(gateway).frame(
+        TaskFramingInput(
+            run_id="number_equivalent_model_candidates",
+            question="Which number satisfies the constraints?",
+            admission_decision=admitted_decision(
+                answer_value_type=AnswerValueType.NUMBER
+            ),
+        )
+    )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+    assert [item.answer_value for item in frame.hypothesis_frame.hypotheses] == [
+        7,
+        9.0,
+    ]
+
+
+def test_recorded_number_candidates_reject_integer_and_equal_float_duplicates():
+    decision = admitted_decision(answer_value_type=AnswerValueType.NUMBER)
+    source = task_frame_from_mapping(
+        _exact_answer_frame_with_values("number", [7, 9.0]),
+        run_id="recorded_number_fixture",
+        question="Which number satisfies the constraints?",
+        task_context="",
+        admission_decision=decision,
+        method="model",
+        trace={},
+    )
+    source.hypothesis_frame.hypotheses[1].__dict__["answer_value"] = 7.0
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source).frame(
+            TaskFramingInput(
+                run_id="recorded_number_duplicates",
+                question="Which number satisfies the constraints?",
                 admission_decision=decision,
             )
         )

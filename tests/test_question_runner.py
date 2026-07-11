@@ -29,6 +29,7 @@ from bayesprobe.task_admission import (
     ExplicitTaskAdmitter,
     ModelTaskAdmitter,
     RoutingTaskAdmitter,
+    TaskAdmissionError,
 )
 from bayesprobe.schemas import (
     AnswerChoice,
@@ -192,6 +193,38 @@ def test_non_admitted_result_creates_no_belief_state(tmp_path: Path, status: str
     assert len(ledger.read_all("task_admission")) == 1
     for record_type in ("task_frame", "run", "cycle", "belief_state"):
         assert ledger.read_all(record_type) == []
+
+
+def test_secret_bearing_non_admission_never_reaches_ledger(tmp_path: Path):
+    secret_response = {
+        "status": "out_of_scope",
+        "epistemic_basis": ["The request is outside available capabilities."],
+        "proposed_task_kind": None,
+        "answer_contract_outline": None,
+        "clarification_questions": [],
+        "reason": "password=provider-value-123",
+    }
+    gateway = ScriptedModelGateway(
+        {
+            "assess_task_admission": secret_response,
+            "repair_task_admission": secret_response,
+        }
+    )
+    ledger_path = tmp_path / "secret-admission-decision.jsonl"
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(ledger=JsonlLedgerStore(ledger_path)),
+        task_admitter=ModelTaskAdmitter(gateway),
+    )
+
+    with pytest.raises(TaskAdmissionError, match="invalid after 1 repair attempt"):
+        runner.run_question(
+            InitializeRunInput(
+                run_id="run_secret_admission_decision",
+                problem="Handle this request.",
+            )
+        )
+
+    assert not ledger_path.exists()
 
 
 def test_open_question_framing_precedes_belief_initialization():

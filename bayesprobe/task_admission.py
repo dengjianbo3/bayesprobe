@@ -372,6 +372,7 @@ def _validate_admission_input(input: TaskAdmissionInput) -> None:
             "attempt_id": input.attempt_id,
             "question": input.question,
             "task_context": input.task_context,
+            "requested_output_shape": input.requested_output_shape,
             "answer_choices": input.answer_choices,
             "hypothesis_seeds": input.hypothesis_seeds,
             "available_capabilities": input.available_capabilities,

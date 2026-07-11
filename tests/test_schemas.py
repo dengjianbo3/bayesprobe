@@ -344,6 +344,65 @@ def test_task_admission_decision_rejects_nested_dynamic_credential_trace():
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "attempt_id": "attempt_admitted_basis",
+            "status": "admitted",
+            "epistemic_basis": ["Credential: provider-value-123"],
+            "proposed_task_kind": "exact_answer",
+            "answer_contract_outline": {
+                "objective": "Return the supported number.",
+                "answer_value_type": "number",
+                "decision_form": "single_value",
+                "permits_synthesis": False,
+                "required_sections": ["answer"],
+            },
+            "clarification_questions": [],
+            "reason": "The task has a bounded answer.",
+        },
+        {
+            "attempt_id": "attempt_admitted_contract",
+            "status": "admitted",
+            "epistemic_basis": ["The task has a bounded answer."],
+            "proposed_task_kind": "exact_answer",
+            "answer_contract_outline": {
+                "objective": "Return sk-abcdefghijklmnop.",
+                "answer_value_type": "number",
+                "decision_form": "single_value",
+                "permits_synthesis": False,
+                "required_sections": ["answer"],
+            },
+            "clarification_questions": [],
+            "reason": "The task has a bounded answer.",
+        },
+        {
+            "attempt_id": "attempt_reframe",
+            "status": "needs_reframing",
+            "epistemic_basis": ["The requested objective is underspecified."],
+            "proposed_task_kind": None,
+            "answer_contract_outline": None,
+            "clarification_questions": ["Authorization: Bearer abcdefghijklmnop1"],
+            "reason": "A clarification is required.",
+        },
+        {
+            "attempt_id": "attempt_scope",
+            "status": "out_of_scope",
+            "epistemic_basis": ["The request is outside available capabilities."],
+            "proposed_task_kind": None,
+            "answer_contract_outline": None,
+            "clarification_questions": [],
+            "reason": "password=provider-value-123",
+        },
+    ],
+    ids=["admitted_basis", "admitted_contract", "reframing", "out_of_scope"],
+)
+def test_task_admission_decision_rejects_secret_material_in_semantic_fields(payload):
+    with pytest.raises(ValueError, match="secret"):
+        TaskAdmissionDecision.model_validate(payload)
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("accepted_evidence_ids", ["E1", " e1 "]),
