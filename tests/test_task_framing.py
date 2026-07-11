@@ -17,7 +17,7 @@ from bayesprobe.task_framing import (
 class QueueModelGateway:
     adapter_kind = "queue_test"
 
-    def __init__(self, responses: list[dict]) -> None:
+    def __init__(self, responses: list[dict | Exception]) -> None:
         self.responses = list(responses)
         self.requests: list[StructuredModelRequest] = []
 
@@ -25,7 +25,10 @@ class QueueModelGateway:
         self.requests.append(request)
         if not self.responses:
             raise AssertionError(f"unexpected model task: {request.task}")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 VALID_OPEN_FRAME = {
@@ -335,6 +338,42 @@ def test_model_task_framer_fails_after_one_invalid_repair():
         )
 
 
+def test_model_task_framer_hides_initial_gateway_exception_details():
+    secret = "sk-initialgatewaycredential"
+    gateway = QueueModelGateway([RuntimeError(f"provider rejected {secret}")])
+
+    with pytest.raises(TaskFramingError) as captured:
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(run_id="run_gateway_initial", question="How should this be tested?")
+        )
+
+    _assert_secret_free_exception(captured.value, secret)
+    assert str(captured.value) == "task framing model gateway call failed"
+    assert [request.task for request in gateway.requests] == ["frame_open_question"]
+
+
+def test_model_task_framer_hides_repair_gateway_exception_details():
+    secret = "sk-repairgatewaycredential"
+    gateway = QueueModelGateway(
+        [
+            {"task_kind": "claim_verification", "hypotheses": []},
+            RuntimeError(f"provider rejected {secret}"),
+        ]
+    )
+
+    with pytest.raises(TaskFramingError) as captured:
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(run_id="run_gateway_repair", question="How should this be tested?")
+        )
+
+    _assert_secret_free_exception(captured.value, secret)
+    assert str(captured.value) == "task framing model gateway call failed"
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+
+
 def test_task_frame_from_mapping_rejects_provider_owned_beliefs():
     payload = {
         **VALID_OPEN_FRAME,
@@ -378,6 +417,23 @@ def test_recorded_task_framer_returns_a_run_specific_deep_copy():
     assert source_frame.framing_method.value == "explicit"
 
 
+def test_recorded_task_framer_scopes_trace_to_current_run_and_keeps_provenance():
+    source_frame = ModelTaskFramer(
+        ScriptedModelGateway({"frame_open_question": VALID_OPEN_FRAME})
+    ).frame(
+        TaskFramingInput(run_id="fixture_run", question="How should this be tested?")
+    )
+
+    frame = RecordedTaskFramer(source_frame).frame(
+        TaskFramingInput(run_id="replay_run", question="Replay this question.")
+    )
+
+    assert frame.framing_trace["metadata"]["run_id"] == "replay_run"
+    assert frame.framing_trace["recorded_from_task_frame_id"] == "fixture_run_task_frame"
+    assert frame.framing_trace["source_framing_method"] == "model"
+    assert frame.framing_trace["source_trace"]["metadata"]["run_id"] == "fixture_run"
+
+
 def test_routing_task_framer_keeps_explicit_mcq_off_the_model_gateway():
     gateway = QueueModelGateway([])
 
@@ -393,3 +449,19 @@ def test_routing_task_framer_keeps_explicit_mcq_off_the_model_gateway():
 
     assert frame.task_kind == TaskKind.MULTIPLE_CHOICE
     assert gateway.requests == []
+
+
+def _assert_secret_free_exception(error: BaseException, secret: str) -> None:
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        assert secret not in str(current)
+        assert secret not in repr(current)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)

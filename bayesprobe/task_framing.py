@@ -122,7 +122,7 @@ class ModelTaskFramer:
 
     def frame(self, input: TaskFramingInput) -> TaskFrame:
         request = _open_frame_request(input)
-        payload = self._model_gateway.complete_structured(request)
+        payload = self._complete_structured(request)
         try:
             return task_frame_from_mapping(
                 payload,
@@ -134,6 +134,16 @@ class ModelTaskFramer:
             )
         except (ValueError, ModelGatewayValidationError) as error:
             return self._repair_or_raise(input, request, payload, error)
+
+    def _complete_structured(
+        self,
+        request: StructuredModelRequest,
+    ) -> dict[str, Any]:
+        try:
+            return self._model_gateway.complete_structured(request)
+        except Exception:
+            pass
+        raise TaskFramingError("task framing model gateway call failed") from None
 
     def _repair_or_raise(
         self,
@@ -152,7 +162,7 @@ class ModelTaskFramer:
                 attempt_index,
                 self._repair_policy,
             )
-            payload = self._model_gateway.complete_structured(request)
+            payload = self._complete_structured(request)
             try:
                 return task_frame_from_mapping(
                     payload,
@@ -187,6 +197,12 @@ class RecordedTaskFramer:
                 "normalized_question": input.question.strip(),
                 "framing_method": FramingMethod.RECORDED,
                 "hypothesis_frame": hypothesis_frame,
+                "framing_trace": {
+                    "metadata": {"run_id": input.run_id},
+                    "recorded_from_task_frame_id": self._frame.task_frame_id,
+                    "source_framing_method": self._frame.framing_method.value,
+                    "source_trace": _secret_free_payload(self._frame.framing_trace),
+                },
             },
         )
 
