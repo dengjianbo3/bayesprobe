@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -49,16 +50,26 @@ class TaskAdmissionError(ValueError):
 
 class ExplicitTaskAdmitter:
     def can_assess(self, input: TaskAdmissionInput) -> bool:
-        return bool(input.answer_choices or input.hypothesis_seeds)
+        _reject_ambiguous_explicit_frame(input)
+        if input.answer_choices:
+            return _has_valid_answer_choices(input.answer_choices)
+        if input.hypothesis_seeds:
+            return _has_valid_hypothesis_seeds(input)
+        return False
 
     def assess(self, input: TaskAdmissionInput) -> TaskAdmissionDecision:
         _validate_admission_input(input)
+        _reject_ambiguous_explicit_frame(input)
         if input.answer_choices:
+            if not _has_valid_answer_choices(input.answer_choices):
+                raise TaskAdmissionError("invalid explicit answer-choice frame")
             task_kind = TaskKind.MULTIPLE_CHOICE
             value_type = AnswerValueType.CHOICE_LABEL
             objective = "Select the best-supported answer choice."
             decision_form = "answer_choice"
         elif input.hypothesis_seeds:
+            if not _has_valid_hypothesis_seeds(input):
+                raise TaskAdmissionError("invalid explicit hypothesis frame")
             task_kind = _explicit_seed_task_kind(input)
             value_type = AnswerValueType.STRUCTURED_TEXT
             objective = "Assess the supplied hypotheses against available evidence."
@@ -143,6 +154,7 @@ class RoutingTaskAdmitter:
         self._open_admitter = open_admitter
 
     def assess(self, input: TaskAdmissionInput) -> TaskAdmissionDecision:
+        _validate_admission_input(input)
         if self._explicit_admitter.can_assess(input):
             return self._explicit_admitter.assess(input)
         return self._open_admitter.assess(input)
@@ -244,6 +256,73 @@ def _explicit_seed_task_kind(input: TaskAdmissionInput) -> TaskKind:
         return TaskKind(value)
     except (TypeError, ValueError):
         raise TaskAdmissionError("invalid explicit task kind") from None
+
+
+def _reject_ambiguous_explicit_frame(input: TaskAdmissionInput) -> None:
+    if input.answer_choices and input.hypothesis_seeds:
+        raise TaskAdmissionError(
+            "provide answer choices or hypothesis seeds, not both"
+        )
+
+
+def _has_valid_answer_choices(choices: Any) -> bool:
+    if type(choices) is not list or not 2 <= len(choices) <= 6:
+        return False
+    if any(not isinstance(choice, AnswerChoice) for choice in choices):
+        return False
+    labels: list[str] = []
+    for choice in choices:
+        if (
+            not isinstance(choice.label, str)
+            or not choice.label.strip()
+            or not isinstance(choice.text, str)
+            or not choice.text.strip()
+        ):
+            return False
+        labels.append(choice.label.strip().casefold())
+    return len(labels) == len(set(labels))
+
+
+def _has_valid_hypothesis_seeds(input: TaskAdmissionInput) -> bool:
+    seeds = input.hypothesis_seeds
+    if type(seeds) is not list or not 2 <= len(seeds) <= 6:
+        return False
+    try:
+        from bayesprobe.task_framing import HypothesisSeed
+
+        statements: list[str] = []
+        ids: list[str] = []
+        for seed in seeds:
+            if not isinstance(seed, HypothesisSeed):
+                return False
+            if not isinstance(seed.statement, str) or not seed.statement.strip():
+                return False
+            statements.append(" ".join(seed.statement.casefold().split()))
+            if seed.id is not None:
+                if not isinstance(seed.id, str) or not seed.id.strip():
+                    return False
+                ids.append(seed.id.strip())
+            if seed.scope is not None and not isinstance(seed.scope, str):
+                return False
+            if seed.prior is not None and (
+                type(seed.prior) not in {int, float}
+                or not math.isfinite(seed.prior)
+                or not 0 <= seed.prior <= 1
+            ):
+                return False
+            for texts in (seed.falsifiers, seed.predictions):
+                if type(texts) is not list or any(
+                    not isinstance(text, str) or not text.strip() for text in texts
+                ):
+                    return False
+        if len(statements) != len(set(statements)):
+            return False
+        if len(ids) != len(set(ids)):
+            return False
+        _explicit_seed_task_kind(input)
+    except (TaskAdmissionError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _validate_admission_input(input: TaskAdmissionInput) -> None:

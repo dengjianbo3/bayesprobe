@@ -227,3 +227,88 @@ exit 0
 
 None. Initial open-probe discrimination and frame coverage remain unchanged for
 Task 5, per the explicit plan-boundary decision.
+
+## Review Fix 2
+
+### Changed Files
+
+- `bayesprobe/task_admission.py`
+- `bayesprobe/task_framing.py`
+- `tests/test_task_admission.py`
+- `tests/test_task_framing.py`
+- `.superpowers/sdd/task-2-report.md`
+
+### RED Evidence
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py -q -p no:cacheprovider -k 'invalid_explicit_material or simultaneous_choices_and_seeds or valid_hypothesis_seeds or candidates_accept_values_matching_contract_type or provider_replacement_contract or recorded_exact_answer_candidates or recorded_frame_contract'
+13 failed, 7 passed, 104 deselected in 0.24s
+exit 1
+```
+
+The failures demonstrated that underspecified and malformed explicit material
+bypassed model admission, simultaneous choices and seeds were silently treated
+as MCQ input, provider replacement contracts were accepted, and recorded null,
+duplicate, type-mismatched, and admission-incompatible exact-answer frames were
+accepted.
+
+### GREEN Evidence
+
+Regression slice:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py -q -p no:cacheprovider -k 'invalid_explicit_material or simultaneous_choices_and_seeds or valid_hypothesis_seeds or candidates_accept_values_matching_contract_type or provider_replacement_contract or recorded_exact_answer_candidates or recorded_frame_contract'
+20 passed, 104 deselected in 0.14s
+exit 0
+```
+
+Owned admission and framing tests:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py -q -p no:cacheprovider
+124 passed in 0.23s
+exit 0
+```
+
+Complete Task 2 focused suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py tests/test_initialization.py tests/test_openai_gateway.py tests/test_recorded_model_gateway.py tests/test_question_runner.py -q -p no:cacheprovider
+268 passed in 0.40s
+exit 0
+```
+
+### Full Offline Suite
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
+880 passed, 10 skipped in 7.64s
+exit 0
+```
+
+### Diff Hygiene
+
+```text
+git diff --check
+exit 0
+```
+
+### Self-Review
+
+- Model and recorded framing now share task-kind, contract-continuity,
+  hypothesis-count, and exact-answer presence/type/uniqueness validation.
+- Exact-answer contracts preserve admitted objective terms and required sections;
+  open domain contracts retain their intended outline-to-native refinement.
+- Explicit framing materializes its contract from the admitted outline, so a
+  recorded native frame cannot inherit a locally replaced contract.
+- Routing invokes explicit admission only for a validated two-to-six choice or
+  hypothesis frame, routes malformed/underspecified single-mode material to
+  model admission, and rejects simultaneous modes without a model call.
+- One-repair behavior, recursive secret validation, v0.1 recorded migration
+  acceptance, and valid explicit MCQ/hypothesis-seed no-model-call paths remain
+  covered and passing.
+
+### Concerns
+
+None. WebUI tagged-result serialization and initialization probe design remain
+unchanged under their stated plan boundaries.

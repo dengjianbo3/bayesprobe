@@ -270,10 +270,18 @@ class RecordedTaskFramer:
 
         try:
             source = _strict_recorded_task_frame(self._frame)
-            if source.task_kind != input.admission_decision.proposed_task_kind:
-                raise TaskFramingError(
-                    "recorded frame must match the admitted task kind"
-                )
+            answer_relationship = source.answer_relationship or (
+                AnswerRelationship.SYNTHESIS
+                if source.answer_contract.permits_synthesis
+                else AnswerRelationship.SELECTION
+            )
+            _validate_native_frame_invariants(
+                task_kind=source.task_kind,
+                answer_relationship=answer_relationship,
+                answer_contract=source.answer_contract,
+                hypotheses=source.hypothesis_frame.hypotheses,
+                admission_decision=input.admission_decision,
+            )
             hypothesis_frame = HypothesisFrame(
                 frame_id=f"{run_id}_hypothesis_frame",
                 competition=source.hypothesis_frame.competition,
@@ -291,14 +299,7 @@ class RecordedTaskFramer:
                 task_frame_id=f"{run_id}_task_frame",
                 admission_decision_id=input.admission_decision.attempt_id,
                 task_kind=source.task_kind,
-                answer_relationship=(
-                    source.answer_relationship
-                    or (
-                        AnswerRelationship.SYNTHESIS
-                        if source.answer_contract.permits_synthesis
-                        else AnswerRelationship.SELECTION
-                    )
-                ),
+                answer_relationship=answer_relationship,
                 normalized_question=question,
                 task_context=task_context,
                 answer_contract=source.answer_contract,
@@ -554,13 +555,7 @@ def task_frame_from_mapping(
         or admission_decision.proposed_task_kind != task_kind
     ):
         raise TaskFramingError("task frame must match the admitted task kind")
-    minimum_count = 1 if task_kind == TaskKind.EXACT_ANSWER else 2
-    if not minimum_count <= len(raw_hypotheses) <= 6:
-        if task_kind == TaskKind.EXACT_ANSWER:
-            raise TaskFramingError(
-                "exclusive-open framing requires one to six candidates"
-            )
-        raise TaskFramingError("task frame must contain between 2 and 6 hypotheses")
+    _validate_native_hypothesis_count(task_kind, len(raw_hypotheses))
 
     ids = [f"H{index}" for index in range(1, len(raw_hypotheses) + 1)]
     unresolved_mass = None
@@ -588,24 +583,13 @@ def task_frame_from_mapping(
         }
         for item in raw_hypotheses
     ]
-    if task_kind == TaskKind.EXACT_ANSWER:
-        answer_values = [item["answer_value"] for item in normalized_hypotheses]
-        if any(value is None for value in answer_values):
-            raise TaskFramingError("exact-answer candidates require answer_value")
-        if any(
-            not _answer_value_matches_type(
-                value,
-                answer_contract.answer_value_type,
-            )
-            for value in answer_values
-        ):
-            raise TaskFramingError(
-                "exact-answer candidate values must match answer_value_type"
-            )
-        if len({(type(value).__name__, value) for value in answer_values}) != len(
-            answer_values
-        ):
-            raise TaskFramingError("exact-answer candidate values must be unique")
+    _validate_native_frame_invariants(
+        task_kind=task_kind,
+        answer_relationship=answer_relationship,
+        answer_contract=answer_contract,
+        hypotheses=normalized_hypotheses,
+        admission_decision=admission_decision,
+    )
     coverage_statement = _native_required_text(
         payload["coverage_statement"], "coverage_statement"
     )
@@ -700,6 +684,104 @@ def _answer_value_matches_type(
     }:
         return type(value) is str
     return False
+
+
+def _validate_native_hypothesis_count(task_kind: TaskKind, count: int) -> None:
+    if task_kind == TaskKind.EXACT_ANSWER:
+        if not 1 <= count <= 6:
+            raise TaskFramingError(
+                "exclusive-open framing requires one to six candidates"
+            )
+        return
+    if not 2 <= count <= 6:
+        raise TaskFramingError("task frame must contain between 2 and 6 hypotheses")
+
+
+def _validate_native_frame_invariants(
+    *,
+    task_kind: TaskKind,
+    answer_relationship: AnswerRelationship,
+    answer_contract: AnswerContract,
+    hypotheses: list[FramedHypothesis] | list[dict[str, Any]],
+    admission_decision: TaskAdmissionDecision,
+) -> None:
+    if (
+        admission_decision.status != TaskAdmissionStatus.ADMITTED
+        or admission_decision.proposed_task_kind != task_kind
+    ):
+        raise TaskFramingError("task frame must match the admitted task kind")
+    outline = admission_decision.answer_contract_outline
+    if outline is None:
+        raise TaskFramingError("admitted task requires an answer contract outline")
+    if answer_contract.answer_value_type != outline.answer_value_type:
+        raise TaskFramingError(
+            "task frame answer value type must match the admitted contract"
+        )
+    if _normalized_semantic_text(answer_contract.decision_form) != (
+        _normalized_semantic_text(outline.decision_form)
+    ):
+        raise TaskFramingError(
+            "task frame decision form must match the admitted contract"
+        )
+    if answer_contract.permits_synthesis is not outline.permits_synthesis:
+        raise TaskFramingError(
+            "task frame synthesis permission must match the admitted contract"
+        )
+    if task_kind == TaskKind.EXACT_ANSWER:
+        admitted_objective_terms = _semantic_terms(outline.objective)
+        framed_objective_terms = _semantic_terms(answer_contract.objective)
+        if not admitted_objective_terms <= framed_objective_terms:
+            raise TaskFramingError(
+                "task frame objective must preserve the admitted contract"
+            )
+        framed_sections = {
+            _normalized_semantic_text(section)
+            for section in answer_contract.required_sections
+        }
+        admitted_sections = {
+            _normalized_semantic_text(section) for section in outline.required_sections
+        }
+        if framed_sections != admitted_sections:
+            raise TaskFramingError(
+                "task frame required sections must match the admitted contract"
+            )
+    if (
+        answer_relationship == AnswerRelationship.SYNTHESIS
+        and not answer_contract.permits_synthesis
+    ):
+        raise TaskFramingError(
+            "task frame synthesis relationship requires synthesis permission"
+        )
+
+    _validate_native_hypothesis_count(task_kind, len(hypotheses))
+    if task_kind != TaskKind.EXACT_ANSWER:
+        return
+    if answer_relationship != AnswerRelationship.SELECTION:
+        raise TaskFramingError("exact-answer framing requires answer selection")
+    answer_values = [
+        hypothesis.answer_value
+        if isinstance(hypothesis, FramedHypothesis)
+        else hypothesis["answer_value"]
+        for hypothesis in hypotheses
+    ]
+    if any(value is None for value in answer_values):
+        raise TaskFramingError("exact-answer candidates require answer_value")
+    if any(
+        not _answer_value_matches_type(value, answer_contract.answer_value_type)
+        for value in answer_values
+        if value is not None
+    ):
+        raise TaskFramingError(
+            "exact-answer candidate values must match answer_value_type"
+        )
+    if len({(type(value).__name__, value) for value in answer_values}) != len(
+        answer_values
+    ):
+        raise TaskFramingError("exact-answer candidate values must be unique")
+
+
+def _semantic_terms(value: str) -> set[str]:
+    return set(re.findall(r"\w+", value.casefold()))
 
 
 def _exclusive_open_priors(
@@ -1195,12 +1277,9 @@ def _frame_choices(
         answer_relationship=AnswerRelationship.SELECTION,
         normalized_question=normalized_question,
         task_context=task_context,
-        answer_contract=AnswerContract(
-            objective="Select the best-supported answer choice.",
-            answer_value_type=AnswerValueType.CHOICE_LABEL,
+        answer_contract=_contract_from_admission(
+            input.admission_decision,
             answer_format="choice label",
-            required_sections=["selected_answer", "justification"],
-            decision_form="answer_choice",
         ),
         hypothesis_frame=HypothesisFrame(
             frame_id=f"{input.run_id}_hypothesis_frame",
@@ -1264,13 +1343,9 @@ def _frame_seeds(
         ),
         normalized_question=prepared.normalized_question,
         task_context=prepared.task_context,
-        answer_contract=AnswerContract(
-            objective="Assess the explicit hypotheses against available evidence.",
-            answer_value_type=AnswerValueType.STRUCTURED_TEXT,
+        answer_contract=_contract_from_admission(
+            input.admission_decision,
             answer_format="structured text",
-            required_sections=["hypotheses", "evidence", "decision"],
-            decision_form="hypothesis_assessment",
-            permits_synthesis=relation == HypothesisRelation.INDEPENDENT,
         ),
         hypothesis_frame=HypothesisFrame(
             frame_id=f"{input.run_id}_hypothesis_frame",
@@ -1288,6 +1363,24 @@ def _required_seed_text(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise TaskFramingError(f"{field_name} must not be empty")
     return value.strip()
+
+
+def _contract_from_admission(
+    admission_decision: TaskAdmissionDecision,
+    *,
+    answer_format: str,
+) -> AnswerContract:
+    outline = admission_decision.answer_contract_outline
+    if outline is None:
+        raise TaskFramingError("admitted task requires an answer contract outline")
+    return AnswerContract(
+        objective=outline.objective,
+        answer_value_type=outline.answer_value_type,
+        answer_format=answer_format,
+        required_sections=list(outline.required_sections),
+        decision_form=outline.decision_form,
+        permits_synthesis=outline.permits_synthesis,
+    )
 
 
 def _hypothesis_ids(seeds: list[HypothesisSeed]) -> list[str]:

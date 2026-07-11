@@ -101,22 +101,62 @@ def admitted_decision(
     *,
     attempt_id: str = "attempt_framing",
     task_kind: TaskKind = TaskKind.EXACT_ANSWER,
+    answer_value_type: AnswerValueType | None = None,
+    objective: str | None = None,
+    decision_form: str | None = None,
+    permits_synthesis: bool | None = None,
+    required_sections: list[str] | None = None,
 ) -> TaskAdmissionDecision:
+    is_exact = task_kind == TaskKind.EXACT_ANSWER
+    is_model_open = task_kind == TaskKind.CLAIM_VERIFICATION
     return TaskAdmissionDecision(
         attempt_id=attempt_id,
         status=TaskAdmissionStatus.ADMITTED,
         epistemic_basis=["The answer can be tested against discriminating claims."],
         proposed_task_kind=task_kind,
         answer_contract_outline=AnswerContractOutline(
-            objective="Return the supported answer.",
-            answer_value_type=(
+            objective=objective or (
+                "Return the supported integer value."
+                if is_exact
+                else (
+                    "Design a discriminating validation protocol."
+                    if is_model_open
+                    else "Assess the explicit hypotheses against available evidence."
+                )
+            ),
+            answer_value_type=answer_value_type or (
                 AnswerValueType.INTEGER
-                if task_kind == TaskKind.EXACT_ANSWER
+                if is_exact
                 else AnswerValueType.STRUCTURED_TEXT
             ),
-            decision_form="single_value",
-            permits_synthesis=False,
-            required_sections=["answer", "basis", "uncertainty"],
+            decision_form=decision_form or (
+                "single_value"
+                if is_exact
+                else (
+                    "experimental_protocol"
+                    if is_model_open
+                    else "hypothesis_assessment"
+                )
+            ),
+            permits_synthesis=(
+                is_model_open if permits_synthesis is None else permits_synthesis
+            ),
+            required_sections=required_sections or (
+                ["answer", "basis", "uncertainty"]
+                if is_exact
+                else (
+                    [
+                        "hypotheses",
+                        "experimental_design",
+                        "controls",
+                        "metrics",
+                        "decision_rule",
+                        "limitations",
+                    ]
+                    if is_model_open
+                    else ["hypotheses", "evidence", "decision"]
+                )
+            ),
         ),
         reason="The task has a verifiable answer.",
     )
@@ -243,11 +283,62 @@ def test_exact_answer_candidates_accept_values_matching_contract_type(
         TaskFramingInput(
             run_id=f"run_exact_{answer_value_type}",
             question="Which value satisfies the constraints?",
-            admission_decision=admitted_decision(),
+            admission_decision=admitted_decision(
+                answer_value_type=AnswerValueType(answer_value_type)
+            ),
         )
     )
 
     assert [item.answer_value for item in frame.hypothesis_frame.hypotheses] == values
+
+
+@pytest.mark.parametrize(
+    "contract_update,frame_update,values",
+    [
+        ({"answer_value_type": "short_text"}, {}, ["seven", "nine"]),
+        ({"objective": "Return a provider-selected value."}, {}, [7, 9]),
+        ({"decision_form": "provider_choice"}, {}, [7, 9]),
+        (
+            {"permits_synthesis": True},
+            {"answer_relationship": "synthesis"},
+            [7, 9],
+        ),
+        ({"required_sections": ["answer"]}, {}, [7, 9]),
+    ],
+    ids=[
+        "answer_value_type",
+        "objective",
+        "decision_form",
+        "permits_synthesis",
+        "required_sections",
+    ],
+)
+def test_provider_replacement_contract_consumes_one_repair(
+    contract_update,
+    frame_update,
+    values,
+):
+    replacement = _exact_answer_frame_with_values(
+        contract_update.get("answer_value_type", "integer"),
+        values,
+    )
+    replacement["answer_contract"].update(contract_update)
+    replacement.update(frame_update)
+    gateway = QueueModelGateway([replacement, deepcopy(EXACT_ANSWER_FRAME)])
+
+    frame = ModelTaskFramer(gateway).frame(
+        TaskFramingInput(
+            run_id="run_contract_continuity",
+            question="Which integer satisfies the constraints?",
+            admission_decision=admitted_decision(),
+        )
+    )
+
+    assert frame.answer_contract.answer_value_type == AnswerValueType.INTEGER
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -275,7 +366,9 @@ def test_exact_answer_candidate_type_mismatch_consumes_one_repair(
         TaskFramingInput(
             run_id=f"run_exact_repair_{answer_value_type}",
             question="Which value satisfies the constraints?",
-            admission_decision=admitted_decision(),
+            admission_decision=admitted_decision(
+                answer_value_type=AnswerValueType(answer_value_type)
+            ),
         )
     )
 
@@ -1144,6 +1237,77 @@ def test_task_frame_from_mapping_rejects_provider_owned_beliefs():
             ),
             method="model",
             trace={},
+        )
+
+
+def _recorded_exact_answer_source():
+    decision = admitted_decision(attempt_id="recorded_exact_admission")
+    frame = task_frame_from_mapping(
+        deepcopy(EXACT_ANSWER_FRAME),
+        run_id="recorded_exact_fixture",
+        question="Which integer satisfies the constraints?",
+        task_context="",
+        admission_decision=decision,
+        method="model",
+        trace={},
+    )
+    return frame, decision
+
+
+@pytest.mark.parametrize(
+    "answer_values",
+    [
+        [None, 9],
+        [7, 7],
+        [7.0, 9],
+    ],
+    ids=["null", "duplicate", "type_mismatch"],
+)
+def test_recorded_exact_answer_candidates_enforce_model_invariants(answer_values):
+    source, decision = _recorded_exact_answer_source()
+    hypotheses = [
+        hypothesis.model_copy(update={"answer_value": answer_value})
+        for hypothesis, answer_value in zip(
+            source.hypothesis_frame.hypotheses,
+            answer_values,
+            strict=True,
+        )
+    ]
+    source = source.model_copy(
+        update={
+            "hypothesis_frame": source.hypothesis_frame.model_copy(
+                update={"hypotheses": hypotheses}
+            )
+        }
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source).frame(
+            TaskFramingInput(
+                run_id="recorded_exact_replay",
+                question="Which integer satisfies the constraints?",
+                admission_decision=decision,
+            )
+        )
+
+
+def test_recorded_frame_contract_must_match_admission_outline():
+    source, decision = _recorded_exact_answer_source()
+    source = source.model_copy(
+        update={
+            "answer_contract": source.answer_contract.model_copy(
+                update={"answer_value_type": AnswerValueType.NUMBER}
+            )
+        }
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source).frame(
+            TaskFramingInput(
+                run_id="recorded_contract_replay",
+                question="Which integer satisfies the constraints?",
+                admission_decision=decision,
+            )
         )
 
 

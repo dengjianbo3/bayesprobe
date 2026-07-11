@@ -11,6 +11,7 @@ from bayesprobe.task_admission import (
     TaskAdmissionError,
     TaskAdmissionInput,
 )
+from bayesprobe.task_framing import HypothesisSeed
 
 
 ADMITTED_RESPONSE = {
@@ -95,6 +96,109 @@ def test_unseeded_open_task_is_assessed_by_model_without_passive_metadata():
     assert request_input["requested_output_shape"] == "integer with basis"
     assert request_input["available_capabilities"] == []
     assert "model_metadata" not in request_input
+
+
+@pytest.mark.parametrize(
+    "explicit_material",
+    [
+        {
+            "answer_choices": [
+                AnswerChoice(label="A", text="Only result"),
+            ]
+        },
+        {
+            "answer_choices": [
+                AnswerChoice.model_construct(label="", text="Blank result"),
+                AnswerChoice(label="B", text="Second result"),
+            ]
+        },
+        {
+            "hypothesis_seeds": [
+                HypothesisSeed(statement="   "),
+                HypothesisSeed(statement="A valid alternative."),
+            ]
+        },
+        {
+            "hypothesis_seeds": [
+                object(),
+                HypothesisSeed(statement="A valid alternative."),
+            ]
+        },
+    ],
+    ids=["single_choice", "blank_choice", "blank_seed", "invalid_seed"],
+)
+def test_invalid_explicit_material_routes_to_model_admission(explicit_material):
+    gateway = ScriptedModelGateway(
+        responses={"assess_task_admission": deepcopy(ADMITTED_RESPONSE)}
+    )
+    admitter = RoutingTaskAdmitter(
+        explicit_admitter=ExplicitTaskAdmitter(),
+        open_admitter=ModelTaskAdmitter(gateway),
+    )
+
+    decision = admitter.assess(
+        TaskAdmissionInput(
+            attempt_id="attempt_invalid_explicit",
+            question="What result follows?",
+            **explicit_material,
+        )
+    )
+
+    assert decision.proposed_task_kind == TaskKind.EXACT_ANSWER
+    assert [request.task for request in gateway.requests] == [
+        "assess_task_admission"
+    ]
+
+
+def test_simultaneous_choices_and_seeds_are_rejected_without_model_call():
+    gateway = ScriptedModelGateway(responses={})
+    admitter = RoutingTaskAdmitter(
+        explicit_admitter=ExplicitTaskAdmitter(),
+        open_admitter=ModelTaskAdmitter(gateway),
+    )
+
+    with pytest.raises(
+        TaskAdmissionError,
+        match="answer choices or hypothesis seeds, not both",
+    ):
+        admitter.assess(
+            TaskAdmissionInput(
+                attempt_id="attempt_ambiguous_explicit",
+                question="Which account is supported?",
+                answer_choices=[
+                    AnswerChoice(label="A", text="First account"),
+                    AnswerChoice(label="B", text="Second account"),
+                ],
+                hypothesis_seeds=[
+                    HypothesisSeed(statement="The first account is supported."),
+                    HypothesisSeed(statement="The second account is supported."),
+                ],
+            )
+        )
+
+    assert gateway.requests == []
+
+
+def test_valid_hypothesis_seeds_are_admitted_without_model_call():
+    gateway = ScriptedModelGateway(responses={})
+    admitter = RoutingTaskAdmitter(
+        explicit_admitter=ExplicitTaskAdmitter(),
+        open_admitter=ModelTaskAdmitter(gateway),
+    )
+
+    decision = admitter.assess(
+        TaskAdmissionInput(
+            attempt_id="attempt_valid_seeds",
+            question="Which account is supported?",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first account is supported."),
+                HypothesisSeed(statement="The second account is supported."),
+            ],
+        )
+    )
+
+    assert decision.proposed_task_kind == TaskKind.CLAIM_VERIFICATION
+    assert gateway.requests == []
 
 
 def test_model_admitter_repairs_once_then_accepts_valid_decision():
