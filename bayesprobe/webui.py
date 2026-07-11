@@ -38,6 +38,11 @@ from bayesprobe.question_runner import (
     AutonomousQuestionRunner,
 )
 from bayesprobe.schemas import AnswerChoice
+from bayesprobe.task_framing import (
+    ExplicitTaskFramer,
+    TaskFramingError,
+    TaskFramingInput,
+)
 
 
 STATIC_DIR = Path(__file__).with_name("webui_static")
@@ -85,6 +90,8 @@ def handle_autonomous_run_request(
         prepared = _prepare_autonomous_run(payload, client_factory=client_factory)
         try:
             result = prepared.runner.run_question(prepared.input)
+        except TaskFramingError:
+            raise
         except Exception as error:
             if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
                 raise ProviderError(
@@ -95,6 +102,8 @@ def handle_autonomous_run_request(
                 ) from error
             raise
         return HTTPStatus.OK, serialize_autonomous_run_result(result)
+    except TaskFramingError:
+        return int(HTTPStatus.BAD_REQUEST), _task_framing_error_payload()
     except WebUIError as error:
         return int(error.status_code), _error_payload(error.error_type, error.message)
     except Exception:
@@ -116,11 +125,15 @@ def handle_autonomous_stream_request(
             client_factory=client_factory,
             progress_observer=emitter.emit,
         )
+    except TaskFramingError:
+        return int(HTTPStatus.BAD_REQUEST), _task_framing_error_payload()
     except WebUIError as error:
         return int(error.status_code), _error_payload(error.error_type, error.message)
 
     try:
         prepared.runner.run_question(prepared.input)
+    except TaskFramingError:
+        return int(HTTPStatus.BAD_REQUEST), _task_framing_error_payload()
     except Exception as error:
         if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
             emitter.emit_failure(
@@ -442,6 +455,13 @@ def _prepare_autonomous_run(
     progress_observer: Callable[[AutonomousQuestionProgress], None] | None = None,
 ) -> _PreparedAutonomousRun:
     request = _parse_autonomous_request(payload)
+    input = InitializeRunInput(
+        run_id=_webui_run_id(),
+        problem=request["question"],
+        context=request["context"],
+        answer_choices=request["answer_choices"],
+    )
+    _preflight_task_framing(input)
     provider_kind = _optional_string(
         request["provider"].get("kind"),
         "provider.kind",
@@ -465,13 +485,25 @@ def _prepare_autonomous_run(
             config=request["runner_config"],
             progress_observer=progress_observer,
         ),
-        input=InitializeRunInput(
-            run_id=_webui_run_id(),
-            problem=request["question"],
-            context=request["context"],
-            answer_choices=request["answer_choices"],
-        ),
+        input=input,
         provider_kind=provider_kind,
+    )
+
+
+def _preflight_task_framing(input: InitializeRunInput) -> None:
+    ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id=input.run_id,
+            question=input.problem,
+            answer_choices=list(input.answer_choices),
+        )
+    )
+
+
+def _task_framing_error_payload() -> dict[str, Any]:
+    return _error_payload(
+        "validation_error",
+        "task framing requires explicit answer choices or hypothesis seeds",
     )
 
 

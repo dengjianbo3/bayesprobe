@@ -222,25 +222,40 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
     }
 
 
-def test_webui_stream_redacts_provider_secret_from_events():
+def test_webui_unseeded_open_question_is_framing_validation_before_provider_execution():
+    FakeWebUIChatOpenAI.created_with = []
     events = []
-    status, error = handle_autonomous_stream_request(
-        {
-            "question": "Can streaming use a Chat Completions provider?",
-            "provider": {
-                "kind": "openai_chat_completions",
-                "api_key": "provider-secret-123",
-                "model": "provider-model",
-            },
-            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+    request = {
+        "question": "Can streaming use a Chat Completions provider?",
+        "provider": {
+            "kind": "openai_chat_completions",
+            "api_key": "provider-secret-123",
+            "model": "provider-model",
         },
+        "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+    }
+    status, response = handle_autonomous_run_request(
+        request,
+        client_factory=FakeWebUIChatOpenAI,
+    )
+    stream_status, error = handle_autonomous_stream_request(
+        request,
         event_sink=events.append,
         client_factory=FakeWebUIChatOpenAI,
     )
 
-    assert status == 200
-    assert error is None
-    assert "provider-secret-123" not in json.dumps(events)
+    expected_error = {
+        "error": {
+            "type": "validation_error",
+            "message": "task framing requires explicit answer choices or hypothesis seeds",
+        }
+    }
+    assert status == 400
+    assert response == expected_error
+    assert stream_status == 400
+    assert error == expected_error
+    assert events == []
+    assert FakeWebUIChatOpenAI.created_with == []
 
 
 def test_webui_stream_returns_preflight_validation_as_http_error_payload():
@@ -256,10 +271,12 @@ def test_webui_stream_returns_preflight_validation_as_http_error_payload():
 
 
 def test_webui_stream_emits_terminal_sanitized_provider_failure():
+    FailingWebUIOpenAI.calls = 0
     events = []
     status, error = handle_autonomous_stream_request(
         {
             "question": "Will a streaming provider failure stay sanitized?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_responses",
                 "api_key": "sk-webui-secret",
@@ -275,6 +292,7 @@ def test_webui_stream_emits_terminal_sanitized_provider_failure():
     assert events[-1]["event"] == "run_failed"
     assert events[-1]["data"]["error"]["type"] == "provider_error"
     assert "sk-webui-secret" not in json.dumps(events)
+    assert FailingWebUIOpenAI.calls == 1
 
 
 def test_webui_deterministic_structured_choices_select_explicit_choice():
@@ -321,6 +339,7 @@ def test_webui_deterministic_structured_choices_select_explicit_choice():
         (
             {
                 "question": "Q",
+                "answer_choices": deterministic_answer_choices(),
                 "provider": {"kind": "openai_chat_completions", "model": "gpt-5.5"},
             },
             "provider.api_key must not be empty",
@@ -701,10 +720,13 @@ class FakeWebUIResponses:
 
 class FakeWebUIOpenAI:
     created_with = []
+    responses = None
 
     def __init__(self, **kwargs):
         self.__class__.created_with.append(kwargs)
-        self.responses = FakeWebUIResponses()
+        responses = FakeWebUIResponses()
+        self.__class__.responses = responses
+        self.responses = responses
 
 
 class FakeWebUIChatCompletions:
@@ -741,13 +763,16 @@ class FakeWebUIChatCompletions:
 
 class FakeWebUIChatOpenAI:
     created_with = []
+    completions = None
 
     def __init__(self, **kwargs):
         self.__class__.created_with.append(kwargs)
+        completions = FakeWebUIChatCompletions()
+        self.__class__.completions = completions
         self.chat = type(
             "FakeChat",
             (),
-            {"completions": FakeWebUIChatCompletions()},
+            {"completions": completions},
         )()
 
 
@@ -777,11 +802,12 @@ class FailDuringSecondCycleWebUIChatOpenAI:
         self.chat = type("FakeChat", (), {"completions": completions})()
 
 
-def test_webui_stream_rejects_unseeded_provider_question_before_probe_execution():
+def test_webui_stream_preserves_real_first_cycle_before_second_cycle_failure():
     events = []
     status, error = handle_autonomous_stream_request(
         {
             "question": "Can a genuine first cycle survive a cycle two failure?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_chat_completions",
                 "api_key": "provider-secret-123",
@@ -793,14 +819,21 @@ def test_webui_stream_rejects_unseeded_provider_question_before_probe_execution(
         client_factory=FailDuringSecondCycleWebUIChatOpenAI,
     )
 
+    integrated = [event for event in events if event["event"] == "cycle_integrated"]
     failures = [event for event in events if event["event"] == "run_failed"]
     assert status == 200
     assert error is None
-    assert FailDuringSecondCycleWebUIChatOpenAI.completions.tasks == []
-    assert [event["event"] for event in events] == ["run_started", "run_failed"]
+    assert FailDuringSecondCycleWebUIChatOpenAI.completions.tasks == [
+        "execute_probe",
+        "judge_evidence",
+        "execute_probe",
+    ]
+    assert len(integrated) == 1
+    assert integrated[0]["cycle_index"] == 1
+    assert integrated[0]["data"]["cycle"]["boundary_status"] == "integrated"
     assert len(failures) == 1
-    assert failures[0]["cycle_index"] is None
-    assert failures[0]["cycle_id"] is None
+    assert failures[0]["cycle_index"] == 2
+    assert failures[0]["cycle_id"].endswith("_cycle_2")
     assert set(failures[0]["data"]) == {"error"}
     assert set(failures[0]["data"]["error"]) == {"type", "message"}
     assert events[-1] == failures[0]
@@ -840,7 +873,7 @@ class BlockingWebUIChatOpenAI:
         )()
 
 
-def test_webui_stream_reports_unseeded_provider_question_without_provider_execution():
+def test_webui_stream_flushes_first_event_before_provider_completion():
     BlockingWebUIChatCompletions.provider_entered.clear()
     BlockingWebUIChatCompletions.release_provider.clear()
     server, thread = serve_test_server(client_factory=BlockingWebUIChatOpenAI)
@@ -852,6 +885,7 @@ def test_webui_stream_reports_unseeded_provider_question_without_provider_execut
             body=json.dumps(
                 {
                     "question": "Does streaming flush before provider completion?",
+                    "answer_choices": deterministic_answer_choices(),
                     "provider": {
                         "kind": "openai_chat_completions",
                         "api_key": "provider-secret-123",
@@ -863,12 +897,15 @@ def test_webui_stream_reports_unseeded_provider_question_without_provider_execut
             headers={"Content-Type": "application/json"},
         )
         response = connection.getresponse()
+        assert BlockingWebUIChatCompletions.provider_entered.wait(timeout=5)
         first_event = json.loads(response.readline())
         assert response.status == 200
         assert first_event["event"] == "run_started"
+        assert not BlockingWebUIChatCompletions.release_provider.is_set()
+
+        BlockingWebUIChatCompletions.release_provider.set()
         remaining_events = [json.loads(line) for line in response.read().splitlines()]
-        assert not BlockingWebUIChatCompletions.provider_entered.is_set()
-        assert remaining_events[-1]["event"] == "run_failed"
+        assert remaining_events[-1]["event"] == "run_completed"
     finally:
         BlockingWebUIChatCompletions.release_provider.set()
         connection.close()
@@ -1015,12 +1052,13 @@ E. Cubicity alone"""
     assert payload["final_answer"]["current_best_hypothesis"] == "D"
 
 
-def test_webui_openai_responses_provider_rejects_unseeded_question_without_leaking_key():
+def test_webui_openai_responses_provider_uses_request_key_and_redacts_response():
     FakeWebUIOpenAI.created_with = []
 
     status, payload = handle_autonomous_run_request(
         {
             "question": "Can the WebUI use a provider-backed evidence judgment?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_responses",
                 "api_key": "sk-webui-secret",
@@ -1034,7 +1072,7 @@ def test_webui_openai_responses_provider_rejects_unseeded_question_without_leaki
         client_factory=FakeWebUIOpenAI,
     )
 
-    assert status == 502
+    assert status == 200
     assert FakeWebUIOpenAI.created_with == [
         {
             "api_key": "sk-webui-secret",
@@ -1043,15 +1081,17 @@ def test_webui_openai_responses_provider_rejects_unseeded_question_without_leaki
         }
     ]
     assert "sk-webui-secret" not in json.dumps(payload)
-    assert payload["error"]["type"] == "provider_error"
+    assert len(FakeWebUIOpenAI.responses.calls) == 2
+    assert payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"] == "openai"
 
 
-def test_webui_chat_provider_rejects_unseeded_question_without_leaking_key():
+def test_webui_openai_chat_completions_provider_uses_request_key_and_redacts_response():
     FakeWebUIChatOpenAI.created_with = []
 
     status, payload = handle_autonomous_run_request(
         {
             "question": "Can the WebUI use a Chat Completions-compatible provider?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_chat_completions",
                 "api_key": "provider-secret-123",
@@ -1065,7 +1105,7 @@ def test_webui_chat_provider_rejects_unseeded_question_without_leaking_key():
         client_factory=FakeWebUIChatOpenAI,
     )
 
-    assert status == 502
+    assert status == 200
     assert FakeWebUIChatOpenAI.created_with == [
         {
             "api_key": "provider-secret-123",
@@ -1074,7 +1114,11 @@ def test_webui_chat_provider_rejects_unseeded_question_without_leaking_key():
         }
     ]
     assert "provider-secret-123" not in json.dumps(payload)
-    assert payload["error"]["type"] == "provider_error"
+    assert len(FakeWebUIChatOpenAI.completions.calls) == 2
+    assert (
+        payload["cycles"][0]["evidence_events"][0]["model_trace"]["adapter_kind"]
+        == "openai_chat_completions"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1193,35 +1237,45 @@ E. The class of all connected bipartite graphs."""
 
 
 class FailingWebUIOpenAI:
+    calls = 0
     def __init__(self, **kwargs):
         self.responses = self
 
     def create(self, **payload):
+        self.__class__.calls += 1
         raise RuntimeError("provider rejected key sk-webui-secret")
 
 
 class FailingInitWebUIOpenAI:
+    attempts = 0
     def __init__(self, **kwargs):
+        self.__class__.attempts += 1
         raise RuntimeError("provider rejected key sk-webui-secret during init")
 
 
 class FailingNonOpenAIShapedSecretWebUIOpenAI:
+    calls = 0
     def __init__(self, **kwargs):
         self.responses = self
 
     def create(self, **payload):
+        self.__class__.calls += 1
         raise RuntimeError("provider rejected key provider-secret-123")
 
 
 class FailingNonOpenAIShapedSecretInitWebUIOpenAI:
+    attempts = 0
     def __init__(self, **kwargs):
+        self.__class__.attempts += 1
         raise RuntimeError("provider rejected key provider-secret-123 during init")
 
 
 def test_webui_provider_errors_are_sanitized():
+    FailingWebUIOpenAI.calls = 0
     status, payload = handle_autonomous_run_request(
         {
             "question": "Will provider errors leak secrets?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_responses",
                 "api_key": "sk-webui-secret",
@@ -1238,12 +1292,15 @@ def test_webui_provider_errors_are_sanitized():
         "Use Chat Completions for /chat/completions-compatible providers."
     )
     assert "sk-webui-secret" not in json.dumps(payload)
+    assert FailingWebUIOpenAI.calls == 1
 
 
 def test_webui_provider_request_failures_return_safe_diagnostic_for_non_sk_keys():
+    FailingNonOpenAIShapedSecretWebUIOpenAI.calls = 0
     status, payload = handle_autonomous_run_request(
         {
             "question": "Will provider request failures leak non-sk API keys?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_responses",
                 "api_key": "provider-secret-123",
@@ -1264,12 +1321,14 @@ def test_webui_provider_request_failures_return_safe_diagnostic_for_non_sk_keys(
         }
     }
     assert "provider-secret-123" not in json.dumps(payload)
+    assert FailingNonOpenAIShapedSecretWebUIOpenAI.calls == 1
 
 
 def test_webui_openai_responses_invalid_timeout_is_validation_error():
     status, payload = handle_autonomous_run_request(
         {
             "question": "Does invalid provider config stay a validation error?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_responses",
                 "api_key": "sk-webui-secret",
@@ -1291,9 +1350,11 @@ def test_webui_openai_responses_invalid_timeout_is_validation_error():
 
 
 def test_webui_provider_initialization_errors_are_sanitized():
+    FailingInitWebUIOpenAI.attempts = 0
     status, payload = handle_autonomous_run_request(
         {
             "question": "Will provider init errors leak secrets?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_responses",
                 "api_key": "sk-webui-secret",
@@ -1310,12 +1371,15 @@ def test_webui_provider_initialization_errors_are_sanitized():
         "Use Chat Completions for /chat/completions-compatible providers."
     )
     assert "sk-webui-secret" not in json.dumps(payload)
+    assert FailingInitWebUIOpenAI.attempts == 1
 
 
 def test_webui_provider_initialization_failures_return_safe_diagnostic_for_non_sk_keys():
+    FailingNonOpenAIShapedSecretInitWebUIOpenAI.attempts = 0
     status, payload = handle_autonomous_run_request(
         {
             "question": "Will provider init failures leak non-sk API keys?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_responses",
                 "api_key": "provider-secret-123",
@@ -1336,22 +1400,27 @@ def test_webui_provider_initialization_failures_return_safe_diagnostic_for_non_s
         }
     }
     assert "provider-secret-123" not in json.dumps(payload)
+    assert FailingNonOpenAIShapedSecretInitWebUIOpenAI.attempts == 1
 
 
 class FailingChatWebUIOpenAI:
+    calls = 0
     def __init__(self, **kwargs):
         self.chat = type("Chat", (), {"completions": self})()
 
     def create(self, **payload):
+        self.__class__.calls += 1
         raise RuntimeError("provider rejected max token value provider-secret-123")
 
 
 class LengthExhaustedChatWebUIOpenAI:
+    calls = 0
     def __init__(self, **kwargs):
         del kwargs
         self.chat = type("Chat", (), {"completions": self})()
 
     def create(self, **payload):
+        self.__class__.calls += 1
         del payload
         return {
             "choices": [
@@ -1367,8 +1436,10 @@ class LengthExhaustedChatWebUIOpenAI:
 
 
 def test_webui_reports_exhausted_output_budget_without_leaking_provider_data():
+    LengthExhaustedChatWebUIOpenAI.calls = 0
     request = {
         "question": "Will an exhausted reasoning budget be diagnosed?",
+        "answer_choices": deterministic_answer_choices(),
         "provider": {
             "kind": "openai_chat_completions",
             "api_key": "provider-secret-123",
@@ -1390,19 +1461,31 @@ def test_webui_reports_exhausted_output_budget_without_leaking_provider_data():
         client_factory=LengthExhaustedChatWebUIOpenAI,
     )
 
+    expected_message = (
+        "provider exhausted max output tokens before producing structured "
+        "content. Increase max output tokens and retry."
+    )
     assert status == 502
-    assert payload["error"]["type"] == "provider_error"
+    assert payload == {
+        "error": {"type": "provider_error", "message": expected_message}
+    }
     assert stream_status == 200
     assert stream_error is None
     assert events[-1]["event"] == "run_failed"
-    assert events[-1]["data"]["error"]["type"] == "provider_error"
+    assert events[-1]["data"]["error"] == {
+        "type": "provider_error",
+        "message": expected_message,
+    }
     assert "provider-secret-123" not in json.dumps([payload, events])
+    assert LengthExhaustedChatWebUIOpenAI.calls == 2
 
 
 def test_webui_chat_completions_provider_failures_return_safe_diagnostic_hint():
+    FailingChatWebUIOpenAI.calls = 0
     status, payload = handle_autonomous_run_request(
         {
             "question": "Will chat provider failures be diagnosable without leaking keys?",
+            "answer_choices": deterministic_answer_choices(),
             "provider": {
                 "kind": "openai_chat_completions",
                 "api_key": "provider-secret-123",
@@ -1425,6 +1508,7 @@ def test_webui_chat_completions_provider_failures_return_safe_diagnostic_hint():
         }
     }
     assert "provider-secret-123" not in json.dumps(payload)
+    assert FailingChatWebUIOpenAI.calls == 1
 
 
 def test_webui_main_rejects_non_loopback_host_before_binding(monkeypatch):
