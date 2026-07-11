@@ -16,6 +16,7 @@ from bayesprobe.task_admission import (
     ExplicitTaskAdmitter,
     TaskAdmitter,
     TaskAdmissionInput,
+    validate_task_admission_decision,
 )
 from bayesprobe.task_framing import parse_legacy_answer_choice_frame
 from bayesprobe.probe_executor import (
@@ -171,7 +172,9 @@ class AutonomousQuestionRunner:
         input: InitializeRunInput,
     ) -> AutonomousQuestionRunResult | NeedsReframingResult | OutOfScopeResult:
         validate_initialize_run_input_security(input)
-        admission = self.task_admitter.assess(_task_admission_input(input))
+        admission = validate_task_admission_decision(
+            self.task_admitter.assess(_task_admission_input(input))
+        )
         if admission.status != TaskAdmissionStatus.ADMITTED:
             if self.core.ledger is not None:
                 self.core.ledger.append("task_admission", admission)

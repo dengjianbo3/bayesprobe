@@ -103,6 +103,14 @@ class FailingTaskAdmitter:
         raise AssertionError("runner-supplied admission must not be reassessed")
 
 
+class ReturningTaskAdmitter:
+    def __init__(self, decision):
+        self.decision = decision
+
+    def assess(self, input):
+        return self.decision
+
+
 def test_initializer_uses_supplied_admission_once_and_writes_v02_state_in_order(
     tmp_path: Path,
 ):
@@ -187,6 +195,98 @@ def test_initializer_preserves_framed_answer_value_in_runtime_hypothesis():
 
     assert result.task_frame.hypothesis_frame.hypotheses[0].answer_value == 7
     assert result.belief_state.hypotheses[0].answer_value == 7
+
+
+def test_initializer_open_hypotheses_never_acquire_answer_values():
+    result = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_open_without_answer_values",
+            problem="Which explanation best fits?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+            task_kind=TaskKind.DECISION,
+        ),
+        admission_decision=admitted_seed_decision(),
+    )
+
+    assert all(
+        hypothesis.answer_value is None
+        for hypothesis in result.task_frame.hypothesis_frame.hypotheses
+    )
+    assert all(
+        hypothesis.answer_value is None for hypothesis in result.belief_state.hypotheses
+    )
+
+
+def test_initializer_revalidates_direct_admitter_result_before_framing_or_persistence(
+    tmp_path: Path,
+):
+    secret = "password=constructed-adapter-secret"
+    decision = admitted_seed_decision().model_copy(update={"reason": secret})
+    ledger_path = tmp_path / "direct-invalid-admission.jsonl"
+    initializer = BayesProbeInitializer(
+        ledger=JsonlLedgerStore(ledger_path),
+        task_admitter=ReturningTaskAdmitter(decision),
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid task admission decision") as captured:
+        initializer.initialize(
+            InitializeRunInput(
+                run_id="run_direct_invalid_admission",
+                problem="Which explanation best fits?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
+                task_kind=TaskKind.DECISION,
+            )
+        )
+
+    assert secret not in str(captured.value)
+    assert not ledger_path.exists()
+
+
+def test_initializer_revalidates_caller_admission_before_framing_or_persistence(
+    tmp_path: Path,
+):
+    secret = "sk-calleradmissionsecret"
+    decision = admitted_seed_decision().model_copy(
+        update={"epistemic_basis": [f"Use {secret}."]}
+    )
+    ledger_path = tmp_path / "caller-invalid-admission.jsonl"
+    initializer = BayesProbeInitializer(ledger=JsonlLedgerStore(ledger_path))
+
+    with pytest.raises(TaskFramingError, match="invalid task admission decision") as captured:
+        initializer.initialize(
+            InitializeRunInput(
+                run_id="run_caller_invalid_admission",
+                problem="Which explanation best fits?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
+                task_kind=TaskKind.DECISION,
+            ),
+            admission_decision=decision,
+        )
+
+    assert secret not in str(captured.value)
+    assert not ledger_path.exists()
+
+
+def test_initializer_rejects_wrong_direct_admitter_return_type_without_persistence(
+    tmp_path: Path,
+):
+    ledger_path = tmp_path / "wrong-direct-admission-type.jsonl"
+    initializer = BayesProbeInitializer(
+        ledger=JsonlLedgerStore(ledger_path),
+        task_admitter=ReturningTaskAdmitter(object()),
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid task admission decision"):
+        initializer.initialize(
+            InitializeRunInput(
+                run_id="run_wrong_direct_admission_type",
+                problem="Which explanation best fits?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
+                task_kind=TaskKind.DECISION,
+            )
+        )
+
+    assert not ledger_path.exists()
 
 
 def test_initializer_default_admitter_fails_closed_for_unseeded_open_input():

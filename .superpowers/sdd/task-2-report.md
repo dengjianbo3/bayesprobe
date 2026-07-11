@@ -689,3 +689,97 @@ None. Task admission now rejects secret-bearing semantic records before repair
 or persistence; framing requests carry only the validated, sanitized admitted
 contract outline. Recorded framing is native-v0.2-only while the explicit v0.1
 migration API and compatibility wrappers remain covered and unchanged.
+
+## Review Fix 7
+
+### Changed Files
+
+- `bayesprobe/task_admission.py`
+- `bayesprobe/question_runner.py`
+- `bayesprobe/initialization.py`
+- `bayesprobe/task_framing.py`
+- `tests/test_question_runner.py`
+- `tests/test_initialization.py`
+- `tests/test_task_framing.py`
+- `.superpowers/sdd/task-2-report.md`
+
+### RED Evidence
+
+Adapter-boundary and hypothesis/answer separation regressions:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_question_runner.py tests/test_initialization.py tests/test_task_framing.py -q -p no:cacheprovider -k 'constructed_secret_bearing_admission or wrong_admitter_return_type or revalidates_direct_admitter_result or revalidates_caller_admission or wrong_direct_admitter_return_type or open_model_hypothesis_answer_value or recorded_open_hypothesis_rejects_answer_value or open_hypotheses_never_acquire'
+7 failed, 1 passed, 197 deselected in 0.39s
+exit 1
+```
+
+The failures showed that bypass-constructed decisions reached framing, wrong
+adapter return types reached attribute access, and model and recorded open
+hypotheses accepted answer values. The passing runtime regression confirmed
+that ordinary explicit open hypotheses already initialized with null answer
+values.
+
+### GREEN Evidence
+
+Focused Review Fix 7 regressions:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_question_runner.py tests/test_initialization.py tests/test_task_framing.py -q -p no:cacheprovider -k 'constructed_secret_bearing_admission or wrong_admitter_return_type or revalidates_direct_admitter_result or revalidates_caller_admission or wrong_direct_admitter_return_type or open_model_hypothesis_answer_value or recorded_open_hypothesis_rejects_answer_value or open_hypotheses_never_acquire'
+8 passed, 197 deselected in 0.20s
+exit 0
+```
+
+Owned admission, runner, initialization, and framing suites:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_question_runner.py tests/test_initialization.py tests/test_task_framing.py -q -p no:cacheprovider
+220 passed in 0.40s
+exit 0
+```
+
+Complete Task 2 suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_task_admission.py tests/test_task_framing.py tests/test_initialization.py tests/test_openai_gateway.py tests/test_recorded_model_gateway.py tests/test_question_runner.py -q -p no:cacheprovider
+316 passed in 0.52s
+exit 0
+```
+
+Migration and schema suites:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_migrations.py tests/test_schemas.py -q -p no:cacheprovider
+108 passed in 0.16s
+exit 0
+```
+
+WebUI Python integration suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_webui.py -q -p no:cacheprovider
+94 passed in 5.57s
+exit 0
+```
+
+Node stream integration suite:
+
+```text
+node --test tests/test_webui_stream.js
+15 passed in 115.96ms
+exit 0
+```
+
+Full offline suite:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
+940 passed, 10 skipped in 7.72s
+exit 0
+```
+
+### Concerns
+
+None. Runner and initializer admission boundaries now share one authoritative
+revalidation/canonicalization helper with a stable secret-safe failure. Native
+model and recorded framing reject answer values for every task kind except
+exact-answer and multiple-choice before runtime state creation.

@@ -48,6 +48,18 @@ class TaskAdmissionError(ValueError):
     pass
 
 
+def validate_task_admission_decision(value: Any) -> TaskAdmissionDecision:
+    """Revalidate and detach an admission decision at an adapter boundary."""
+    if type(value) is not TaskAdmissionDecision:
+        raise TaskAdmissionError("invalid task admission decision")
+    try:
+        return TaskAdmissionDecision.model_validate(
+            value.model_dump(mode="python", warnings="error")
+        )
+    except Exception:
+        raise TaskAdmissionError("invalid task admission decision") from None
+
+
 class ExplicitTaskAdmitter:
     def can_assess(self, input: TaskAdmissionInput) -> bool:
         if input.answer_choices and input.hypothesis_seeds:
@@ -430,4 +442,5 @@ __all__ = [
     "TaskAdmitter",
     "TaskAdmissionError",
     "TaskAdmissionInput",
+    "validate_task_admission_decision",
 ]

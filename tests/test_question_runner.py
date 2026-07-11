@@ -33,6 +33,8 @@ from bayesprobe.task_admission import (
 )
 from bayesprobe.schemas import (
     AnswerChoice,
+    AnswerContractOutline,
+    AnswerValueType,
     CycleSignalShape,
     FramingMethod,
     HypothesisRelation,
@@ -40,6 +42,9 @@ from bayesprobe.schemas import (
     RunRegime,
     RunStatus,
     SignalKind,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
+    TaskKind,
 )
 
 
@@ -74,6 +79,14 @@ class RecordingExecutor:
             signals=[],
             executed_probe_ids=[],
         )
+
+
+class ReturningTaskAdmitter:
+    def __init__(self, decision):
+        self.decision = decision
+
+    def assess(self, input):
+        return self.decision
 
 
 def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
@@ -224,6 +237,62 @@ def test_secret_bearing_non_admission_never_reaches_ledger(tmp_path: Path):
             )
         )
 
+    assert not ledger_path.exists()
+
+
+def test_runner_rejects_constructed_secret_bearing_admission_before_progress_or_ledger(
+    tmp_path: Path,
+):
+    secret = "sk-constructedadaptersecret"
+    decision = TaskAdmissionDecision.model_construct(
+        attempt_id="constructed_admission",
+        status=TaskAdmissionStatus.ADMITTED,
+        epistemic_basis=["The claim is testable."],
+        proposed_task_kind=TaskKind.CLAIM_VERIFICATION,
+        answer_contract_outline=AnswerContractOutline(
+            objective="Assess the claim.",
+            answer_value_type=AnswerValueType.STRUCTURED_TEXT,
+            decision_form="claim_assessment",
+            permits_synthesis=True,
+            required_sections=["answer", "basis", "uncertainty"],
+        ),
+        clarification_questions=[],
+        reason=f"Use {secret} to admit this task.",
+        model_trace={},
+    )
+    ledger_path = tmp_path / "constructed-admission.jsonl"
+    progress = []
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(ledger=JsonlLedgerStore(ledger_path)),
+        task_admitter=ReturningTaskAdmitter(decision),
+        progress_observer=progress.append,
+    )
+
+    with pytest.raises(TaskAdmissionError, match="invalid task admission decision") as captured:
+        runner.run_question(
+            InitializeRunInput(run_id="run_constructed_admission", problem="Test this claim.")
+        )
+
+    assert secret not in str(captured.value)
+    assert progress == []
+    assert not ledger_path.exists()
+
+
+def test_runner_rejects_wrong_admitter_return_type_before_progress_or_ledger(tmp_path: Path):
+    ledger_path = tmp_path / "wrong-admission-type.jsonl"
+    progress = []
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(ledger=JsonlLedgerStore(ledger_path)),
+        task_admitter=ReturningTaskAdmitter({"status": "admitted"}),
+        progress_observer=progress.append,
+    )
+
+    with pytest.raises(TaskAdmissionError, match="invalid task admission decision"):
+        runner.run_question(
+            InitializeRunInput(run_id="run_wrong_admission_type", problem="Test this claim.")
+        )
+
+    assert progress == []
     assert not ledger_path.exists()
 
 

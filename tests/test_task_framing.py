@@ -1433,6 +1433,28 @@ def test_task_frame_from_mapping_rejects_provider_owned_beliefs():
         )
 
 
+def test_open_model_hypothesis_answer_value_consumes_one_repair_then_fails_closed():
+    invalid = deepcopy(VALID_OPEN_FRAME)
+    invalid["hypotheses"][0]["answer_value"] = "secret answer candidate"
+    gateway = QueueModelGateway([invalid, deepcopy(invalid)])
+
+    with pytest.raises(TaskFramingError, match="invalid after 1 repair attempt"):
+        ModelTaskFramer(gateway).frame(
+            TaskFramingInput(
+                run_id="run_open_answer_value",
+                question="How should this claim be tested?",
+                admission_decision=admitted_decision(
+                    task_kind=TaskKind.CLAIM_VERIFICATION
+                ),
+            )
+        )
+
+    assert [request.task for request in gateway.requests] == [
+        "frame_open_question",
+        "repair_task_frame",
+    ]
+
+
 def _recorded_exact_answer_source():
     decision = admitted_decision(attempt_id="recorded_exact_admission")
     frame = task_frame_from_mapping(
@@ -1662,6 +1684,31 @@ def test_recorded_task_framer_returns_a_run_specific_deep_copy():
     assert frame.normalized_question == "How should this be tested?"
     assert frame.framing_method.value == "recorded"
     assert source_frame.framing_method.value == "explicit"
+
+
+def test_recorded_open_hypothesis_rejects_answer_value():
+    source_frame = ExplicitTaskFramer().frame(
+        TaskFramingInput(
+            run_id="fixture_open_answer_value",
+            question="Which explanation fits?",
+            hypothesis_seeds=[
+                HypothesisSeed(statement="The first explanation."),
+                HypothesisSeed(statement="The second explanation."),
+            ],
+        )
+    ).model_copy(deep=True)
+    source_frame.hypothesis_frame.hypotheses[0].__dict__["answer_value"] = (
+        "forbidden answer candidate"
+    )
+
+    with pytest.raises(TaskFramingError, match="invalid recorded task frame"):
+        RecordedTaskFramer(source_frame).frame(
+            TaskFramingInput(
+                run_id="replay_open_answer_value",
+                question="Which explanation fits now?",
+                admission_decision=admitted_decision(task_kind=TaskKind.DECISION),
+            )
+        )
 
 
 def test_recorded_task_framer_scopes_trace_to_current_run_and_keeps_provenance():

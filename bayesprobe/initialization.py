@@ -39,6 +39,7 @@ from bayesprobe.task_admission import (
     TaskAdmitter,
     TaskAdmissionError,
     TaskAdmissionInput,
+    validate_task_admission_decision,
 )
 
 
@@ -87,11 +88,18 @@ class BayesProbeInitializer:
         validate_initialize_run_input_security(input)
         run_id = _clean_required(input.run_id, "run_id")
         problem = _clean_required(input.problem, "problem")
-        decision = admission_decision or self._assess_admission(
-            input,
-            run_id=run_id,
-            problem=problem,
-        )
+        try:
+            decision = validate_task_admission_decision(
+                admission_decision
+                if admission_decision is not None
+                else self._assess_admission(
+                    input,
+                    run_id=run_id,
+                    problem=problem,
+                )
+            )
+        except TaskAdmissionError as error:
+            raise TaskFramingError(str(error)) from None
         if decision.status != TaskAdmissionStatus.ADMITTED:
             raise TaskFramingError("initializer requires an admitted task decision")
         task_frame = self._task_framer.frame(

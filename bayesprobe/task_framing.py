@@ -805,7 +805,20 @@ def _canonicalize_native_frame(
         )
 
     _validate_native_hypothesis_count(task_kind, len(hypotheses))
+    answer_values = [
+        hypothesis.answer_value
+        if isinstance(hypothesis, FramedHypothesis)
+        else hypothesis["answer_value"]
+        for hypothesis in hypotheses
+    ]
     if task_kind != TaskKind.EXACT_ANSWER:
+        if (
+            task_kind != TaskKind.MULTIPLE_CHOICE
+            and any(value is not None for value in answer_values)
+        ):
+            raise TaskFramingError(
+                "non-answer-candidate hypotheses require answer_value null"
+            )
         return answer_contract.model_copy(update={"objective": outline.objective})
     if answer_relationship != AnswerRelationship.SELECTION:
         raise TaskFramingError("exact-answer framing requires answer selection")
@@ -818,12 +831,6 @@ def _canonicalize_native_frame(
         raise TaskFramingError(
             "exact-answer framing requires initial unresolved mass 0.50"
         )
-    answer_values = [
-        hypothesis.answer_value
-        if isinstance(hypothesis, FramedHypothesis)
-        else hypothesis["answer_value"]
-        for hypothesis in hypotheses
-    ]
     if any(value is None for value in answer_values):
         raise TaskFramingError("exact-answer candidates require answer_value")
     if any(
