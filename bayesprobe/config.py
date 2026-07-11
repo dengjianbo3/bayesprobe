@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from bayesprobe.experiment_runner import ExperimentRunConfig
-from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGatewayConfig
+from bayesprobe.model_gateway import (
+    EvidenceJudgmentRepairPolicy,
+    ModelGatewayConfig,
+    ProviderRequestControls,
+)
 from bayesprobe.openai_gateway import OpenAIModelGatewayConfig
 
 
@@ -133,6 +137,12 @@ def _optional_model_gateway_config(
     max_output_tokens = value.get("max_output_tokens")
     base_url = value.get("base_url")
     fixture_path = value.get("fixture_path")
+    request_controls = ProviderRequestControls(
+        temperature=value.get("temperature"),
+        top_p=value.get("top_p"),
+        thinking=value.get("thinking"),
+        reasoning_effort=value.get("reasoning_effort"),
+    )
     if openai_kind:
         validated_openai_config = OpenAIModelGatewayConfig(
             model=model,
@@ -140,6 +150,7 @@ def _optional_model_gateway_config(
             timeout_seconds=timeout_seconds,
             max_output_tokens=max_output_tokens,
             base_url=base_url,
+            request_controls=request_controls,
         )
         model = validated_openai_config.model
         api_key_env = validated_openai_config.api_key_env
@@ -162,6 +173,7 @@ def _optional_model_gateway_config(
         max_output_tokens=max_output_tokens,
         base_url=base_url,
         fixture_path=fixture_path,
+        request_controls=request_controls,
     )
 
 

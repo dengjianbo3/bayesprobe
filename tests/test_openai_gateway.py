@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from bayesprobe.model_gateway import ModelGatewayValidationError, StructuredModelRequest
+from bayesprobe.model_gateway import (
+    ModelGatewayValidationError,
+    ProviderRequestControls,
+    StructuredModelRequest,
+)
 from bayesprobe.openai_gateway import (
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
     PROBE_SIGNAL_JSON_SCHEMA,
@@ -261,6 +265,53 @@ def test_build_openai_chat_completions_payload_uses_common_json_object_shape():
         "interpretation",
         "quality_overrides",
     ]
+
+
+def test_build_openai_chat_completions_payload_includes_explicit_request_controls():
+    payload = build_openai_chat_completions_payload(
+        make_judge_request(),
+        model="deepseek-v4-flash",
+        controls=ProviderRequestControls(
+            temperature=0,
+            top_p=1,
+            thinking="enabled",
+            reasoning_effort="max",
+        ),
+    )
+
+    assert payload["temperature"] == 0
+    assert payload["top_p"] == 1
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "max"
+
+
+def test_build_openai_chat_completions_payload_omits_unset_request_controls():
+    payload = build_openai_chat_completions_payload(
+        make_judge_request(),
+        model="provider-model",
+        controls=ProviderRequestControls(),
+    )
+
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+    assert "thinking" not in payload
+    assert "reasoning_effort" not in payload
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_message"),
+    [
+        ({"temperature": -0.1}, "temperature must be finite and non-negative"),
+        ({"temperature": float("nan")}, "temperature must be finite and non-negative"),
+        ({"top_p": 0}, "top_p must be finite and in the interval"),
+        ({"top_p": 1.1}, "top_p must be finite and in the interval"),
+        ({"thinking": ""}, "thinking must not be empty"),
+        ({"reasoning_effort": "   "}, "reasoning_effort must not be empty"),
+    ],
+)
+def test_provider_request_controls_reject_invalid_values(kwargs, expected_message):
+    with pytest.raises(ValueError, match=expected_message):
+        ProviderRequestControls(**kwargs)
 
 
 def test_build_openai_chat_completions_payload_for_execute_probe():

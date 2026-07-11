@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
-from bayesprobe.model_gateway import ModelGatewayValidationError, StructuredModelRequest
+from bayesprobe.model_gateway import (
+    ModelGatewayValidationError,
+    ProviderRequestControls,
+    StructuredModelRequest,
+)
 from bayesprobe.schemas import EvidenceType, LikelihoodBand
 
 try:
@@ -71,6 +75,7 @@ class OpenAIModelGatewayConfig:
     timeout_seconds: float = 30.0
     max_output_tokens: int | None = None
     base_url: str | None = None
+    request_controls: ProviderRequestControls = ProviderRequestControls()
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str):
@@ -108,6 +113,10 @@ class OpenAIModelGatewayConfig:
             if not self.base_url.strip():
                 raise ValueError("openai model gateway base_url must not be empty")
             object.__setattr__(self, "base_url", self.base_url.strip())
+        if not isinstance(self.request_controls, ProviderRequestControls):
+            raise ValueError(
+                "openai model gateway request_controls must be ProviderRequestControls"
+            )
         object.__setattr__(self, "model", self.model.strip())
         object.__setattr__(self, "api_key_env", self.api_key_env.strip())
 
@@ -163,6 +172,7 @@ class OpenAIChatCompletionsModelGateway:
             request,
             model=self.config.model,
             max_output_tokens=self.config.max_output_tokens,
+            controls=self.config.request_controls,
         )
         response = self._client_for_request().chat.completions.create(**payload)
         return parse_openai_chat_completions_response(response)
@@ -218,6 +228,7 @@ def build_openai_chat_completions_payload(
     *,
     model: str,
     max_output_tokens: int | None = None,
+    controls: ProviderRequestControls | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
@@ -243,6 +254,15 @@ def build_openai_chat_completions_payload(
     }
     if max_output_tokens is not None:
         payload["max_tokens"] = max_output_tokens
+    request_controls = controls or ProviderRequestControls()
+    if request_controls.temperature is not None:
+        payload["temperature"] = request_controls.temperature
+    if request_controls.top_p is not None:
+        payload["top_p"] = request_controls.top_p
+    if request_controls.thinking is not None:
+        payload["thinking"] = {"type": request_controls.thinking}
+    if request_controls.reasoning_effort is not None:
+        payload["reasoning_effort"] = request_controls.reasoning_effort
     return payload
 
 

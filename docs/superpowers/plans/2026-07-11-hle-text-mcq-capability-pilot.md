@@ -79,10 +79,10 @@ class ProviderRequestControls:
 
 `thinking="enabled"` serializes as `{"type": "enabled"}`. Null values are omitted. Temperature must be finite and non-negative, `top_p` finite in `(0, 1]`, and non-null string controls must be non-empty.
 
-- [ ] Add failing tests that the Chat Completions payload includes exactly the four explicit controls and omits all four when unset.
-- [ ] Add failing tests for invalid finite/range/string values in both direct construction and JSON config loading.
-- [ ] Add failing artifact tests proving `api_key` is absent while the explicit policy is present.
-- [ ] Run RED:
+- [x] Add failing tests that the Chat Completions payload includes exactly the four explicit controls and omits all four when unset.
+- [x] Add failing tests for invalid finite/range/string values in both direct construction and JSON config loading.
+- [x] Add failing artifact tests proving `api_key` is absent while the explicit policy is present.
+- [x] Run RED:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
@@ -93,8 +93,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
 
 Expected: assertions fail because the request controls do not exist.
 
-- [ ] Implement `ProviderRequestControls`; embed it in `ModelGatewayConfig` and `OpenAIModelGatewayConfig`; pass it through `build_model_gateway(...)`.
-- [ ] Update `build_openai_chat_completions_payload(...)` to emit:
+- [x] Implement `ProviderRequestControls`; embed it in `ModelGatewayConfig` and `OpenAIModelGatewayConfig`; pass it through `build_model_gateway(...)`.
+- [x] Update `build_openai_chat_completions_payload(...)` to emit:
 
 ```python
 if controls.temperature is not None:
@@ -107,8 +107,8 @@ if controls.reasoning_effort is not None:
     payload["reasoning_effort"] = controls.reasoning_effort
 ```
 
-- [ ] Verify GREEN with the focused command above and ensure deterministic/OpenAI Responses tests remain unchanged.
-- [ ] Commit:
+- [x] Verify GREEN with the focused command above and ensure deterministic/OpenAI Responses tests remain unchanged.
+- [x] Commit:
 
 ```bash
 git add bayesprobe/model_gateway.py bayesprobe/openai_gateway.py bayesprobe/config.py \

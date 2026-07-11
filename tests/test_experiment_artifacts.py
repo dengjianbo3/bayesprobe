@@ -206,6 +206,10 @@ def test_artifact_snapshot_includes_chat_completions_provider_without_raw_api_ke
             "model": "provider-model",
             "api_key_env": "PROVIDER_API_KEY",
             "base_url": "https://provider.example/v1",
+            "temperature": 0,
+            "top_p": 1,
+            "thinking": "enabled",
+            "reasoning_effort": "max",
         },
         metadata={"api_key": "provider-secret-123"},
     )
@@ -228,6 +232,10 @@ def test_artifact_snapshot_includes_chat_completions_provider_without_raw_api_ke
         "model": "provider-model",
         "api_key_env": "PROVIDER_API_KEY",
         "base_url": "https://provider.example/v1",
+        "temperature": 0,
+        "top_p": 1,
+        "thinking": "enabled",
+        "reasoning_effort": "max",
     }
     assert manifest["model_gateway"] == snapshot["model_gateway"]
     assert "provider-secret-123" not in manifest_text

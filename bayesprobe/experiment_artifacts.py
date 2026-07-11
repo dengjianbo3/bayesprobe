@@ -246,6 +246,10 @@ def _model_gateway_snapshot(config: Any) -> dict[str, Any]:
             "fixture_path": str(Path(config.fixture_path))
             if config.fixture_path is not None
             else None,
+            "temperature": config.request_controls.temperature,
+            "top_p": config.request_controls.top_p,
+            "thinking": config.request_controls.thinking,
+            "reasoning_effort": config.request_controls.reasoning_effort,
         }
         if config.responses is not None:
             payload["scripted_response_tasks"] = sorted(config.responses)
@@ -259,6 +263,10 @@ def _model_gateway_snapshot(config: Any) -> dict[str, Any]:
             "max_output_tokens": config.get("max_output_tokens"),
             "base_url": config.get("base_url"),
             "fixture_path": config.get("fixture_path"),
+            "temperature": config.get("temperature"),
+            "top_p": config.get("top_p"),
+            "thinking": config.get("thinking"),
+            "reasoning_effort": config.get("reasoning_effort"),
         }
         responses = config.get("responses")
         if isinstance(responses, Mapping):

@@ -15,6 +15,7 @@ from bayesprobe.model_gateway import (
     ModelGatewayConfig,
     ModelGatewayValidationError,
     ModelInvocationTrace,
+    ProviderRequestControls,
     ScriptedModelGateway,
     StructuredModelRequest,
     build_model_gateway,
@@ -397,6 +398,10 @@ def test_build_model_gateway_creates_openai_chat_completions_gateway():
             "model": "provider-model",
             "api_key_env": "PROVIDER_API_KEY",
             "base_url": "https://provider.example/v1",
+            "temperature": 0,
+            "top_p": 1,
+            "thinking": "enabled",
+            "reasoning_effort": "max",
         }
     )
 
@@ -404,6 +409,12 @@ def test_build_model_gateway_creates_openai_chat_completions_gateway():
     assert gateway.config.model == "provider-model"
     assert gateway.config.api_key_env == "PROVIDER_API_KEY"
     assert gateway.config.base_url == "https://provider.example/v1"
+    assert gateway.config.request_controls == ProviderRequestControls(
+        temperature=0,
+        top_p=1,
+        thinking="enabled",
+        reasoning_effort="max",
+    )
 
 
 def test_build_model_gateway_creates_recorded_gateway(tmp_path: Path):

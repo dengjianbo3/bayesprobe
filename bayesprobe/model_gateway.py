@@ -72,6 +72,43 @@ class StructuredModelRequest:
 
 
 @dataclass(frozen=True)
+class ProviderRequestControls:
+    temperature: float | None = None
+    top_p: float | None = None
+    thinking: str | None = None
+    reasoning_effort: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.temperature is not None:
+            if (
+                type(self.temperature) not in (int, float)
+                or not math.isfinite(self.temperature)
+                or self.temperature < 0
+            ):
+                raise ValueError(
+                    "provider request temperature must be finite and non-negative"
+                )
+        if self.top_p is not None:
+            if (
+                type(self.top_p) not in (int, float)
+                or not math.isfinite(self.top_p)
+                or not 0 < self.top_p <= 1
+            ):
+                raise ValueError(
+                    "provider request top_p must be finite and in the interval (0, 1]"
+                )
+        for field_name in ("thinking", "reasoning_effort"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"provider request {field_name} must be a string")
+            if not value.strip():
+                raise ValueError(f"provider request {field_name} must not be empty")
+            object.__setattr__(self, field_name, value.strip())
+
+
+@dataclass(frozen=True)
 class ModelGatewayConfig:
     kind: str = "deterministic"
     responses: dict[str, dict[str, Any]] | None = None
@@ -81,6 +118,9 @@ class ModelGatewayConfig:
     max_output_tokens: int | None = None
     base_url: str | None = None
     fixture_path: str | Path | None = None
+    request_controls: ProviderRequestControls = field(
+        default_factory=ProviderRequestControls
+    )
 
 
 @dataclass(frozen=True)
@@ -392,6 +432,7 @@ def build_model_gateway(
                 timeout_seconds=gateway_config.timeout_seconds,
                 max_output_tokens=gateway_config.max_output_tokens,
                 base_url=gateway_config.base_url,
+                request_controls=gateway_config.request_controls,
             )
         )
     if gateway_config.kind == "openai_chat_completions":
@@ -409,6 +450,7 @@ def build_model_gateway(
                 timeout_seconds=gateway_config.timeout_seconds,
                 max_output_tokens=gateway_config.max_output_tokens,
                 base_url=gateway_config.base_url,
+                request_controls=gateway_config.request_controls,
             )
         )
     if gateway_config.kind == "recorded":
@@ -463,6 +505,12 @@ def _model_gateway_config_from_input(
         max_output_tokens=max_output_tokens,
         base_url=base_url,
         fixture_path=fixture_path,
+        request_controls=ProviderRequestControls(
+            temperature=config.get("temperature"),
+            top_p=config.get("top_p"),
+            thinking=config.get("thinking"),
+            reasoning_effort=config.get("reasoning_effort"),
+        ),
     )
 
 
@@ -474,6 +522,7 @@ __all__ = [
     "ModelGatewayConfig",
     "ModelGatewayValidationError",
     "ModelInvocationTrace",
+    "ProviderRequestControls",
     "ScriptedModelGateway",
     "StructuredModelRequest",
     "build_model_gateway",
