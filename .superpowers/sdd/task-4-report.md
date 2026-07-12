@@ -250,9 +250,10 @@ dependencies.
 ### Changes
 
 - Added one shared deterministic-computation root helper in evidence memory.
-  It recursively rejects secret keys and values before hashing, canonicalizes
-  Unicode, whitespace, and JSON structure, includes only a safe tool identity
-  and structured computation inputs, and returns a namespaced SHA-256 root.
+  It recursively rejects secret keys and values before hashing, sorts object
+  keys, preserves exact Unicode string values, includes only a safe tool
+  identity and structured computation inputs, and returns a namespaced SHA-256
+  root.
 - Stamped deterministic probe results with explicit `TOOL_RESULT` provenance.
   Their roots use method, inquiry goal, sorted targets, support/weaken/reframe
   conditions, probe type, and stable gateway identity, excluding probe, cycle,
@@ -295,3 +296,71 @@ dependencies.
 No blocking concerns. Deterministic roots intentionally describe computation
 semantics and environment identity, not rendered output or execution-instance
 metadata; changed stable inputs split the root.
+
+## Review Fix 4
+
+### Status
+
+Complete. All seven high-intensity final-gate findings were addressed from
+reviewed HEAD `813057a` without adding dependencies or Task 5/6, search,
+retrieval, or WebUI behavior.
+
+### Changes
+
+- Preserved deterministic-root string values as exact Unicode while retaining
+  canonical object-key ordering. Indentation, line boundaries, literal spaces,
+  composed/compatibility characters, and tool identity text now split roots;
+  secret checks inspect both exact and separately normalized text before hash.
+- Added a sandbox-owned structured execution-policy snapshot to every Python
+  execution record. Python roots now include the resolved image digest, user,
+  CPU/memory/pids, timeout/output limits, network, read-only root, tmpfs,
+  security controls, deterministic environment, and interpreter contract while
+  excluding execution, run, cycle, and probe ids.
+- Made signal-id commitment compare prior source identity, canonical content
+  fingerprint, canonical group, and derivation root before event idempotency,
+  credit, or identity-map assignment. Exact lineage reuse remains valid;
+  mismatches fail closed.
+- Added stable `RecordedModelGateway.model_identity`. Explicit safe fixture,
+  provider, and model metadata is preferred; otherwise canonical secret-free
+  fixture content is fingerprinted. Paths, transport metadata, headers, base
+  URLs, question text, and credentials cannot define the identity.
+- Populated native exclusive-open projection sender/source-claim events with
+  neutral unresolved likelihood and underdetermined frame fit. Non-exclusive
+  projections retain null unresolved likelihood, origin caps, and source
+  verification candidates.
+- Rechecked canonical source identity and canonical content immediately before
+  provenance hashing. Unicode-normalized credential forms now fail before a
+  provider request, fingerprint, memory snapshot, or ledger write.
+- Removed the explicit-seed probe exclusion. Native v0.2 seeded frames advertise
+  the v0.2 probe contract; only explicit legacy-migration framing uses v0.1.
+
+### RED Evidence
+
+1. Exact-string, normalized-secret, and signal-lineage regressions produced
+   `11 failed, 57 passed`.
+2. Python policy regressions produced `9 failed, 16 passed` because neither the
+   snapshot interface nor execution-record policy identity existed.
+3. Recorded identity and seeded routing regressions produced
+   `5 failed, 24 passed`.
+4. Projection and canonical-secret atomicity regressions produced `2 failed`.
+5. Fallback local-path exclusion and unmigrated v0.1 probe routing each
+   produced `1 failed` before their contracts were completed.
+
+### GREEN Evidence
+
+- Combined changed suites: `390 passed`.
+- Exact Task 4 focused suite: `298 passed in 0.57s`.
+- Schema, migration, framing, and recorded compatibility: `299 passed in 0.40s`.
+- Python evaluation callers: `26 passed in 0.82s`.
+- Full offline Python suite: `1103 passed, 10 skipped in 8.70s`.
+- Node WebUI stream regression: `15 passed, 0 failed`.
+- `git diff --check`: clean.
+
+### Concerns
+
+No blocking concerns. Code that intentionally observes nondeterministic state
+such as wall time, randomness, or container hostname remains in the same
+factual computation lineage when its exact code, plan, and safe sandbox policy
+are unchanged. This is conservative: differing outputs remain ledger-visible
+but do not claim fresh independent factual credit merely because the execution
+instance changed.

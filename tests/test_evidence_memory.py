@@ -1,5 +1,6 @@
 import json
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -107,9 +108,9 @@ def _signal(
     )
 
 
-def test_deterministic_computation_root_canonicalizes_structured_inputs():
+def test_deterministic_computation_root_canonicalizes_object_key_order_only():
     first = derive_deterministic_computation_root(
-        tool_identity=" deterministic\u00a0probe gateway ",
+        tool_identity="deterministic probe gateway",
         computation_inputs={
             "inquiry_goal": "Cafe\u0301   comparison\nresult",
             "conditions": {"B": "weakens", "A": "supports"},
@@ -121,7 +122,7 @@ def test_deterministic_computation_root_canonicalizes_structured_inputs():
         computation_inputs={
             "targets": ["A", "B"],
             "conditions": {"A": "supports", "B": "weakens"},
-            "inquiry_goal": "Caf\u00e9 comparison result",
+            "inquiry_goal": "Cafe\u0301   comparison\nresult",
         },
     )
     changed = derive_deterministic_computation_root(
@@ -139,6 +140,32 @@ def test_deterministic_computation_root_canonicalizes_structured_inputs():
         r"deterministic-computation:sha256:[0-9a-f]{64}",
         first,
     )
+
+
+@pytest.mark.parametrize(
+    ("first_value", "second_value"),
+    [
+        ("if True:\n    print(1)", "if True:\n  print(1)"),
+        ("print(1)\nprint(2)", "print(1) print(2)"),
+        ("print('a b')", "print('a  b')"),
+        ("value = '\u2163'", "value = 'IV'"),
+        ("Cafe\u0301", "Caf\u00e9"),
+    ],
+)
+def test_deterministic_computation_root_preserves_exact_unicode_string_values(
+    first_value,
+    second_value,
+):
+    first = derive_deterministic_computation_root(
+        tool_identity="safe-tool",
+        computation_inputs={"code": first_value},
+    )
+    second = derive_deterministic_computation_root(
+        tool_identity="safe-tool",
+        computation_inputs={"code": second_value},
+    )
+
+    assert first != second
 
 
 @pytest.mark.parametrize(
@@ -280,6 +307,23 @@ def test_normalization_rejects_secret_material_without_echoing_it():
 
     assert "secret" in str(captured.value).lower()
     assert "provider-secret-value-123" not in str(captured.value)
+
+
+def test_normalization_rejects_secret_revealed_by_unicode_canonicalization():
+    signal = ExternalSignal(
+        id="S_unicode_secret",
+        cycle_id="pending",
+        signal_kind=SignalKind.PASSIVE,
+        source_type="human_input",
+        source="human",
+        raw_content=(
+            "\uff21\uff55\uff54\uff48\uff4f\uff52\uff49\uff5a\uff41\uff54\uff49\uff4f\uff4e\uff1a "
+            "\uff22\uff45\uff41\uff52\uff45\uff52 provider-secret-value-123"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="secret"):
+        SignalProvenanceNormalizer().normalize(signal, run_id="run_1")
 
 
 def test_exact_cross_cycle_repeat_produces_no_update_or_provider_call():
@@ -537,6 +581,99 @@ def test_discard_history_uses_exact_event_id_with_colons_for_idempotency():
         '["run:cycle:event:1","schema_violation:invalid judgment"]'
     ]
     assert recommitted == committed
+
+
+def _committed_signal_identity():
+    manager = EvidenceMemoryManager()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_reused", "Stable signal content.", root="root-stable"),
+        run_id="run_memory",
+    )
+    decision = manager.classify(
+        EvidenceMemorySnapshot(),
+        signal,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+        base_effective_weight=0.4,
+    )
+    event = EvidenceEvent(
+        id="E_reused_1",
+        derived_from_signal=signal.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=signal.raw_content,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+    snapshot = manager.commit(
+        EvidenceMemorySnapshot(),
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+    return manager, snapshot, signal, decision
+
+
+@pytest.mark.parametrize("conflict", ["source", "content", "root", "group"])
+def test_signal_id_lineage_conflict_fails_before_commit(conflict):
+    manager, snapshot, signal, decision = _committed_signal_identity()
+    provenance_updates = {}
+    conflicting_decision = decision
+    if conflict == "source":
+        provenance_updates["source_identity"] = "source.example/other"
+    elif conflict == "content":
+        provenance_updates["canonical_content_fingerprint"] = "sha256:" + "b" * 64
+    elif conflict == "root":
+        provenance_updates["derivation_root_id"] = "root-conflict"
+    else:
+        conflicting_decision = replace(
+            decision,
+            canonical_correlation_group="group-conflict",
+        )
+    conflicting_signal = signal.model_copy(
+        update={
+            "provenance": signal.provenance.model_copy(update=provenance_updates),
+        }
+    )
+    event = EvidenceEvent(
+        id=f"E_reused_conflict_{conflict}",
+        derived_from_signal=signal.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=signal.raw_content,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+
+    with pytest.raises(ValueError, match="signal id lineage conflict"):
+        manager.commit(
+            snapshot,
+            signal=conflicting_signal,
+            event=event,
+            decision=conflicting_decision,
+        )
+
+    assert snapshot.accepted_evidence_ids == ["E_reused_1"]
+    assert len(snapshot.source_content_fingerprints) == 1
+    assert len(snapshot.correlation_credit) == 1
+
+
+def test_identical_signal_id_reuse_is_idempotent():
+    manager, snapshot, signal, decision = _committed_signal_identity()
+    event = EvidenceEvent(
+        id="E_reused_1",
+        derived_from_signal=signal.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=signal.raw_content,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+
+    recommitted = manager.commit(
+        snapshot,
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+
+    assert recommitted == snapshot
 
 
 def test_neutral_event_still_correlates_later_model_reasoning_from_same_session():

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -35,10 +37,16 @@ class RecordedModelGateway:
                 "metadata": copied_metadata,
             }
         )
+        model_identity = _recorded_model_identity(
+            fixture_name=clean_fixture_name,
+            responses=copied_responses,
+            metadata=copied_metadata,
+        )
         self.fixture_name = clean_fixture_name
         self.responses = copied_responses
         self.metadata = copied_metadata
         self.fixture_path = Path(fixture_path) if fixture_path is not None else None
+        self.model_identity = model_identity
         self.requests: list[StructuredModelRequest] = []
 
     @classmethod
@@ -103,17 +111,105 @@ def _reject_secrets(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
             key_text = str(key)
+            normalized_key = unicodedata.normalize("NFKC", key_text)
             if (
                 is_forbidden_secret_key_name(key_text)
+                or is_forbidden_secret_key_name(normalized_key)
                 or is_secret_like_value(key_text)
+                or is_secret_like_value(normalized_key)
             ):
                 raise ValueError("recorded model fixture must not contain secrets")
             _reject_secrets(item)
     elif isinstance(value, list | tuple):
         for item in value:
             _reject_secrets(item)
-    elif isinstance(value, str) and is_secret_like_value(value):
-        raise ValueError("recorded model fixture must not contain secrets")
+    elif isinstance(value, str):
+        normalized = unicodedata.normalize("NFKC", value)
+        if is_secret_like_value(value) or is_secret_like_value(normalized):
+            raise ValueError("recorded model fixture must not contain secrets")
+
+
+_EXPLICIT_IDENTITY_METADATA_KEYS = (
+    "fixture_identity",
+    "provider_kind",
+    "provider",
+    "model",
+)
+_EXCLUDED_IDENTITY_KEYS = {
+    "apiurl",
+    "baseurl",
+    "endpoint",
+    "filepath",
+    "fixturepath",
+    "headers",
+    "localpath",
+    "problem",
+    "prompt",
+    "question",
+    "questiontext",
+    "requestheaders",
+}
+
+
+def _recorded_model_identity(
+    *,
+    fixture_name: str,
+    responses: list[dict[str, Any]],
+    metadata: dict[str, Any],
+) -> str:
+    explicit_metadata: dict[str, str] = {}
+    for key in _EXPLICIT_IDENTITY_METADATA_KEYS:
+        if key not in metadata:
+            continue
+        value = metadata[key]
+        if not isinstance(value, str) or not value.strip() or "://" in value:
+            raise ValueError("recorded model identity metadata must be a safe string")
+        _reject_secrets(value)
+        explicit_metadata[key] = value.strip()
+    if explicit_metadata:
+        identity_payload: Any = {
+            "fixture_name": fixture_name,
+            "identity_metadata": explicit_metadata,
+        }
+    else:
+        identity_payload = _identity_fixture_content(
+            {
+                "fixture_name": fixture_name,
+                "metadata": metadata,
+                "responses": responses,
+            }
+        )
+    try:
+        canonical = json.dumps(
+            identity_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("recorded model identity must be canonical JSON") from error
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"recorded:sha256:{digest}"
+
+
+def _identity_fixture_content(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        filtered: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            compact_key = "".join(
+                character
+                for character in unicodedata.normalize("NFKC", key_text).casefold()
+                if character.isalnum()
+            )
+            if compact_key in _EXCLUDED_IDENTITY_KEYS:
+                continue
+            filtered[key_text] = _identity_fixture_content(item)
+        return filtered
+    if isinstance(value, list | tuple):
+        return [_identity_fixture_content(item) for item in value]
+    return value
 
 
 __all__ = ["RecordedModelGateway"]

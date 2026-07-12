@@ -7,7 +7,7 @@ from bayesprobe.evaluation.artifacts import (
 )
 from bayesprobe.evaluation.contracts import ArmCaseResult
 from bayesprobe.evaluation.hle import HLEDatasetAdapter, HLESelectionConfig
-from bayesprobe.evaluation.python_probe import PythonExecutionRecord
+from bayesprobe.evaluation.python_probe import DockerPythonSandbox, PythonExecutionRecord
 from bayesprobe.evaluation.runner import (
     CapabilityExperimentRunner,
     build_experiment_identity,
@@ -117,6 +117,9 @@ class CountingArm:
                     timed_out=False,
                     policy_violation=False,
                     repair_attempt_index=0,
+                    policy_snapshot=DockerPythonSandbox().policy_snapshot(
+                        image_digest="sha256:" + "f" * 64,
+                    ),
                 )
             )
         index = int(case.sample_id.rsplit("_", 1)[1])

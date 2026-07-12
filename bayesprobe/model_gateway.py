@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -659,7 +660,8 @@ def model_gateway_identity(gateway: object) -> str:
     identity = getattr(gateway, "model_identity", None)
     if isinstance(identity, str) and identity.strip():
         cleaned = identity.strip()
-        if is_secret_like_value(cleaned):
+        normalized = unicodedata.normalize("NFKC", cleaned)
+        if is_secret_like_value(cleaned) or is_secret_like_value(normalized):
             raise ValueError("model gateway identity must not contain secret material")
         return cleaned
     return model_gateway_adapter_kind(gateway)

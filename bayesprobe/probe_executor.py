@@ -116,14 +116,19 @@ class ModelBackedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
     ) -> list[ExternalSignal]:
-        native_v02 = (
-            context.belief_state.schema_version == "v0.2"
-            and context.belief_state.task_frame is not None
-            and context.belief_state.task_frame.framing_method
-            != FramingMethod.LEGACY_MIGRATION
-            and context.belief_state.task_frame.framing_trace.get("source")
-            != "hypothesis_seeds"
+        task_frame = context.belief_state.task_frame
+        explicit_legacy_migration = (
+            task_frame is not None
+            and task_frame.framing_method == FramingMethod.LEGACY_MIGRATION
         )
+        if (
+            context.belief_state.schema_version != "v0.2"
+            and not explicit_legacy_migration
+        ):
+            raise ValueError(
+                "model-backed probe execution requires v0.2 or explicit legacy migration"
+            )
+        native_v02 = not explicit_legacy_migration
         request = StructuredModelRequest(
             task="execute_probe",
             input={

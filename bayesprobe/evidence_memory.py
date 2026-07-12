@@ -48,13 +48,12 @@ def derive_deterministic_computation_root(
     """Hash stable, secret-free computation semantics into one factual root."""
     if not isinstance(tool_identity, str) or not tool_identity.strip():
         raise ValueError("deterministic computation tool identity must not be empty")
-    canonical_tool_identity = _canonical_computation_text(tool_identity)
-    _reject_secret_computation_text(canonical_tool_identity)
+    _reject_secret_computation_text(tool_identity)
     canonical_inputs = _canonical_computation_value(computation_inputs)
     payload = json.dumps(
         {
             "computation_inputs": canonical_inputs,
-            "tool_identity": canonical_tool_identity,
+            "tool_identity": tool_identity,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -73,12 +72,17 @@ class SignalProvenanceNormalizer:
         run_session = _clean_text(run_id)
         supplied = signal.provenance
         origin = supplied.epistemic_origin if supplied else _origin_for(signal)
-        source_identity = _clean_text(
+        raw_source_identity = (
             supplied.source_identity
             if supplied
             else f"{signal.source_type}:{signal.source}"
         )
+        source_identity = _clean_text(raw_source_identity)
         canonical_content = _clean_text(signal.raw_content)
+        _reject_secret_hash_text(raw_source_identity)
+        _reject_secret_hash_text(source_identity)
+        _reject_secret_hash_text(signal.raw_content)
+        _reject_secret_hash_text(canonical_content)
         fingerprint = _sha256_identity(source_identity, canonical_content)
         provider_identity = (
             supplied.provider_model_or_tool_identity if supplied else None
@@ -241,13 +245,34 @@ class EvidenceMemoryManager:
         event: EvidenceEvent,
         decision: EvidenceMemoryDecision,
     ) -> EvidenceMemorySnapshot:
+        provenance = _required_provenance(signal)
+        prior_source_content = snapshot.source_content_fingerprints.get(signal.id)
+        prior_content = snapshot.content_fingerprints.get(signal.id)
+        prior_root = snapshot.derivation_roots.get(signal.id)
+        identity_present = any(
+            value is not None
+            for value in (prior_source_content, prior_content, prior_root)
+        )
+        if identity_present:
+            prior_identity = _source_content_identity_parts(prior_source_content)
+            current_identity = (
+                provenance.source_identity,
+                provenance.canonical_content_fingerprint,
+                decision.canonical_correlation_group,
+            )
+            if (
+                prior_identity != current_identity
+                or prior_content != provenance.canonical_content_fingerprint
+                or prior_root != provenance.derivation_root_id
+            ):
+                raise ValueError("signal id lineage conflict")
+
         if event.id in snapshot.accepted_evidence_ids or any(
             decode_discard_history_entry(item)[0] == event.id
             for item in snapshot.discard_and_schema_history
         ):
             return snapshot
 
-        provenance = _required_provenance(signal)
         accepted_ids = list(snapshot.accepted_evidence_ids)
         discard_history = list(snapshot.discard_and_schema_history)
         if event.discard_reason is None:
@@ -321,8 +346,14 @@ def _canonical_computation_text(value: str) -> str:
 
 
 def _reject_secret_computation_text(value: str) -> None:
-    if is_secret_like_value(value):
+    normalized = _canonical_computation_text(value)
+    if is_secret_like_value(value) or is_secret_like_value(normalized):
         raise ValueError("deterministic computation inputs contain secret material")
+
+
+def _reject_secret_hash_text(value: str) -> None:
+    if is_secret_like_value(value) or is_secret_like_value(_clean_text(value)):
+        raise ValueError("external signal contains secret material")
 
 
 def _canonical_computation_value(value: Any) -> Any:
@@ -333,33 +364,27 @@ def _canonical_computation_value(value: Any) -> Any:
                 raise ValueError(
                     "deterministic computation inputs require string object keys"
                 )
-            canonical_key = _canonical_computation_text(key)
-            if not canonical_key:
+            if not key.strip():
                 raise ValueError(
                     "deterministic computation inputs require non-empty object keys"
                 )
+            normalized_key = _canonical_computation_text(key)
             if (
                 is_forbidden_secret_key_name(key)
-                or is_forbidden_secret_key_name(canonical_key)
+                or is_forbidden_secret_key_name(normalized_key)
                 or is_secret_like_value(key)
-                or is_secret_like_value(canonical_key)
+                or is_secret_like_value(normalized_key)
             ):
                 raise ValueError(
                     "deterministic computation inputs contain secret material"
                 )
-            if canonical_key in canonical:
-                raise ValueError(
-                    "deterministic computation inputs have duplicate canonical keys"
-                )
-            canonical[canonical_key] = _canonical_computation_value(item)
+            canonical[key] = _canonical_computation_value(item)
         return canonical
     if isinstance(value, list | tuple):
         return [_canonical_computation_value(item) for item in value]
     if isinstance(value, str):
-        canonical_text = _canonical_computation_text(value)
         _reject_secret_computation_text(value)
-        _reject_secret_computation_text(canonical_text)
-        return canonical_text
+        return value
     if value is None or isinstance(value, bool | int):
         return value
     if isinstance(value, float):
@@ -393,10 +418,20 @@ def _reject_secret_signal(signal: ExternalSignal) -> None:
 def _reject_secret_provenance(provenance: SignalProvenance) -> None:
     payload = provenance.model_dump(mode="python")
     for key, value in payload.items():
-        if is_forbidden_secret_key_name(key):
+        normalized_key = _clean_text(key)
+        if is_forbidden_secret_key_name(key) or is_forbidden_secret_key_name(
+            normalized_key
+        ):
             raise ValueError("signal provenance contains secret material")
         values = value if isinstance(value, list) else [value]
-        if any(isinstance(item, str) and is_secret_like_value(item) for item in values):
+        if any(
+            isinstance(item, str)
+            and (
+                is_secret_like_value(item)
+                or is_secret_like_value(_clean_text(item))
+            )
+            for item in values
+        ):
             raise ValueError("signal provenance contains secret material")
 
 

@@ -2510,12 +2510,120 @@ def test_external_projection_decomposes_source_claim_and_generates_verification_
     assert source_event.reliability == 0.5
     assert source_event.independence == 0.45
     assert source_event.verifiability == 0.4
+    assert sender_event.unresolved_likelihood is None
+    assert source_event.unresolved_likelihood is None
     assert candidate.candidate_id == "pc_run_1_cycle_projection_E1_source_verify_source"
     assert candidate.source == "passive_signal"
     assert candidate.candidate_probe.id == "P_run_1_cycle_projection_E1_source_verify_source"
     assert candidate.candidate_probe.method == "source_tracing"
     assert candidate.candidate_probe.cycle_id == "cycle_projection"
     assert candidate.candidate_probe.target_hypotheses == ["H1", "H2"]
+
+
+def test_native_exclusive_open_projection_events_are_unresolved_neutral():
+    core = BayesProbeCore()
+    belief_state = make_exact_belief_state()
+    hypothesis_ids = [hypothesis.id for hypothesis in belief_state.hypotheses]
+    cycle = CycleRecord(
+        cycle_id="cycle_native_projection",
+        run_id="run_1",
+        cycle_index=1,
+        signal_shape=CycleSignalShape.PASSIVE_ONLY,
+    )
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=belief_state,
+        probe_set=ProbeSet(
+            probe_set_id="ps_native_projection",
+            cycle_id=cycle.cycle_id,
+            probes=[],
+            selection_reason="Native projection contract regression.",
+            may_be_empty=True,
+        ),
+        signals=[
+            ExternalSignal(
+                id="S_native_projection",
+                cycle_id="pending",
+                signal_kind=SignalKind.PASSIVE,
+                source_type="external_agent_projection",
+                source="agent_a",
+                raw_content="Agent A cites Source X while endorsing one named value.",
+                initial_target_hypotheses=hypothesis_ids,
+            )
+        ],
+    )
+
+    assert [event.evidence_type for event in result.evidence_events] == [
+        EvidenceType.SENDER_JUDGMENT,
+        EvidenceType.SOURCE_CLAIM,
+    ]
+    assert all(event.schema_version == "v0.2" for event in result.evidence_events)
+    assert all(
+        event.unresolved_likelihood == LikelihoodBand.NEUTRAL
+        for event in result.evidence_events
+    )
+    assert all(
+        event.frame_fit == FrameFit.UNDERDETERMINED
+        for event in result.evidence_events
+    )
+    assert result.evidence_events[0].reliability == 0.55
+    assert result.evidence_events[1].verifiability == 0.4
+    assert len(result.probe_candidates) == 1
+    assert result.probe_candidates[0].candidate_probe.method == "source_tracing"
+
+
+def test_unicode_normalized_secret_fails_before_provider_memory_or_ledger(tmp_path):
+    ledger = JsonlLedgerStore(tmp_path / "unicode-secret-ledger.jsonl")
+    gateway = ScriptedModelGateway(
+        {
+            "judge_evidence": {
+                "evidence_type": "neutral",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "interpretation": "This response must never be requested.",
+                "quality_overrides": {},
+            }
+        }
+    )
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    belief_state = make_belief_state(cycle_id="cycle_0")
+    cycle = CycleRecord(
+        cycle_id="cycle_unicode_secret",
+        run_id="run_1",
+        cycle_index=1,
+        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+    )
+    signal = ExternalSignal(
+        id="S_unicode_secret_atomic",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="human_input",
+        source="human",
+        raw_content=(
+            "\uff21\uff55\uff54\uff48\uff4f\uff52\uff49\uff5a\uff41\uff54\uff49\uff4f\uff4e\uff1a "
+            "\uff22\uff45\uff41\uff52\uff45\uff52 provider-secret-value-123"
+        ),
+        initial_target_hypotheses=["H1", "H2"],
+    )
+
+    with pytest.raises(ValueError, match="secret"):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=belief_state,
+            probe_set=ProbeSet(
+                probe_set_id="ps_unicode_secret",
+                cycle_id=cycle.cycle_id,
+                probes=[],
+                selection_reason="Secret atomicity regression.",
+                may_be_empty=True,
+            ),
+            signals=[signal],
+        )
+
+    assert signal.provenance is None
+    assert belief_state.evidence_memory is None
+    assert gateway.requests == []
+    assert ledger.read_all() == []
 
 
 def test_low_reliability_signal_caps_quality_scores():

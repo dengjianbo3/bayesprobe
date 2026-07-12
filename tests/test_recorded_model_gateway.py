@@ -71,6 +71,112 @@ def test_recorded_model_gateway_replays_response_by_task_and_signal_id(tmp_path:
     assert gateway.requests[0].input["signal_id"] == "S_chem_constant_volume"
 
 
+def test_recorded_model_identity_uses_safe_explicit_fixture_provider_model_metadata():
+    first_payload = recorded_fixture_payload()
+    reordered_metadata = {
+        "recorded_at": "2026-07-10",
+        "model": "deepseek-v4-flash",
+        "provider_kind": "openai_chat_completions",
+    }
+    second_payload = {**first_payload, "metadata": reordered_metadata}
+
+    first = RecordedModelGateway(
+        fixture_name=first_payload["fixture_name"],
+        responses=first_payload["responses"],
+        metadata=first_payload["metadata"],
+        fixture_path="/tmp/first/location.json",
+    )
+    same_identity = RecordedModelGateway(
+        fixture_name=second_payload["fixture_name"],
+        responses=second_payload["responses"],
+        metadata=second_payload["metadata"],
+        fixture_path="/different/location.json",
+    )
+    different_model = RecordedModelGateway(
+        fixture_name=first_payload["fixture_name"],
+        responses=first_payload["responses"],
+        metadata={**first_payload["metadata"], "model": "deepseek-v5"},
+    )
+    different_fixture = RecordedModelGateway(
+        fixture_name="different-fixture",
+        responses=first_payload["responses"],
+        metadata=first_payload["metadata"],
+    )
+
+    assert first.model_identity == same_identity.model_identity
+    assert first.model_identity != different_model.model_identity
+    assert first.model_identity != different_fixture.model_identity
+    assert "/tmp/" not in first.model_identity
+
+
+def test_recorded_model_identity_fallback_fingerprints_canonical_fixture_content():
+    response = recorded_fixture_payload()["responses"]
+    first = RecordedModelGateway(
+        fixture_name="fallback-fixture",
+        responses=response,
+        metadata={"purpose": "offline regression", "language": "en"},
+    )
+    reordered = RecordedModelGateway(
+        fixture_name="fallback-fixture",
+        responses=response,
+        metadata={"language": "en", "purpose": "offline regression"},
+    )
+    changed = RecordedModelGateway(
+        fixture_name="fallback-fixture",
+        responses=[
+            {
+                **response[0],
+                "response": {
+                    **response[0]["response"],
+                    "interpretation": "Different recorded judgment.",
+                },
+            }
+        ],
+        metadata={"language": "en", "purpose": "offline regression"},
+    )
+
+    assert first.model_identity == reordered.model_identity
+    assert first.model_identity != changed.model_identity
+    assert first.model_identity.startswith("recorded:sha256:")
+
+
+def test_recorded_model_identity_fallback_excludes_request_and_location_metadata():
+    response = recorded_fixture_payload()["responses"]
+    baseline = RecordedModelGateway(
+        fixture_name="fallback-safe-fields",
+        responses=response,
+        metadata={"purpose": "offline regression"},
+    )
+    with_unsafe_identity_inputs = RecordedModelGateway(
+        fixture_name="fallback-safe-fields",
+        responses=response,
+        metadata={
+            "purpose": "offline regression",
+            "base_url": "https://provider.invalid/v1",
+            "headers": {"x-request-id": "volatile-request"},
+            "question_text": "A user-specific question must not define the model.",
+            "local_path": "/private/fixtures/provider-recording.json",
+        },
+    )
+
+    assert baseline.model_identity == with_unsafe_identity_inputs.model_identity
+
+
+def test_recorded_model_identity_rejects_unicode_normalized_secret_metadata():
+    payload = recorded_fixture_payload()
+    payload["metadata"]["model"] = (
+        "\uff21\uff55\uff54\uff48\uff4f\uff52\uff49\uff5a\uff41\uff54\uff49\uff4f\uff4e\uff1a "
+        "\uff22\uff45\uff41\uff52\uff45\uff52 provider-secret-value-123"
+    )
+
+    with pytest.raises(ValueError, match="secrets"):
+        RecordedModelGateway(
+            fixture_name=payload["fixture_name"],
+            responses=payload["responses"],
+            metadata=payload["metadata"],
+        )
+
+
 def test_recorded_model_gateway_raises_clear_error_when_no_entry_matches(
     tmp_path: Path,
 ):

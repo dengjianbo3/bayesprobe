@@ -1,3 +1,4 @@
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,34 @@ from bayesprobe.schemas import (
 
 
 IMAGE_DIGEST = "sha256:" + "a" * 64
+POLICY_SNAPSHOT = {
+    "runtime": "docker",
+    "image_digest": IMAGE_DIGEST,
+    "user": "65532:65532",
+    "resources": {"cpus": 1.0, "memory": "1g", "pids_limit": 64},
+    "limits": {"timeout_seconds": 30.0, "max_output_bytes": 64 * 1024},
+    "network": {"mode": "none"},
+    "filesystem": {
+        "read_only_root": True,
+        "host_mounts": [],
+        "tmpfs": [
+            {
+                "path": "/tmp",
+                "options": ["rw", "nosuid", "nodev"],
+                "size": "64m",
+            }
+        ],
+    },
+    "security": {"cap_drop": ["ALL"], "no_new_privileges": True},
+    "environment": {
+        "PYTHONHASHSEED": "0",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+    },
+    "interpreter": {"argv": ["python", "-s", "-"], "stdin": "interactive"},
+}
 
 
 def test_python_probe_plan_accepts_python_mode_with_code():
@@ -157,6 +186,16 @@ def test_docker_command_enforces_all_sandbox_controls_without_host_mounts():
     assert not any(argument.startswith("--volume") for argument in command)
 
 
+def test_sandbox_policy_snapshot_captures_every_material_execution_control():
+    sandbox = DockerPythonSandbox(
+        DockerPythonSandboxConfig(image="bayesprobe-hle-python:v0.1")
+    )
+
+    snapshot = sandbox.policy_snapshot(image_digest=IMAGE_DIGEST)
+
+    assert snapshot == POLICY_SNAPSHOT
+
+
 def test_preflight_resolves_immutable_image_id():
     calls = []
 
@@ -240,6 +279,7 @@ def test_execution_request_and_record_capture_immutable_audit_fields():
         timed_out=False,
         policy_violation=False,
         repair_attempt_index=0,
+        policy_snapshot=deepcopy(POLICY_SNAPSHOT),
     )
 
     assert request.code == record.code
@@ -313,7 +353,11 @@ def execution_record(
     timed_out=False,
     policy_violation=False,
     repair_attempt_index=0,
+    policy_snapshot=None,
 ):
+    effective_policy_snapshot = deepcopy(policy_snapshot or POLICY_SNAPSHOT)
+    if policy_snapshot is None:
+        effective_policy_snapshot["image_digest"] = image_digest
     return PythonExecutionRecord(
         execution_id=execution_id or f"exec_{repair_attempt_index}",
         run_id="run_1",
@@ -332,6 +376,7 @@ def execution_record(
         timed_out=timed_out,
         policy_violation=policy_violation,
         repair_attempt_index=repair_attempt_index,
+        policy_snapshot=effective_policy_snapshot,
     )
 
 
@@ -465,7 +510,9 @@ def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():
     )
 
     assert first_signal.provenance.epistemic_origin == EpistemicOrigin.TOOL_RESULT
-    assert first_signal.provenance.environment_state_id == IMAGE_DIGEST
+    assert first_signal.provenance.environment_state_id.startswith(
+        "deterministic-computation:sha256:"
+    )
     assert first_signal.provenance.derivation_root_id == (
         second_signal.provenance.derivation_root_id
     )
@@ -521,6 +568,69 @@ def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():
     assert repeated.evidence_memory.correlation_credit == (
         first.evidence_memory.correlation_credit
     )
+
+
+def test_python_computation_root_changes_for_every_material_policy_field_only():
+    probe, context = probe_context()
+
+    def root_for(policy_snapshot, *, execution_id="exec-policy"):
+        image_digest = policy_snapshot["image_digest"]
+        sandbox = FakeSandbox(
+            [
+                execution_record(
+                    execution_id=execution_id,
+                    image_digest=image_digest,
+                    policy_snapshot=policy_snapshot,
+                )
+            ]
+        )
+        sandbox.image = ResolvedSandboxImage(
+            requested_reference="sandbox:v0.1",
+            digest=image_digest,
+        )
+        gateway = PythonAugmentedProbeToolGateway(
+            SequenceModelGateway([python_plan()]),
+            sandbox,
+        )
+        signal = gateway.execute_probe(probe=probe, context=context)[0]
+        return signal.provenance.derivation_root_id
+
+    base_root = root_for(POLICY_SNAPSHOT)
+    assert base_root == root_for(POLICY_SNAPSHOT, execution_id="exec-policy-other")
+
+    changes = [
+        (("runtime",), "another-runtime"),
+        (("image_digest",), "sha256:" + "b" * 64),
+        (("user",), "1000:1000"),
+        (("resources", "cpus"), 2.0),
+        (("resources", "memory"), "2g"),
+        (("resources", "pids_limit"), 32),
+        (("limits", "timeout_seconds"), 15.0),
+        (("limits", "max_output_bytes"), 4096),
+        (("network", "mode"), "isolated-test-network"),
+        (("filesystem", "read_only_root"), False),
+        (("filesystem", "host_mounts"), ["/fixture"]),
+        (("filesystem", "tmpfs", 0, "path"), "/scratch"),
+        (("filesystem", "tmpfs", 0, "options"), ["rw", "nodev"]),
+        (("filesystem", "tmpfs", 0, "size"), "32m"),
+        (("security", "cap_drop"), ["NET_RAW"]),
+        (("security", "no_new_privileges"), False),
+        (("environment", "PYTHONHASHSEED"), "1"),
+        (("environment", "OMP_NUM_THREADS"), "2"),
+        (("environment", "OPENBLAS_NUM_THREADS"), "2"),
+        (("environment", "MKL_NUM_THREADS"), "2"),
+        (("environment", "NUMEXPR_NUM_THREADS"), "2"),
+        (("interpreter", "argv"), ["python", "-I", "-"]),
+        (("interpreter", "stdin"), "closed"),
+    ]
+    for path, changed_value in changes:
+        changed_policy = deepcopy(POLICY_SNAPSHOT)
+        target = changed_policy
+        for component in path[:-1]:
+            target = target[component]
+        target[path[-1]] = changed_value
+
+        assert root_for(changed_policy) != base_root, path
 
 
 def test_reasoning_mode_uses_model_signal_without_starting_sandbox():

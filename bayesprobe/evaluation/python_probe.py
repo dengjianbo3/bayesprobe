@@ -34,6 +34,7 @@ _PLAN_KEYS = frozenset(
     {"mode", "purpose", "target_hypotheses", "expected_observation", "code"}
 )
 _PYTHON_SANDBOX_TOOL_IDENTITY = "python_sandbox:v1"
+_PYTHON_SANDBOX_POLICY_IDENTITY = "python_sandbox_policy:v1"
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -136,6 +137,7 @@ class PythonExecutionRecord:
     timed_out: bool
     policy_violation: bool
     repair_attempt_index: int
+    policy_snapshot: dict[str, Any]
 
     @property
     def success(self) -> bool:
@@ -275,6 +277,53 @@ class DockerPythonSandbox:
             "-",
         ]
 
+    def policy_snapshot(self, *, image_digest: str) -> dict[str, Any]:
+        if not isinstance(image_digest, str) or not _IMAGE_DIGEST.fullmatch(
+            image_digest
+        ):
+            raise ValueError("sandbox policy image_digest must be immutable")
+        return {
+            "runtime": "docker",
+            "image_digest": image_digest,
+            "user": self.config.user,
+            "resources": {
+                "cpus": float(self.config.cpus),
+                "memory": self.config.memory,
+                "pids_limit": self.config.pids_limit,
+            },
+            "limits": {
+                "timeout_seconds": float(self.config.timeout_seconds),
+                "max_output_bytes": self.config.max_output_bytes,
+            },
+            "network": {"mode": "none"},
+            "filesystem": {
+                "read_only_root": True,
+                "host_mounts": [],
+                "tmpfs": [
+                    {
+                        "path": "/tmp",
+                        "options": ["rw", "nosuid", "nodev"],
+                        "size": self.config.tmpfs_size,
+                    }
+                ],
+            },
+            "security": {
+                "cap_drop": ["ALL"],
+                "no_new_privileges": True,
+            },
+            "environment": {
+                "PYTHONHASHSEED": "0",
+                "OMP_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+            },
+            "interpreter": {
+                "argv": ["python", "-s", "-"],
+                "stdin": "interactive",
+            },
+        }
+
     def execute(self, request: PythonExecutionRequest) -> PythonExecutionRecord:
         container_name = _container_name(request.execution_id)
         command = self.docker_command(request.image, container_name=container_name)
@@ -343,6 +392,9 @@ class DockerPythonSandbox:
             timed_out=timed_out,
             policy_violation=_looks_like_policy_violation(stderr),
             repair_attempt_index=request.repair_attempt_index,
+            policy_snapshot=self.policy_snapshot(
+                image_digest=request.image.digest,
+            ),
         )
 
     def _remove_container(self, container_name: str) -> None:
@@ -664,6 +716,13 @@ class PythonAugmentedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
     ) -> ExternalSignal:
+        policy_snapshot = dict(record.policy_snapshot)
+        if policy_snapshot.get("image_digest") != record.image_digest:
+            raise ValueError("Python execution policy image does not match record")
+        environment_state_id = derive_deterministic_computation_root(
+            tool_identity=_PYTHON_SANDBOX_POLICY_IDENTITY,
+            computation_inputs=policy_snapshot,
+        )
         derivation_root_id = derive_deterministic_computation_root(
             tool_identity=_PYTHON_SANDBOX_TOOL_IDENTITY,
             computation_inputs={
@@ -673,7 +732,7 @@ class PythonAugmentedProbeToolGateway:
                     "expected_observation": plan.expected_observation,
                     "target_hypotheses": sorted(plan.target_hypotheses),
                 },
-                "environment": {"image_digest": record.image_digest},
+                "environment": policy_snapshot,
             },
         )
         raw_content = "\n".join(
@@ -707,7 +766,7 @@ class PythonAugmentedProbeToolGateway:
                     f"tool:{_PYTHON_SANDBOX_TOOL_IDENTITY}:{record.image_digest}"
                 ),
                 canonical_content_fingerprint="pending-normalization",
-                environment_state_id=record.image_digest,
+                environment_state_id=environment_state_id,
             ),
         )
 

@@ -19,6 +19,7 @@ from bayesprobe.probe_executor import (
     ProbeExecutionContext,
     ProbeExecutor,
 )
+from bayesprobe.recorded_gateway import RecordedModelGateway
 from bayesprobe.probe_planner import ProbePlanner, ProbePlanningConfig
 from bayesprobe.schemas import (
     AnswerChoice,
@@ -32,6 +33,7 @@ from bayesprobe.schemas import (
     ProbeSet,
     SignalKind,
 )
+from bayesprobe.task_framing import migrate_legacy_belief_state
 
 
 class RecordingGateway:
@@ -268,10 +270,17 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
         ["H1", "H2"],
         method="answer_choice_discrimination",
     )
+    initialized = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_exec",
+            problem="Which answer choice is correct?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    )
     context = ProbeExecutionContext(
         run_id="run_exec",
         cycle_id="run_exec_cycle_1",
-        belief_state=make_belief_state(),
+        belief_state=initialized.belief_state,
         metadata={
             "problem": "Which answer choice is correct?",
             "task_context": "Use graph-chain irreducibility and aperiodicity.",
@@ -291,8 +300,8 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert request.task == "execute_probe"
     assert request.prompt_id == "probe_execution"
     assert request.schema_name == "ProbeSignal"
-    assert request.prompt_version == "v0.1"
-    assert request.schema_version == "v0.1"
+    assert request.prompt_version == "v0.2"
+    assert request.schema_version == "v0.2"
     assert request.input["problem"] == "Which answer choice is correct?"
     assert request.input["task_context"] == (
         "Use graph-chain irreducibility and aperiodicity."
@@ -300,13 +309,52 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert "initial_context" not in request.input
     assert "SUPPORTS: This initial signal" not in json.dumps(request.input)
     assert request.input["probe"]["target_hypotheses"] == ["H1", "H2"]
-    assert request.input["hypotheses"][0]["statement"] == "The claim is supported."
+    assert request.input["hypotheses"][0]["statement"] == (
+        "The fixture's H1 condition holds."
+    )
     assert signal.signal_kind == SignalKind.ACTIVE
     assert signal.source_type == "model_probe_gateway"
     assert signal.source == "model_gateway:scripted"
     assert signal.raw_content.startswith("A direct comparison")
     assert signal.provenance.provider_model_or_tool_identity == "scripted"
     assert signal.provenance.session_id == "run_exec"
+
+
+def test_model_backed_probe_gateway_rejects_unmigrated_v01_state():
+    gateway = ModelBackedProbeToolGateway(
+        ScriptedModelGateway(
+            responses={"execute_probe": {"raw_content": "Must not execute."}}
+        )
+    )
+
+    with pytest.raises(ValueError, match="explicit legacy migration"):
+        gateway.execute_probe(
+            probe=make_probe("P_unmigrated", ["H1", "H2"]),
+            context=ProbeExecutionContext(
+                run_id="run_exec",
+                cycle_id="run_exec_cycle_1",
+                belief_state=make_belief_state(),
+            ),
+        )
+
+
+def test_model_backed_probe_gateway_uses_v01_only_for_explicit_migration():
+    model_gateway = ScriptedModelGateway(
+        responses={"execute_probe": {"raw_content": "Legacy migrated execution."}}
+    )
+    migrated = migrate_legacy_belief_state(make_belief_state())
+
+    ModelBackedProbeToolGateway(model_gateway).execute_probe(
+        probe=make_probe("P_migrated", ["H1", "H2"]),
+        context=ProbeExecutionContext(
+            run_id="run_exec",
+            cycle_id="run_exec_cycle_1",
+            belief_state=migrated,
+        ),
+    )
+
+    assert migrated.task_frame.framing_method.value == "legacy_migration"
+    assert model_gateway.requests[0].schema_version == "v0.1"
 
 
 def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_empty():
@@ -351,7 +399,18 @@ def test_model_probe_provenance_distinguishes_openai_compatible_models():
 
     probe = make_probe("P_model_identity", ["H1", "H2"])
     probe_set = make_probe_set([probe])
-    context = make_context()
+    initialized = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_exec",
+            problem="Which model-backed claim is supported?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    )
+    context = ProbeExecutionContext(
+        run_id="run_exec",
+        cycle_id="run_exec_cycle_1",
+        belief_state=initialized.belief_state,
+    )
 
     def execute(model: str):
         gateway = StubOpenAICompatibleGateway(
@@ -381,6 +440,53 @@ def test_model_probe_provenance_distinguishes_openai_compatible_models():
     )
     assert first.provenance.correlation_group == same_model.provenance.correlation_group
     assert first.provenance.correlation_group != second.provenance.correlation_group
+
+
+def test_recorded_probe_provenance_distinguishes_fixture_and_model_identity():
+    initialized = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_recorded_identity",
+            problem="Which fixture-backed claim is supported?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    )
+    context = ProbeExecutionContext(
+        run_id="run_recorded_identity",
+        cycle_id="run_exec_cycle_1",
+        belief_state=initialized.belief_state,
+        metadata={"problem": "Which fixture-backed claim is supported?"},
+    )
+    probe = make_probe("P_recorded", ["H1", "H2"])
+    response = [
+        {
+            "match": {"task": "execute_probe"},
+            "response": {"raw_content": "A recorded observation supports H1."},
+        }
+    ]
+
+    def execute(fixture_name, model):
+        gateway = RecordedModelGateway(
+            fixture_name=fixture_name,
+            responses=response,
+            metadata={"provider_kind": "recorded-provider", "model": model},
+        )
+        return ProbeExecutor(ModelBackedProbeToolGateway(gateway)).execute_probe_set(
+            probe_set=make_probe_set([probe]),
+            context=context,
+        ).signals[0]
+
+    first = execute("fixture-a", "model-a")
+    same = execute("fixture-a", "model-a")
+    different_fixture = execute("fixture-b", "model-a")
+    different_model = execute("fixture-a", "model-b")
+
+    assert first.provenance.correlation_group == same.provenance.correlation_group
+    assert first.provenance.correlation_group != (
+        different_fixture.provenance.correlation_group
+    )
+    assert first.provenance.correlation_group != (
+        different_model.provenance.correlation_group
+    )
 
 
 def test_executor_preserves_probe_and_signal_order():

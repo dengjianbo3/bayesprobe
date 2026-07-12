@@ -927,6 +927,7 @@ class EvidenceIntegrationGate:
         likelihoods = {hypothesis_id: LikelihoodBand.NEUTRAL for hypothesis_id in hypothesis_ids}
         if endorsed_hypothesis in likelihoods:
             likelihoods[endorsed_hypothesis] = LikelihoodBand.WEAKLY_CONFIRMING
+        unresolved_likelihood = _projection_unresolved_likelihood(belief_state)
 
         return self._event(
             event_id=event_id,
@@ -934,6 +935,8 @@ class EvidenceIntegrationGate:
             hypothesis_ids=hypothesis_ids,
             evidence_type=EvidenceType.SENDER_JUDGMENT,
             likelihoods=likelihoods,
+            unresolved_likelihood=unresolved_likelihood,
+            frame_fit=FrameFit.UNDERDETERMINED,
             interpretation="External projection treated as sender judgment, not direct source evidence.",
             is_duplicate=is_duplicate,
         )
@@ -952,12 +955,15 @@ class EvidenceIntegrationGate:
             belief_state=belief_state,
             probe_set=probe_set,
         )
+        unresolved_likelihood = _projection_unresolved_likelihood(belief_state)
         return self._event(
             event_id=event_id,
             signal=signal,
             hypothesis_ids=hypothesis_ids,
             evidence_type=EvidenceType.SOURCE_CLAIM,
             likelihoods={hypothesis_id: LikelihoodBand.NEUTRAL for hypothesis_id in hypothesis_ids},
+            unresolved_likelihood=unresolved_likelihood,
+            frame_fit=FrameFit.UNDERDETERMINED,
             interpretation="Claimed source separated for direct verification; neutral until verified.",
             is_duplicate=is_duplicate,
         )
@@ -1221,6 +1227,20 @@ def _is_native_v02_state(belief_state: BeliefState) -> bool:
         and belief_state.evidence_memory is not None
         and belief_state.task_frame.framing_method != FramingMethod.LEGACY_MIGRATION
     )
+
+
+def _projection_unresolved_likelihood(
+    belief_state: BeliefState,
+) -> LikelihoodBand | None:
+    frame_state = belief_state.frame_state
+    if frame_state is None:
+        return None
+    if (
+        frame_state.competition == HypothesisCompetition.EXCLUSIVE
+        and frame_state.coverage == HypothesisCoverage.OPEN
+    ):
+        return LikelihoodBand.NEUTRAL
+    return None
 
 
 def _judgment_route_for_state(belief_state: BeliefState) -> str:
