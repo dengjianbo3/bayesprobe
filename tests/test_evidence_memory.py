@@ -516,6 +516,26 @@ def test_shared_model_provenance_keys_reject_nfkc_sensitive_session_before_hash(
     assert digest_calls == []
 
 
+def test_shared_model_gateway_signal_source_preserves_safe_exact_adapter():
+    assert evidence_memory.derive_model_gateway_signal_source(
+        "custom|adapter"
+    ) == "model_gateway:custom|adapter"
+
+
+@pytest.mark.parametrize(
+    "adapter_kind",
+    [" custom-adapter", "custom-adapter\nnext", _NFKC_SENSITIVE_NAME],
+)
+def test_shared_model_gateway_signal_source_rejects_invalid_adapter(
+    adapter_kind,
+):
+    with pytest.raises(ValueError, match="model signal source") as exc_info:
+        evidence_memory.derive_model_gateway_signal_source(adapter_kind)
+
+    assert adapter_kind not in str(exc_info.value)
+    assert "api_key" not in str(exc_info.value)
+
+
 def test_model_correlation_group_uses_exact_session_identity():
     normalizer = SignalProvenanceNormalizer()
     signal = ExternalSignal(

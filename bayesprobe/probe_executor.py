@@ -5,6 +5,7 @@ from typing import Any, Protocol
 
 from bayesprobe.evidence_memory import (
     derive_deterministic_computation_root,
+    derive_model_gateway_signal_source,
     derive_model_provenance_keys,
 )
 from bayesprobe.ledger import JsonlLedgerStore
@@ -128,6 +129,7 @@ class ModelBackedProbeToolGateway:
             session_id=context.run_id,
         )
         adapter_kind = model_gateway_adapter_kind(self._model_gateway)
+        signal_source = derive_model_gateway_signal_source(adapter_kind)
         provenance = SignalProvenance(
             epistemic_origin=EpistemicOrigin.MODEL_REASONING,
             source_identity=model_keys.source_identity,
@@ -182,7 +184,7 @@ class ModelBackedProbeToolGateway:
                 cycle_id=context.cycle_id,
                 signal_kind=SignalKind.ACTIVE,
                 source_type="model_probe_gateway",
-                source=f"model_gateway:{adapter_kind}",
+                source=signal_source,
                 raw_content=raw_content,
                 generated_by_probe=probe.id,
                 initial_target_hypotheses=list(probe.target_hypotheses),

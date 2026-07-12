@@ -1724,6 +1724,12 @@ No blocking concerns.
   shared by planning, plan repair, reasoning, and code repair; reasoning reuses
   the exact precomputed provenance rather than reconstructing it after provider
   work.
+- The adapter/source follow-up exposes
+  `derive_model_gateway_signal_source(adapter_kind)`. It preserves safe exact
+  adapter text, including benign pipes, while rejecting outer whitespace,
+  control characters, and exact/NFKC-sensitive text. Direct and Python gateways
+  derive this static source before their first provider call and reuse it in the
+  returned model-origin signal.
 
 ### Changed Files
 
@@ -1797,6 +1803,49 @@ reasoning returned an unverified signal after two provider calls.
   function and all three callers invoke that function. Existing exact
   K/Kelvin-sign, internal-whitespace, fallback identity, non-model source,
   replay/lineage, recorded gateway, and successful provider tests remain green.
+
+### Adapter/Source Follow-Up Verification
+
+- Initial adapter/source RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_shared_model_gateway_signal_source_preserves_safe_exact_adapter tests/test_evidence_memory.py::test_shared_model_gateway_signal_source_rejects_invalid_adapter tests/test_probe_executor.py::test_model_backed_probe_rejects_sensitive_adapter_before_provider_call tests/evaluation/test_python_probe.py::test_python_gateway_rejects_sensitive_adapter_before_first_provider_call -q --tb=short -p no:cacheprovider
+```
+
+Result: `6 failed in 0.32s`. The shared source API was absent and the direct
+gateway performed provider work. The Python fixture had no explicit model
+identity, so identity fallback rejected its adapter before isolating source
+validation. After assigning a separate safe model identity, the corrected RED
+remained `6 failed in 0.30s`: both gateways accepted the sensitive adapter and
+performed work, while all shared source cases failed because the API was absent.
+
+- Adapter/source GREEN: the corrected command -> `6 passed in 0.21s`.
+- Refreshed direct provenance/gateway suites: the command above under Direct
+  provenance/gateway suites -> `400 passed in 0.92s`.
+- Refreshed Task 4 focused: the command above under Task 4 focused -> `512
+  passed in 2.13s`.
+- Refreshed compatibility: the command above under Compatibility -> `336 passed
+  in 0.39s`.
+- Refreshed full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1406 passed, 10 skipped in 11.42s`.
+- Refreshed Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0
+  failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean after the
+  adapter/source follow-up; the range check is repeated after commit.
+
+### Adapter/Source Self-Review
+
+- `model_gateway_adapter_kind` is resolved before provider access, passed to one
+  shared source constructor, and the returned exact source is retained for the
+  eventual `ExternalSignal`. Neither consumer interpolates adapter text after a
+  response.
+- A benign `custom|adapter` remains valid because pipe is not reserved in the
+  raw signal source. Leading whitespace, line controls, and an NFKC `api_key`
+  adapter fail with generic text and no offending value.
+- Direct and Python regressions use an explicit safe `model_identity` plus the
+  sensitive adapter, proving the adapter/source check itself causes zero
+  provider requests. Python additionally proves zero sandbox preflight,
+  execution, process metrics, or belief-state mutation.
 
 ### Concerns
 

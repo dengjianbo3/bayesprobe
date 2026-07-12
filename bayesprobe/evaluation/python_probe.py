@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal, Protocol
 
 from bayesprobe.evidence_memory import (
     derive_deterministic_computation_root,
+    derive_model_gateway_signal_source,
     derive_model_provenance_keys,
 )
 from bayesprobe.lifecycle import resolve_belief_lifecycle
@@ -527,6 +528,7 @@ class PythonAugmentedProbeToolGateway:
             session_id=context.run_id,
         )
         adapter_kind = model_gateway_adapter_kind(self._model_gateway)
+        reasoning_signal_source = derive_model_gateway_signal_source(adapter_kind)
         reasoning_provenance = SignalProvenance(
             epistemic_origin=EpistemicOrigin.MODEL_REASONING,
             source_identity=model_keys.source_identity,
@@ -562,7 +564,7 @@ class PythonAugmentedProbeToolGateway:
                         probe=probe,
                         context=context,
                         provider_version=provider_version,
-                        adapter_kind=adapter_kind,
+                        signal_source=reasoning_signal_source,
                         provenance=reasoning_provenance,
                     )
                 ]
@@ -697,7 +699,7 @@ class PythonAugmentedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
         provider_version: Literal["v0.1", "v0.2"],
-        adapter_kind: str,
+        signal_source: str,
         provenance: SignalProvenance,
     ) -> ExternalSignal:
         payload = self._model_gateway.complete_structured(
@@ -723,7 +725,7 @@ class PythonAugmentedProbeToolGateway:
             cycle_id=context.cycle_id,
             signal_kind=SignalKind.ACTIVE,
             source_type="model_probe_gateway",
-            source=f"model_gateway:{adapter_kind}",
+            source=signal_source,
             raw_content=raw_content.strip(),
             generated_by_probe=probe.id,
             initial_target_hypotheses=list(plan.target_hypotheses),

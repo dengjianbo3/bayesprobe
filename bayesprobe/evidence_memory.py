@@ -216,6 +216,21 @@ class ModelProvenanceKeys:
     correlation_group: str
 
 
+def derive_model_gateway_signal_source(adapter_kind: str) -> str:
+    if (
+        not isinstance(adapter_kind, str)
+        or not adapter_kind
+        or adapter_kind.strip() != adapter_kind
+        or not all(character.isprintable() for character in adapter_kind)
+    ):
+        raise ValueError("model signal source is invalid")
+    try:
+        exact_adapter_kind = _validated_exact_model_identity_text(adapter_kind)
+    except ValueError:
+        raise ValueError("model signal source is invalid") from None
+    return f"model_gateway:{exact_adapter_kind}"
+
+
 def derive_model_provenance_keys(
     *,
     provider_identity: str,
@@ -1150,6 +1165,7 @@ __all__ = [
     "SignalProvenanceNormalizer",
     "cycle_signal_source_content_signature",
     "derive_deterministic_computation_root",
+    "derive_model_gateway_signal_source",
     "derive_model_provenance_keys",
     "observe_cycle_signal_duplicate",
 ]

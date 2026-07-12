@@ -568,6 +568,33 @@ def test_model_backed_probe_rejects_sensitive_session_before_provider_call():
     assert state.model_dump(mode="json") == prior_state
 
 
+def test_model_backed_probe_rejects_sensitive_adapter_before_provider_call():
+    model_gateway = ScriptedModelGateway(
+        responses={
+            "execute_probe": {"raw_content": "This must not be requested."}
+        }
+    )
+    model_gateway.adapter_kind = _NFKC_SENSITIVE_NAME
+    state = make_native_belief_state()
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="model signal source") as exc_info:
+        ModelBackedProbeToolGateway(model_gateway).execute_probe(
+            probe=make_probe("P_sensitive_adapter", ["H1", "H2"]),
+            context=ProbeExecutionContext(
+                run_id="run_exec",
+                cycle_id="run_exec_cycle_1",
+                belief_state=state,
+            ),
+        )
+
+    error_text = str(exc_info.value)
+    assert _NFKC_SENSITIVE_NAME not in error_text
+    assert "api_key" not in error_text
+    assert model_gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
+
+
 @pytest.mark.parametrize("invalid_envelope", _INVALID_MIGRATION_ENVELOPES)
 def test_model_backed_probe_gateway_rejects_invalid_migration_envelope(
     invalid_envelope,

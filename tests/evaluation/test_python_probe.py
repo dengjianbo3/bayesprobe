@@ -786,6 +786,28 @@ def test_python_gateway_rejects_sensitive_session_before_first_provider_call(
     assert context.belief_state.model_dump(mode="json") == prior_state
 
 
+def test_python_gateway_rejects_sensitive_adapter_before_first_provider_call():
+    model = SequenceModelGateway([python_plan()])
+    model.model_identity = "safe-model"
+    model.adapter_kind = _NFKC_SENSITIVE_NAME
+    sandbox = FakeSandbox([execution_record()])
+    gateway = PythonAugmentedProbeToolGateway(model, sandbox)
+    probe, context = probe_context()
+    prior_state = context.belief_state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="model signal source") as exc_info:
+        gateway.execute_probe(probe=probe, context=context)
+
+    error_text = str(exc_info.value)
+    assert _NFKC_SENSITIVE_NAME not in error_text
+    assert "api_key" not in error_text
+    assert model.requests == []
+    assert sandbox.preflight_calls == 0
+    assert sandbox.requests == []
+    assert set(gateway.process_metrics.values()) == {0}
+    assert context.belief_state.model_dump(mode="json") == prior_state
+
+
 def test_python_augmented_gateway_converts_successful_execution_to_active_signal():
     model = SequenceModelGateway([python_plan()])
     sandbox = FakeSandbox([execution_record()])
