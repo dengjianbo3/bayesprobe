@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from dataclasses import replace
 
@@ -1533,6 +1534,299 @@ def test_same_root_restatement_has_zero_independence():
 def test_correlation_credit_policy_rejects_invalid_caps(value):
     with pytest.raises(ValueError, match="correlation credit cap"):
         CorrelationCreditPolicy(value)
+
+
+@pytest.mark.parametrize("cap", [1.0, 0.2], ids=["default", "custom"])
+def test_manager_policy_snapshot_accepts_credit_at_exact_cap(cap):
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=cap
+        )
+    )
+    snapshot = EvidenceMemorySnapshot(
+        correlation_credit={"unrelated-policy-group|A|confirming": cap}
+    )
+
+    assert manager.validate_policy_snapshot(snapshot) is snapshot
+    assert manager.validate_transition(
+        snapshot,
+        snapshot,
+        evidence_events=[],
+        normalized_signals=[],
+        existing_evidence_ids=[],
+        frame_version=1,
+    ) == snapshot
+
+
+@pytest.mark.parametrize("cap", [1.0, 0.2], ids=["default", "custom"])
+def test_manager_policy_snapshot_rejects_smallest_representable_overcap(cap):
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=cap
+        )
+    )
+    credit_key = "unrelated-policy-group|A|confirming"
+    overcap = math.nextafter(cap, math.inf)
+    snapshot = EvidenceMemorySnapshot(
+        correlation_credit={credit_key: overcap}
+    )
+
+    with pytest.raises(ValueError, match="correlation credit policy") as exc_info:
+        manager.validate_policy_snapshot(snapshot)
+
+    error_text = str(exc_info.value)
+    assert credit_key not in error_text
+    assert repr(overcap) not in error_text
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["remember", "classify-identity", "classify-credit", "commit"],
+)
+def test_manager_entry_points_reject_unrelated_overcap_credit(operation):
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_policy_entry_point",
+            "A policy-entry signal supports option A.",
+            root="root-policy-entry-point",
+        ),
+        run_id="run_memory",
+    )
+    valid = EvidenceMemorySnapshot()
+    invalid = EvidenceMemorySnapshot(
+        correlation_credit={
+            "unrelated-policy-group|B|disconfirming": 0.3
+        }
+    )
+    likelihoods = {"A": LikelihoodBand.MODERATELY_CONFIRMING}
+    decision = manager.classify(
+        valid,
+        signal,
+        likelihoods=likelihoods,
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=0.1,
+    )
+    event = _directional_memory_event(
+        signal=signal,
+        event_id="E_policy_entry_point",
+        decision=decision,
+        likelihoods=likelihoods,
+    )
+
+    with pytest.raises(ValueError, match="correlation credit policy"):
+        if operation == "remember":
+            manager.remember_signal_identity(invalid, signal)
+        elif operation == "classify-identity":
+            manager.classify(invalid, signal)
+        elif operation == "classify-credit":
+            manager.classify(valid, signal, credit_snapshot=invalid)
+        else:
+            manager.commit(
+                invalid,
+                signal=signal,
+                event=event,
+                decision=decision,
+            )
+
+
+def test_transition_rejects_unchanged_overcap_prior_without_reconstruction():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    invalid = EvidenceMemorySnapshot(
+        correlation_credit={"unrelated-policy-group|A|confirming": 0.3}
+    )
+
+    with pytest.raises(ValueError, match="evidence memory transition is invalid"):
+        manager.validate_transition(
+            invalid,
+            invalid,
+            evidence_events=[],
+            normalized_signals=[],
+            existing_evidence_ids=[],
+            frame_version=1,
+        )
+
+
+def test_transition_rejects_overcap_candidate_before_reconstruction(monkeypatch):
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    prior = EvidenceMemorySnapshot()
+    candidate = EvidenceMemorySnapshot(
+        correlation_credit={"unrelated-policy-group|A|confirming": 0.3}
+    )
+    reconstruction_calls = []
+    original_validate_transition = manager._validate_transition
+
+    def recording_validate_transition(*args, **kwargs):
+        reconstruction_calls.append(True)
+        return original_validate_transition(*args, **kwargs)
+
+    monkeypatch.setattr(
+        manager,
+        "_validate_transition",
+        recording_validate_transition,
+    )
+
+    with pytest.raises(ValueError, match="evidence memory transition is invalid"):
+        manager.validate_transition(
+            prior,
+            candidate,
+            evidence_events=[],
+            normalized_signals=[],
+            existing_evidence_ids=[],
+            frame_version=1,
+        )
+
+    assert reconstruction_calls == []
+
+
+def test_gate_rejects_overcap_prior_before_normalizing_or_calling_provider():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    gateway = CountingGateway()
+    normalizer = RecordingProvenanceNormalizer()
+    state = _state()
+    invalid_memory = state.evidence_memory.model_copy(
+        update={
+            "correlation_credit": {
+                "unrelated-policy-group|A|confirming": 0.3
+            }
+        }
+    )
+    state = BeliefState.model_validate(
+        state.model_copy(
+            update={"evidence_memory": invalid_memory}
+        ).model_dump(mode="python")
+    )
+    prior_state = state.model_dump(mode="json")
+    signal = _signal(
+        "S_policy_provider_preflight",
+        "A fresh source observation supports option A.",
+        root="root-policy-provider-preflight",
+    )
+
+    with pytest.raises(ValueError, match="correlation credit policy"):
+        EvidenceIntegrationGate(
+            model_gateway=gateway,
+            memory_manager=manager,
+            provenance_normalizer=normalizer,
+        ).integrate(
+            cycle=_cycle(1),
+            belief_state=state,
+            probe_set=_probe_set(1),
+            signals=[signal],
+        )
+
+    assert gateway.requests == []
+    assert normalizer.calls == []
+    assert state.model_dump(mode="json") == prior_state
+
+
+def test_gate_replay_rejects_overcap_prior_before_normalization():
+    policy = CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=0.2
+    )
+    manager = EvidenceMemoryManager(policy)
+    state = _state()
+    cycle = _cycle(1)
+    probe_set = _probe_set(1)
+    signal = _signal(
+        "S_policy_replay_preflight",
+        "A replayed source observation supports option A.",
+        root="root-policy-replay-preflight",
+    )
+    first = EvidenceIntegrationGate(
+        model_gateway=CountingGateway(),
+        memory_manager=manager,
+    ).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=probe_set,
+        signals=[signal],
+    )
+    event = first.evidence_events[0]
+    overcap_credit = dict(first.evidence_memory.correlation_credit)
+    overcap_credit["unrelated-policy-group|A|confirming"] = 0.3
+    invalid_memory = first.evidence_memory.model_copy(
+        update={"correlation_credit": overcap_credit}
+    )
+    ledger_refs = {
+        record_type: list(record_ids)
+        for record_type, record_ids in state.ledger_refs.items()
+    }
+    ledger_refs["evidence_events"] = [event.id]
+    replay_state = BeliefState.model_validate(
+        state.model_copy(
+            update={
+                "evidence_memory": invalid_memory,
+                "ledger_refs": ledger_refs,
+            }
+        ).model_dump(mode="python")
+    )
+    gateway = CountingGateway()
+    normalizer = RecordingProvenanceNormalizer()
+    prior_state = replay_state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="correlation credit policy"):
+        EvidenceIntegrationGate(
+            model_gateway=gateway,
+            memory_manager=manager,
+            provenance_normalizer=normalizer,
+        ).integrate(
+            cycle=cycle,
+            belief_state=replay_state,
+            probe_set=probe_set,
+            signals=[signal],
+        )
+
+    assert gateway.requests == []
+    assert normalizer.calls == []
+    assert replay_state.model_dump(mode="json") == prior_state
+
+
+@pytest.mark.parametrize("marker", _MIGRATION_MARKERS)
+def test_explicit_migration_empty_memory_respects_custom_policy(marker):
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+
+    result = EvidenceIntegrationGate(
+        model_gateway=CountingGateway(),
+        memory_manager=manager,
+    ).integrate(
+        cycle=_cycle(1),
+        belief_state=_migrated_state(marker),
+        probe_set=_probe_set(1),
+        signals=[
+            _signal(
+                f"S_policy_migration_{marker}",
+                "A migrated observation supports option A.",
+                root=f"root-policy-migration-{marker}",
+            )
+        ],
+    )
+
+    assert result.evidence_events[0].schema_version == "v0.1"
+    assert all(
+        credit <= 0.2
+        for credit in result.evidence_memory.correlation_credit.values()
+    )
 
 
 def test_credit_keys_include_direction_subject_and_internal_unresolved_subject():

@@ -374,6 +374,31 @@ class EvidenceMemoryManager:
     def __init__(self, policy: CorrelationCreditPolicy | None = None) -> None:
         self._policy = policy or CorrelationCreditPolicy()
 
+    def validate_policy_snapshot(
+        self,
+        snapshot: EvidenceMemorySnapshot,
+    ) -> EvidenceMemorySnapshot:
+        """Require every persisted credit balance to fit this manager's policy."""
+        _require_supported_memory_version(snapshot)
+        cap = self._policy.max_cumulative_effective_weight_per_direction
+        try:
+            credits = snapshot.correlation_credit.values()
+        except AttributeError:
+            raise ValueError(
+                "evidence memory violates correlation credit policy"
+            ) from None
+        if any(
+            type(credit) not in (int, float)
+            or not math.isfinite(credit)
+            or credit < 0
+            or credit > cap
+            for credit in credits
+        ):
+            raise ValueError(
+                "evidence memory violates correlation credit policy"
+            )
+        return snapshot
+
     def validate_signal_lineage(
         self,
         snapshot: EvidenceMemorySnapshot,
@@ -381,7 +406,7 @@ class EvidenceMemoryManager:
         *,
         canonical_correlation_group: str | None = None,
     ) -> None:
-        _require_supported_memory_version(snapshot)
+        self.validate_policy_snapshot(snapshot)
         provenance = _required_provenance(signal)
         prior_source_content = snapshot.source_content_fingerprints.get(signal.id)
         prior_content = snapshot.content_fingerprints.get(signal.id)
@@ -425,7 +450,7 @@ class EvidenceMemoryManager:
         *,
         canonical_correlation_group: str | None = None,
     ) -> EvidenceMemorySnapshot:
-        _require_supported_memory_version(snapshot)
+        self.validate_policy_snapshot(snapshot)
         provenance = _required_provenance(signal)
         prior_identities = {
             signal_id: parts
@@ -491,7 +516,7 @@ class EvidenceMemoryManager:
         signal: ExternalSignal,
         require_existing: bool,
     ) -> str:
-        _require_supported_memory_version(snapshot)
+        self.validate_policy_snapshot(snapshot)
         digest = canonical_signal_identity_digest(signal)
         existing = snapshot.event_signal_identity_digests.get(event_id)
         if existing is None:
@@ -522,8 +547,8 @@ class EvidenceMemoryManager:
             candidate = EvidenceMemorySnapshot.model_validate(
                 next_snapshot.model_dump(mode="python")
             )
-            _require_supported_memory_version(prior)
-            _require_supported_memory_version(candidate)
+            self.validate_policy_snapshot(prior)
+            self.validate_policy_snapshot(candidate)
             self._validate_transition(
                 prior,
                 candidate,
@@ -668,10 +693,10 @@ class EvidenceMemoryManager:
         frame_version: int = 1,
         base_effective_weight: float = 0.0,
     ) -> EvidenceMemoryDecision:
-        _require_supported_memory_version(snapshot)
+        self.validate_policy_snapshot(snapshot)
         if credit_snapshot is None:
             credit_snapshot = snapshot
-        _require_supported_memory_version(credit_snapshot)
+        self.validate_policy_snapshot(credit_snapshot)
         provenance = _required_provenance(signal)
         prior_identities = {
             signal_id: parts
@@ -774,6 +799,7 @@ class EvidenceMemoryManager:
         event: EvidenceEvent,
         decision: EvidenceMemoryDecision,
     ) -> EvidenceMemorySnapshot:
+        self.validate_policy_snapshot(snapshot)
         event_known = _event_id_in_lifecycle(snapshot, event.id)
         signal_identity_digest = self.validate_event_signal_identity(
             snapshot,

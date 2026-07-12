@@ -1949,3 +1949,97 @@ control passed.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 28
+
+### Design Decision
+
+- Added manager-owned `validate_policy_snapshot`. Evidence Memory schema stays
+  policy-agnostic and continues to validate structural grammar and finite
+  non-negative credit; the manager additionally requires every balance to be at
+  or below its configured `CorrelationCreditPolicy` cap.
+- Policy comparison is exact. There is no floating tolerance, clamping, or
+  migration: a balance exactly equal to the cap is valid, while the smallest
+  representable float above it is invalid. Errors are generic and never include
+  a correlation key or balance.
+- Direct lineage, identity remembering, event binding, classification (both
+  identity and optional credit snapshots), commit, and transition entry points
+  all invoke the same validator. Native transition validation checks both the
+  recursively validated prior and candidate before reconstruction.
+- `EvidenceIntegrationGate` validates its prior working memory immediately
+  after lifecycle resolution and before signal normalization, event planning,
+  replay handling, or provider access. Core's isolated authoritative manager
+  applies the same policy to custom-gate prior/candidate transitions before
+  solver, state construction, or ledger work.
+
+### Changed Files
+
+- `bayesprobe/evidence_memory.py`
+- `bayesprobe/evidence.py`
+- `tests/test_evidence_memory.py`
+- `tests/test_core_cycles.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_manager_policy_snapshot_accepts_credit_at_exact_cap tests/test_evidence_memory.py::test_manager_policy_snapshot_rejects_smallest_representable_overcap tests/test_evidence_memory.py::test_manager_entry_points_reject_unrelated_overcap_credit tests/test_evidence_memory.py::test_transition_rejects_unchanged_overcap_prior_without_reconstruction tests/test_evidence_memory.py::test_transition_rejects_overcap_candidate_before_reconstruction tests/test_evidence_memory.py::test_gate_rejects_overcap_prior_before_normalizing_or_calling_provider tests/test_evidence_memory.py::test_gate_replay_rejects_overcap_prior_before_normalization tests/test_evidence_memory.py::test_explicit_migration_empty_memory_respects_custom_policy tests/test_core_cycles.py::test_core_replay_rejects_same_overcap_prior_and_candidate_atomically tests/test_core_cycles.py::test_core_replay_rejects_candidate_only_overcap_atomically -q --tb=short -p no:cacheprovider
+```
+
+Result: `13 failed, 3 passed in 0.68s`. The manager interface was absent;
+remember/classify/credit-snapshot/commit all accepted an unrelated `0.3`
+balance under cap `0.2`; unchanged over-cap prior/candidate replay passed
+transition and Core; candidate validation entered reconstruction; and both new
+and replay gate paths reached normalization, with the new path also reaching
+the provider. Both authentic migration markers and the pre-existing
+candidate-only Core rejection were the three passing controls.
+
+- GREEN/refactor: the same focused command -> `16 passed in 0.34s`.
+- Directly affected suites:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_core_cycles.py tests/test_model_gateway.py
+  tests/test_probe_executor.py -q --tb=short -p no:cacheprovider` -> `453
+  passed in 2.02s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_probe_executor.py tests/evaluation/test_python_probe.py
+  tests/test_evidence_memory.py tests/test_core_cycles.py -q -p
+  no:cacheprovider` -> `536 passed in 2.45s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.44s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1430 passed, 10 skipped in 12.17s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before the
+  report; both are repeated after the report and the range check after commit.
+
+### Self-Review
+
+- Default cap `1.0` and custom cap `0.2` accept exact-cap snapshots and reject
+  `math.nextafter(cap, +inf)`. No epsilon can preserve a policy-invalid balance,
+  and no code path mutates or silently clamps it.
+- An over-cap unrelated key is rejected before identity-only remembering,
+  identity classification, optional credit-snapshot classification, or commit.
+  Transition tests prove unchanged over-cap prior/candidate replay cannot pass
+  and candidate-only over-cap memory fails before reconstruction.
+- Production new-signal and event-id replay tests instrument both the provenance
+  normalizer and model gateway. Both observe zero calls, retain byte-equal caller
+  state, and receive secret-free generic errors.
+- Core custom-gate replay tests cover both an over-cap prior retained in the
+  candidate and a valid prior with only the candidate over cap. The solver sees
+  zero calls, caller state is unchanged, and ledger bytes stay empty.
+- Authentic explicit migration through both recognized markers remains on the
+  reviewed v0.1 provider route with empty policy-valid memory. Existing exact
+  replay, cumulative multi-event projection, non-default policy sharing,
+  manager isolation, schema, migration, and recorded-gateway suites remain
+  green.
+
+### Concerns
+
+No blocking concerns.

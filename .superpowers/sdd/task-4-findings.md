@@ -139,3 +139,7 @@
 ## Twenty-second full-range re-review finding
 
 1. Multi-event projection signals must consume directional correlation credit cumulatively across every accepted event. Preserve one pre-signal identity snapshot so all events share the intended same-signal correlation classification, but calculate each event's remaining directional credit from the memory produced by prior events. A later event cannot overwrite consumed credit with an absolute value derived from a stale snapshot; combined solver weight and persisted credit must remain bounded by the configured cross-cycle cap in both production and Core transition reconstruction.
+
+## Twenty-third full-range re-review finding
+
+1. Every Evidence Memory snapshot accepted by a manager must satisfy that manager's configured correlation-credit cap before replay, identity-only work, classification, commit, or transition reconstruction. Schema-level non-negativity is insufficient because it cannot know a custom policy. Reject over-cap prior and candidate snapshots atomically; replay or unrelated transitions cannot preserve policy-invalid credit, and production must fail before provider work where a policy-invalid prior could otherwise reach a model call.

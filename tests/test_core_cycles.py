@@ -3069,6 +3069,105 @@ def test_core_default_credit_policy_behavior_is_unchanged():
     )
 
 
+def _policy_snapshot_replay_fixture():
+    policy = CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=0.2
+    )
+    state = make_exact_belief_state()
+    signal = make_active_signal().model_copy(
+        update={
+            "id": "S_policy_snapshot_replay",
+            "raw_content": "A replayed observation supports H1.",
+        }
+    )
+    cycle = make_cycle("cycle_policy_snapshot_seed")
+    production = EvidenceIntegrationGate(
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        ),
+        memory_manager=evidence_memory.EvidenceMemoryManager(policy),
+    ).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[signal],
+    )
+    event = production.evidence_events[0]
+    ledger_refs = {
+        record_type: list(record_ids)
+        for record_type, record_ids in state.ledger_refs.items()
+    }
+    ledger_refs["evidence_events"] = [event.id]
+    valid_state = BeliefState.model_validate(
+        state.model_copy(
+            update={
+                "evidence_memory": production.evidence_memory,
+                "ledger_refs": ledger_refs,
+            }
+        ).model_dump(mode="python")
+    )
+    overcap_credit = dict(production.evidence_memory.correlation_credit)
+    overcap_credit["unrelated-policy-group|H2|disconfirming"] = 0.3
+    overcap_memory = EvidenceMemorySnapshot.model_validate(
+        production.evidence_memory.model_copy(
+            update={"correlation_credit": overcap_credit}
+        ).model_dump(mode="python")
+    )
+    overcap_state = BeliefState.model_validate(
+        valid_state.model_copy(
+            update={"evidence_memory": overcap_memory}
+        ).model_dump(mode="python")
+    )
+    return (
+        policy,
+        valid_state,
+        overcap_state,
+        production.normalized_signals[0],
+        event,
+        overcap_memory,
+    )
+
+
+def test_core_replay_rejects_same_overcap_prior_and_candidate_atomically(
+    tmp_path: Path,
+):
+    policy, _, overcap_state, signal, event, overcap_memory = (
+        _policy_snapshot_replay_fixture()
+    )
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name="same_overcap_policy_snapshot",
+        state=overcap_state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[event],
+            probe_candidates=[],
+            evidence_memory=overcap_memory,
+            normalized_signals=[signal],
+        ),
+        correlation_credit_policy=policy,
+    )
+
+
+def test_core_replay_rejects_candidate_only_overcap_atomically(tmp_path: Path):
+    policy, valid_state, _, signal, event, overcap_memory = (
+        _policy_snapshot_replay_fixture()
+    )
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name="candidate_overcap_policy_snapshot",
+        state=valid_state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[event],
+            probe_candidates=[],
+            evidence_memory=overcap_memory,
+            normalized_signals=[signal],
+        ),
+        correlation_credit_policy=policy,
+    )
+
+
 def _directional_projection_transition_fixture(*, cumulative: bool):
     policy = CorrelationCreditPolicy(
         max_cumulative_effective_weight_per_direction=0.15

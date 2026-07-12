@@ -125,6 +125,7 @@ class EvidenceIntegrationGate:
         closed_signals: list[ExternalSignal] = []
         seen_signatures: set[tuple[str, str]] = set()
         working_memory = belief_state.evidence_memory or EvidenceMemorySnapshot()
+        self._memory_manager.validate_policy_snapshot(working_memory)
         prior_evidence_ids = set(
             belief_state.ledger_refs.get("evidence_events", [])
         )
