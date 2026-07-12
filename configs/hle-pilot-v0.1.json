@@ -1,0 +1,76 @@
+{
+  "autonomy": {
+    "confidence_threshold": null,
+    "max_cycles": 4,
+    "max_probes_per_cycle": 2,
+    "posterior_delta_threshold": null,
+    "stop_on_no_probes": true
+  },
+  "concurrency": {
+    "bayesprobe": 4,
+    "direct": 8,
+    "docker": 4
+  },
+  "dataset": {
+    "revision": "651105316044b5261c31bee49ac0287363285de9",
+    "sample_count": 100,
+    "seed": "20260711"
+  },
+  "experiment_name": "BayesProbe HLE Text-MCQ-100 Python-Augmented Capability Pilot v0.1",
+  "paths": {
+    "report_root": "../reports/hle-pilot-v0.1",
+    "restricted_root": "../artifacts/restricted/hle-pilot-v0.1"
+  },
+  "pricing_snapshot": {
+    "as_of": "2026-07-13",
+    "currency": "USD",
+    "rates": {
+      "input_cached_per_million_tokens": 0.0028,
+      "input_uncached_per_million_tokens": 0.14,
+      "output_per_million_tokens": 0.28
+    },
+    "status": "frozen"
+  },
+  "prompt_registry": {
+    "prompts": {
+      "direct_multiple_choice": "v0.1",
+      "direct_multiple_choice_repair": "v0.1",
+      "evidence_judgment": "v0.1",
+      "evidence_judgment_repair": "v0.1",
+      "probe_execution": "v0.1",
+      "python_probe_code_repair": "v0.1",
+      "python_probe_plan": "v0.1",
+      "python_probe_plan_repair": "v0.1"
+    },
+    "schemas": {
+      "EvidenceJudgment": "v0.1",
+      "MultipleChoiceAnswer": "v0.1",
+      "ProbeSignal": "v0.1",
+      "PythonCodeRepair": "v0.1",
+      "PythonProbePlan": "v0.1"
+    },
+    "version": "v0.1"
+  },
+  "provider": {
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "base_url": "https://api.deepseek.com",
+    "kind": "openai_chat_completions",
+    "max_output_tokens": 65536,
+    "model": "deepseek-v4-flash",
+    "reasoning_effort": "max",
+    "temperature": 0,
+    "thinking": "enabled",
+    "timeout_seconds": 900,
+    "top_p": 1
+  },
+  "python": {
+    "cpus": 1,
+    "image": "bayesprobe-hle-python:v0.1",
+    "max_output_bytes": 65536,
+    "memory": "1g",
+    "pids_limit": 64,
+    "timeout_seconds": 30,
+    "tmpfs_size": "64m",
+    "user": "65532:65532"
+  }
+}

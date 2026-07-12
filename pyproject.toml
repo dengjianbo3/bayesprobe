@@ -16,6 +16,7 @@ openai = [
 ]
 hle = [
   "datasets>=3,<5",
+  "Pillow>=10",
 ]
 
 [project.scripts]

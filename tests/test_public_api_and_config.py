@@ -278,7 +278,7 @@ def test_pyproject_declares_hle_dataset_loader_as_optional_dependency():
     optional_dependencies = metadata["project"]["optional-dependencies"]
 
     assert all(not dependency.startswith("datasets") for dependency in dependencies)
-    assert optional_dependencies["hle"] == ["datasets>=3,<5"]
+    assert optional_dependencies["hle"] == ["datasets>=3,<5", "Pillow>=10"]
 
 
 def test_load_experiment_config_resolves_paths_relative_to_config_file(tmp_path: Path):
