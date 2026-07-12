@@ -400,6 +400,151 @@ def test_normalization_is_deterministic_and_model_session_groups_are_stable():
     )
 
 
+def test_model_origin_without_provider_identity_uses_exact_safe_fallback():
+    normalizer = SignalProvenanceNormalizer()
+    first = ExternalSignal(
+        id="S_model_fallback_1",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="model_probe_gateway",
+        source="fallback  provider",
+        raw_content="One fallback model observation.",
+    )
+    equivalent = first.model_copy(update={"id": "S_model_fallback_2"})
+    whitespace_distinct = first.model_copy(
+        update={
+            "id": "S_model_fallback_3",
+            "source": "fallback provider",
+        }
+    )
+
+    normalized = normalizer.normalize(first, run_id="run_fallback")
+    normalized_equivalent = normalizer.normalize(
+        equivalent,
+        run_id="run_fallback",
+    )
+    normalized_distinct = normalizer.normalize(
+        whitespace_distinct,
+        run_id="run_fallback",
+    )
+
+    assert normalized.provenance.provider_model_or_tool_identity == (
+        "model_provider_fallback:v1:"
+        '{"source":"fallback  provider",'
+        '"source_type":"model_probe_gateway"}'
+    )
+    assert normalized.provenance == normalized_equivalent.provenance
+    assert normalized.provenance.provider_model_or_tool_identity != (
+        normalized_distinct.provenance.provider_model_or_tool_identity
+    )
+    assert normalized.provenance.source_identity != (
+        normalized_distinct.provenance.source_identity
+    )
+    assert normalized.provenance.correlation_group != (
+        normalized_distinct.provenance.correlation_group
+    )
+    assert normalized.provenance.canonical_content_fingerprint != (
+        normalized_distinct.provenance.canonical_content_fingerprint
+    )
+
+
+def test_model_correlation_group_uses_exact_session_identity():
+    normalizer = SignalProvenanceNormalizer()
+    signal = ExternalSignal(
+        id="S_exact_session",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="custom_model_adapter",
+        source="provider/model-a",
+        raw_content="One exact-session model observation.",
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+            source_identity="caller-model-source",
+            provider_model_or_tool_identity="provider/model-a",
+            derivation_root_id="root-exact-session",
+            correlation_group="caller-model-group",
+            canonical_content_fingerprint="replace-me",
+        ),
+    )
+
+    spaced = normalizer.normalize(signal, run_id="session  one")
+    collapsed = normalizer.normalize(signal, run_id="session one")
+
+    assert spaced.provenance.provider_model_or_tool_identity == "provider/model-a"
+    assert collapsed.provenance.provider_model_or_tool_identity == "provider/model-a"
+    assert spaced.provenance.session_id == "session  one"
+    assert collapsed.provenance.session_id == "session one"
+    assert spaced.provenance.source_identity == collapsed.provenance.source_identity
+    assert spaced.provenance.canonical_content_fingerprint == (
+        collapsed.provenance.canonical_content_fingerprint
+    )
+    assert spaced.provenance.correlation_group != (
+        collapsed.provenance.correlation_group
+    )
+
+
+def test_non_model_source_normalization_keeps_nfkc_whitespace_semantics():
+    normalizer = SignalProvenanceNormalizer()
+    first = ExternalSignal(
+        id="S_human_source_1",
+        cycle_id="pending",
+        signal_kind=SignalKind.PASSIVE,
+        source_type="human_input",
+        source="source K  alpha",
+        raw_content="One human observation.",
+    )
+    equivalent = first.model_copy(
+        update={
+            "id": "S_human_source_2",
+            "source": "source \u212a alpha",
+        }
+    )
+
+    normalized = normalizer.normalize(first, run_id="run_human")
+    normalized_equivalent = normalizer.normalize(
+        equivalent,
+        run_id="run_human",
+    )
+
+    assert normalized.provenance.source_identity == (
+        normalized_equivalent.provenance.source_identity
+    )
+    assert normalized.provenance.correlation_group == (
+        normalized_equivalent.provenance.correlation_group
+    )
+    assert normalized.provenance.canonical_content_fingerprint == (
+        normalized_equivalent.provenance.canonical_content_fingerprint
+    )
+
+
+def test_model_session_secret_is_rejected_before_any_identity_digest(monkeypatch):
+    signal = ExternalSignal(
+        id="S_model_secret_session",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="model_probe_gateway",
+        source="model_gateway:scripted",
+        raw_content="One safe model observation.",
+    )
+    digest_calls = []
+    original_sha256 = evidence_memory.hashlib.sha256
+
+    def recording_sha256(value=b""):
+        digest_calls.append(value)
+        return original_sha256(value)
+
+    monkeypatch.setattr(evidence_memory.hashlib, "sha256", recording_sha256)
+
+    with pytest.raises(ValueError, match="secret") as exc_info:
+        SignalProvenanceNormalizer().normalize(
+            signal,
+            run_id=_NFKC_SECRET_VALUE,
+        )
+
+    assert _NFKC_SECRET_VALUE not in str(exc_info.value)
+    assert digest_calls == []
+
+
 def test_derived_summary_preserves_supplied_derivation_root():
     normalizer = SignalProvenanceNormalizer()
     summary = ExternalSignal(

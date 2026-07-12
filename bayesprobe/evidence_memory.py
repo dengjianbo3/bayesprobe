@@ -34,6 +34,7 @@ CorrelationStatus = Literal[
 
 _CURRENT_MEMORY_VERSION = 2
 _SUPPORTED_MEMORY_VERSIONS = frozenset({1, 2})
+_MODEL_PROVIDER_FALLBACK_PREFIX = "model_provider_fallback:v1:"
 SIGNAL_QUALITY_METRICS = (
     "reliability",
     "independence",
@@ -251,7 +252,6 @@ class SignalProvenanceNormalizer:
 
     def normalize(self, signal: ExternalSignal, *, run_id: str) -> ExternalSignal:
         _reject_secret_signal(signal)
-        run_session = _clean_text(run_id)
         supplied = signal.provenance
         supplied_correlation_group = None
         if supplied is not None:
@@ -259,43 +259,52 @@ class SignalProvenanceNormalizer:
                 supplied.supplied_correlation_group or supplied.correlation_group
             )
         origin = supplied.epistemic_origin if supplied else _origin_for(signal)
-        raw_source_identity = (
-            supplied.source_identity
-            if supplied
-            else f"{signal.source_type}:{signal.source}"
-        )
-        source_identity = _clean_text(raw_source_identity)
         canonical_content = _clean_text(signal.raw_content)
-        _reject_secret_hash_text(raw_source_identity)
-        _reject_secret_hash_text(source_identity)
         _reject_secret_hash_text(signal.raw_content)
         _reject_secret_hash_text(canonical_content)
-        fingerprint = _sha256_identity(source_identity, canonical_content)
         provider_identity = (
             supplied.provider_model_or_tool_identity if supplied else None
         )
-        if provider_identity is None and origin in {
-            EpistemicOrigin.MODEL_REASONING,
-            EpistemicOrigin.TOOL_RESULT,
-            EpistemicOrigin.DERIVED_SUMMARY,
-        }:
-            provider_identity = _clean_text(signal.source)
         session_id = supplied.session_id if supplied else None
-        if session_id is None and origin == EpistemicOrigin.MODEL_REASONING:
-            session_id = run_session
+        if origin == EpistemicOrigin.MODEL_REASONING:
+            provider_identity = _model_provider_audit_identity(
+                signal,
+                provider_identity,
+            )
+            if session_id is None:
+                session_id = run_id
+            _reject_secret_hash_text(provider_identity)
+            _reject_secret_hash_text(session_id)
+            source_identity = _model_source_identity(provider_identity)
+            correlation_group = _model_correlation_group(
+                provider_identity,
+                session_id,
+            )
+        else:
+            raw_source_identity = (
+                supplied.source_identity
+                if supplied
+                else f"{signal.source_type}:{signal.source}"
+            )
+            source_identity = _clean_text(raw_source_identity)
+            _reject_secret_hash_text(raw_source_identity)
+            _reject_secret_hash_text(source_identity)
+            if provider_identity is None and origin in {
+                EpistemicOrigin.TOOL_RESULT,
+                EpistemicOrigin.DERIVED_SUMMARY,
+            }:
+                provider_identity = _clean_text(signal.source)
+            if supplied:
+                correlation_group = supplied.correlation_group
+            else:
+                correlation_group = f"source:{source_identity}"
+
+        fingerprint = _sha256_identity(source_identity, canonical_content)
         derivation_root_id = (
             supplied.derivation_root_id
             if supplied
             else f"root:{fingerprint.removeprefix('sha256:')}"
         )
-        if origin == EpistemicOrigin.MODEL_REASONING:
-            correlation_group = (
-                f"model:{provider_identity or source_identity}:{session_id or run_session}"
-            )
-        elif supplied:
-            correlation_group = supplied.correlation_group
-        else:
-            correlation_group = f"source:{source_identity}"
 
         provenance = SignalProvenance(
             epistemic_origin=origin,
@@ -798,6 +807,57 @@ def _has_low_reliability_cue(content: str) -> bool:
 
 def _clean_text(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).split())
+
+
+def _model_provider_audit_identity(
+    signal: ExternalSignal,
+    supplied_identity: str | None,
+) -> str:
+    if supplied_identity is not None:
+        _reject_secret_hash_text(supplied_identity)
+        return supplied_identity
+    _reject_secret_hash_text(signal.source_type)
+    _reject_secret_hash_text(signal.source)
+    encoded_source = json.dumps(
+        {
+            "source": signal.source,
+            "source_type": signal.source_type,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    fallback_identity = f"{_MODEL_PROVIDER_FALLBACK_PREFIX}{encoded_source}"
+    _reject_secret_hash_text(fallback_identity)
+    return fallback_identity
+
+
+def _model_source_identity(provider_identity: str) -> str:
+    _reject_secret_hash_text(provider_identity)
+    digest = _exact_identity_digest({"provider_identity": provider_identity})
+    return f"model-source:sha256:{digest}"
+
+
+def _model_correlation_group(provider_identity: str, session_id: str) -> str:
+    _reject_secret_hash_text(provider_identity)
+    _reject_secret_hash_text(session_id)
+    digest = _exact_identity_digest(
+        {
+            "provider_identity": provider_identity,
+            "session_id": session_id,
+        }
+    )
+    return f"model:sha256:{digest}"
+
+
+def _exact_identity_digest(components: Mapping[str, str]) -> str:
+    encoded = json.dumps(
+        components,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _canonical_computation_text(value: str) -> str:

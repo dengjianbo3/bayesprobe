@@ -6,7 +6,10 @@ import pytest
 
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.evidence import EvidenceIntegrationGate
-from bayesprobe.evidence_memory import SignalProvenanceNormalizer
+from bayesprobe.evidence_memory import (
+    EvidenceMemoryManager,
+    SignalProvenanceNormalizer,
+)
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ScriptedModelGateway
@@ -29,9 +32,13 @@ from bayesprobe.schemas import (
     CycleRecord,
     CycleSignalShape,
     EpistemicOrigin,
+    EvidenceEvent,
+    EvidenceMemorySnapshot,
+    EvidenceType,
     ExternalSignal,
     FramingMethod,
     Hypothesis,
+    LikelihoodBand,
     ProbeDesign,
     ProbeSet,
     SignalKind,
@@ -84,6 +91,13 @@ def parse_openai_model_identity(identity: str) -> dict[str, str]:
         sort_keys=True,
     )
     return payload
+
+
+def assert_sha256_identity(value: str, *, prefix: str) -> None:
+    assert value.startswith(prefix)
+    digest = value.removeprefix(prefix)
+    assert len(digest) == 64
+    assert set(digest) <= set("0123456789abcdef")
 
 
 class RecordingGateway:
@@ -726,8 +740,15 @@ def test_model_probe_provenance_uses_injective_openai_component_identity(
         "model": "model-a",
         "provider_origin": "https://provider.example:8443",
     }
+    assert_sha256_identity(
+        first.provenance.source_identity,
+        prefix="model-source:sha256:",
+    )
     assert first.provenance.source_identity == (
-        f"model_gateway:{first_identity}"
+        same_provider_model.provenance.source_identity
+    )
+    assert first.provenance.source_identity != (
+        boundary_distinct.provenance.source_identity
     )
     assert first_identity == (
         same_provider_model.provenance.provider_model_or_tool_identity
@@ -744,6 +765,183 @@ def test_model_probe_provenance_uses_injective_openai_component_identity(
     assert first.provenance.correlation_group != (
         different_provider.provenance.correlation_group
     )
+
+
+@pytest.mark.parametrize(
+    ("first_model", "distinct_model"),
+    [
+        ("K", "\u212a"),
+        ("model  alpha", "model alpha"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("gateway_type", "adapter_kind"),
+    [
+        (OpenAIResponsesModelGateway, "openai"),
+        (
+            OpenAIChatCompletionsModelGateway,
+            "openai_chat_completions",
+        ),
+    ],
+)
+def test_exact_openai_model_identity_survives_normalization_and_memory(
+    gateway_type,
+    adapter_kind,
+    first_model,
+    distinct_model,
+):
+    class StubOpenAICompatibleGateway(gateway_type):
+        def complete_structured(self, request):
+            return {"raw_content": "One exact model observation."}
+
+    initialized = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_exact_model_identity",
+            problem="Which model observation is independently sourced?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    )
+
+    def execute(model: str, base_url: str, index: int) -> ExternalSignal:
+        cycle_id = f"run_exact_model_identity_cycle_{index}"
+        probe = make_probe(
+            f"P_exact_model_{index}",
+            ["H1", "H2"],
+            cycle_id=cycle_id,
+        )
+        signal = ProbeExecutor(
+            ModelBackedProbeToolGateway(
+                StubOpenAICompatibleGateway(
+                    config=OpenAIModelGatewayConfig(
+                        model=model,
+                        base_url=base_url,
+                    )
+                )
+            )
+        ).execute_probe_set(
+            probe_set=make_probe_set([probe], cycle_id=cycle_id),
+            context=ProbeExecutionContext(
+                run_id="run_exact_model_identity",
+                cycle_id=cycle_id,
+                belief_state=initialized.belief_state,
+            ),
+        ).signals[0]
+        return SignalProvenanceNormalizer().normalize(
+            signal,
+            run_id="run_exact_model_identity",
+        )
+
+    first = execute(
+        first_model,
+        "https://provider.example/v1",
+        1,
+    )
+    distinct = execute(
+        distinct_model,
+        "https://provider.example/v1",
+        2,
+    )
+    equivalent = execute(
+        first_model,
+        (
+            "HTTPS://user:ignored@PROVIDER.EXAMPLE:443/other"
+            "?ignored=value#fragment"
+        ),
+        3,
+    )
+
+    first_provider = first.provenance.provider_model_or_tool_identity
+    distinct_provider = distinct.provenance.provider_model_or_tool_identity
+    equivalent_provider = equivalent.provenance.provider_model_or_tool_identity
+    assert parse_openai_model_identity(first_provider) == {
+        "adapter_kind": adapter_kind,
+        "model": first_model,
+        "provider_origin": "https://provider.example",
+    }
+    assert parse_openai_model_identity(distinct_provider) == {
+        "adapter_kind": adapter_kind,
+        "model": distinct_model,
+        "provider_origin": "https://provider.example",
+    }
+    assert first_provider == equivalent_provider
+    assert first_provider != distinct_provider
+    assert first.provenance.source_identity == equivalent.provenance.source_identity
+    assert first.provenance.source_identity != distinct.provenance.source_identity
+    assert first.provenance.correlation_group == equivalent.provenance.correlation_group
+    assert first.provenance.correlation_group != distinct.provenance.correlation_group
+    assert first.provenance.canonical_content_fingerprint == (
+        equivalent.provenance.canonical_content_fingerprint
+    )
+    assert first.provenance.canonical_content_fingerprint != (
+        distinct.provenance.canonical_content_fingerprint
+    )
+    for normalized in (first, distinct, equivalent):
+        assert_sha256_identity(
+            normalized.provenance.source_identity,
+            prefix="model-source:sha256:",
+        )
+        assert_sha256_identity(
+            normalized.provenance.correlation_group,
+            prefix="model:sha256:",
+        )
+        assert "|" not in normalized.provenance.correlation_group
+
+    manager = EvidenceMemoryManager()
+
+    def remember(
+        memory: EvidenceMemorySnapshot,
+        signal: ExternalSignal,
+        index: int,
+    ):
+        decision = manager.classify(
+            memory,
+            signal,
+            likelihoods={"H1": LikelihoodBand.MODERATELY_CONFIRMING},
+            base_effective_weight=0.1,
+        )
+        event = EvidenceEvent(
+            id=f"E_exact_model_{index}",
+            derived_from_signal=signal.id,
+            target_hypotheses=["H1"],
+            evidence_type=EvidenceType.SUPPORTING,
+            content=signal.raw_content,
+            likelihoods={"H1": LikelihoodBand.MODERATELY_CONFIRMING},
+            correlation_status=decision.correlation_status,
+            effective_update_weight=decision.effective_update_weight,
+        )
+        return decision, manager.commit(
+            memory,
+            signal=signal,
+            event=event,
+            decision=decision,
+        )
+
+    first_decision, memory = remember(EvidenceMemorySnapshot(), first, 1)
+    distinct_decision, memory = remember(memory, distinct, 2)
+    equivalent_decision, memory = remember(memory, equivalent, 3)
+
+    assert first_decision.correlation_status == "novel"
+    assert distinct_decision.correlation_status == "novel"
+    assert equivalent_decision.correlation_status == "correlated_novel"
+    first_memory_identity = json.loads(
+        memory.source_content_fingerprints[first.id]
+    )
+    distinct_memory_identity = json.loads(
+        memory.source_content_fingerprints[distinct.id]
+    )
+    equivalent_memory_identity = json.loads(
+        memory.source_content_fingerprints[equivalent.id]
+    )
+    assert first_memory_identity[:3] == equivalent_memory_identity[:3]
+    assert first_memory_identity[0] != distinct_memory_identity[0]
+    assert first_memory_identity[1] != distinct_memory_identity[1]
+    assert first_memory_identity[2] != distinct_memory_identity[2]
+    assert {
+        key.partition("|")[0] for key in memory.correlation_credit
+    } == {
+        first.provenance.correlation_group,
+        distinct.provenance.correlation_group,
+    }
 
 
 def test_recorded_probe_provenance_distinguishes_fixture_and_model_identity():

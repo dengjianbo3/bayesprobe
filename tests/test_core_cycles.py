@@ -6415,7 +6415,19 @@ def test_saturated_correlation_event_is_ledger_visible_without_mass_update(
     ledger = JsonlLedgerStore(tmp_path / "saturated-memory-ledger.jsonl")
     core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
     state = make_exact_belief_state()
-    group = "model:model_gateway:scripted:run_1"
+    signal = ExternalSignal(
+        id="S_saturated",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="model_probe_gateway",
+        source="model_gateway:scripted",
+        raw_content="A fresh model restatement favors H1.",
+        initial_target_hypotheses=["H1", "H2"],
+    )
+    group = evidence_memory.SignalProvenanceNormalizer().normalize(
+        signal,
+        run_id="run_1",
+    ).provenance.correlation_group
     state = state.model_copy(
         update={
             "evidence_memory": state.evidence_memory.model_copy(
@@ -6434,17 +6446,7 @@ def test_saturated_correlation_event_is_ledger_visible_without_mass_update(
         cycle=cycle,
         belief_state=state,
         probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[
-            ExternalSignal(
-                id="S_saturated",
-                cycle_id="pending",
-                signal_kind=SignalKind.ACTIVE,
-                source_type="model_probe_gateway",
-                source="model_gateway:scripted",
-                raw_content="A fresh model restatement favors H1.",
-                initial_target_hypotheses=["H1", "H2"],
-            )
-        ],
+        signals=[signal],
     )
 
     event = result.evidence_events[0]

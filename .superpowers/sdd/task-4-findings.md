@@ -127,3 +127,7 @@
 ## Nineteenth full-range re-review finding
 
 1. The adapter, normalized provider origin, and model components of OpenAI-compatible `model_identity` require an injective encoding. Delimiter concatenation is insufficient because a provider non-default port can collide with a model containing the same delimiter-prefixed text. Use canonical structured or length-prefixed encoding and prove distinct provider/model tuples cannot collapse into one provenance identity or correlation group.
+
+## Twentieth full-range re-review finding
+
+1. Exact provider/model identity must remain distinct through provenance normalization and Evidence Memory correlation. Model-origin `source_identity` and canonical correlation keys cannot apply NFKC or whitespace folding to the opaque provider identity, because exact model identifiers such as `K` and `K` (or distinct internal whitespace) would collapse. Continue recursive exact-and-normalized sensitive-data checks, but derive model-origin source/correlation keys from an injective exact-byte representation or digest of the already validated provider identity and session.

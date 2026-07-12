@@ -1600,3 +1600,105 @@ downstream provenance cases.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 25
+
+### Design Decision
+
+- Split model-origin provenance normalization from the existing generic source
+  canonicalization path. Supplied `provider_model_or_tool_identity` is now an
+  exact opaque audit value: it is checked in exact and NFKC forms but never sent
+  through `_clean_text`.
+- Added a deterministic provider fallback for model-origin signals that omit an
+  audit identity. It is versioned compact canonical JSON over the exact
+  `source` and `source_type`, preserving compatibility without weakening native
+  gateway identity preflight.
+- Derived server-owned model source identity as
+  `model-source:sha256:<digest>` over canonical JSON containing the exact
+  provider identity. Derived correlation group as `model:sha256:<digest>` over
+  exact provider identity plus exact session. Both outputs have fixed grammar,
+  contain no reserved pipe, and avoid delimiter ambiguity.
+- Kept NFKC and whitespace folding for content and every non-model source. All
+  recursive signal, raw/canonical content, provider, and session secret checks
+  complete before the first digest; hashing is never used to hide unvalidated
+  input.
+
+### Changed Files
+
+- `bayesprobe/evidence_memory.py`
+- `tests/test_evidence_memory.py`
+- `tests/test_probe_executor.py`
+- `tests/test_core_cycles.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_probe_executor.py::test_model_probe_provenance_uses_injective_openai_component_identity tests/test_probe_executor.py::test_exact_openai_model_identity_survives_normalization_and_memory tests/test_evidence_memory.py::test_model_origin_without_provider_identity_uses_exact_safe_fallback tests/test_evidence_memory.py::test_model_correlation_group_uses_exact_session_identity tests/test_evidence_memory.py::test_non_model_source_normalization_keeps_nfkc_whitespace_semantics tests/test_evidence_memory.py::test_model_session_secret_is_rejected_before_any_identity_digest -q --tb=short -p no:cacheprovider
+```
+
+Result: `9 failed, 1 passed in 0.27s`. Both OpenAI adapters collapsed `K`
+with Kelvin-sign and double-space with single-space model identities in source
+identity and content fingerprint; fallback and session text were folded; the
+new digest grammar was absent; and a normalized secret session reached SHA-256.
+The non-model normalization control passed.
+
+- GREEN: the same focused command -> `10 passed in 0.21s`.
+- GREEN after readability refactor: the same focused command -> `10 passed in
+  0.20s`.
+- Direct provenance/memory/gateway suites:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_openai_gateway.py tests/test_model_gateway.py
+  tests/test_probe_executor.py -q --tb=short -p no:cacheprovider` -> `316
+  passed in 0.63s`.
+- First Task 4 focused run -> `1 failed, 495 passed in 2.10s`. The sole failure
+  preloaded correlation credit under the retired delimiter-form model group.
+  Its fixture now derives the authoritative group from the same normalized
+  signal; focused rerun of that saturation regression -> `1 passed in 0.22s`.
+- Final Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_probe_executor.py tests/evaluation/test_python_probe.py
+  tests/test_evidence_memory.py tests/test_core_cycles.py -q -p
+  no:cacheprovider` -> `496 passed in 2.03s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1390 passed, 10 skipped in 11.35s`; final
+  post-refactor rerun -> `1390 passed, 10 skipped in 11.28s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before
+  report/commit; both checks are repeated after report and the range check after
+  commit.
+
+### Self-Review
+
+- End-to-end coverage runs Responses and Chat Completions through
+  `ProbeExecutor`, `SignalProvenanceNormalizer`, and `EvidenceMemoryManager`.
+  Exact `K`/Kelvin-sign and internal-whitespace-distinct identities retain
+  distinct audit identity, model source, correlation group, content fingerprint,
+  memory source/group entries, and `novel` classification.
+- An equivalent provider URL/model tuple retains byte-identical audit identity,
+  model source, group, and fingerprint, then classifies as
+  `correlated_novel` after the first tuple is remembered. Credit keys contain
+  exactly the two distinct canonical groups and no group contains `|`.
+- Supplied model audit identity is stored exactly. The no-provider path has one
+  explicit deterministic fallback grammar and distinguishes exact source
+  whitespace; native OpenAI, scripted, Python-augmented, and recorded gateway
+  paths continue to supply their validated identities normally.
+- Exact session bytes participate in correlation-group hashing. A test with an
+  NFKC-secret session instruments `hashlib.sha256` and proves rejection occurs
+  with zero digest calls and secret-free error text.
+- The generic human-source control still folds NFKC-equivalent `K`/Kelvin-sign
+  and repeated whitespace. Existing replay, lineage, same-source canonical
+  grouping, saturation, recorded gateway, lifecycle, and schema suites remain
+  green.
+
+### Concerns
+
+No blocking concerns.
