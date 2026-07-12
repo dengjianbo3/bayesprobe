@@ -1,6 +1,6 @@
 # BayesProbe Architecture
 
-Date: 2026-07-11
+Date: 2026-07-13
 Status: living architecture document
 
 This document is the engineering architecture entry point for the current
@@ -646,14 +646,14 @@ snapshot, and completes the four-phase protocol.
 | Evidence Integration Gate | Strong MVP | Direct evidence, real projection decomposition, exact target validation, bounded quality overrides, schema violation, and repair paths exist. |
 | Belief update | Strong MVP | Exclusive mass remains normalized; independent credences update without cross-normalization; penalties, discarded-evidence neutrality, and relation-aware summaries are implemented. |
 | Hypothesis evolution | Good MVP | Anomaly spawn, weakening/reframing/retirement style evolution preserves explicit independent conflicts and reciprocal exclusive rivals; semantic evolution remains deferred. |
-| Probe planning | Good MVP | Candidate ranking and bounded probe-set design exist. |
+| Probe planning | Strong MVP | Task-specific probe design and bounded probe-set ranking exist for the autonomous open-question vertical slice. |
 | Probe execution/tool seam | Good MVP | Deterministic and model-backed adapters exist; search/retrieval/tool adapters remain future work. |
-| Autonomous question loop | Strong MVP | End-to-end runner returns a terminal run, final integrated cycle, answer projection, and explicit stop reason. |
+| Autonomous question loop | Strong MVP | End-to-end runner returns a terminal run, final integrated cycle, task-aware selection, synthesis, or abstention, answer projection, and explicit stop reason. |
 | Synchronized round loop | Strong MVP | Fixed-round runner enforces synchronized regime and supports passive-only, active-only, and mixed rounds. |
 | Ledger/audit | Strong MVP | JSONL audit path has explicit canonical ownership and exactly-once probe-set/signal records. |
 | Benchmark harness | Good MVP | Toy and real methodology-path fixtures, suite/report flow, net-direction scoring, and belief-quality metrics exist. |
 | Config/CLI/SDK | Strong MVP | JSON experiment config, CLI, public core/runners/tool/framing seams, package-root imports, and external execution regression coverage exist. |
-| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; synchronous JSON and autonomous NDJSON progress streams expose completed runs, relation-aware belief, integrated cycles, provider errors, and full traces. Streaming remains phase/cycle-only and credentials remain request-scoped and page-memory-only. |
+| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; synchronous JSON and autonomous NDJSON progress streams expose dynamic framing, probe-design, signal, evidence, belief, expansion, and terminal progress, relation-aware belief, integrated cycles, provider errors, and full traces. Credentials remain request-scoped and page-memory-only. |
 | Model gateway | Strong MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Explicit request controls, bounded transport retries, and per-attempt token/latency/error observation are implemented. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
@@ -664,17 +664,22 @@ snapshot, and completes the four-phase protocol.
 
 ## 6. Open-Question Framing Status
 
-Implemented: explicit/model/recorded TaskFrame before Belief State creation.
+Implemented: autonomous model-reasoning open-question vertical slice with
+task-specific probe design, Core-authorized semantic expansion, task-aware
+selection, synthesis, and abstention, recorded explanation and exact-answer
+fixtures, and dynamic WebUI progress.
 
-Implemented: fail-closed open framing with one structured repair.
+The slice retains explicit/model/recorded `TaskFrame` creation before Belief
+State materialization, fail-closed structured framing with one bounded repair,
+and relation-aware exclusive categorical mass and independent-credence solver
+semantics. Models propose task semantics, while `BayesProbeCore` alone admits
+Evidence, changes belief, and authorizes hypothesis expansion.
 
-Implemented: exclusive categorical mass and non-normalized independent credence
-solver semantics.
+Not implemented: external search, retrieval, or tools; synchronized parity;
+coding interventions; public benchmark execution; or probability calibration
+claims.
 
-Not yet implemented: cross-cycle Evidence Memory.
-
-Not yet implemented: task-aware ProbeDesigner and open Answer Projection
-synthesis.
+Cross-cycle Evidence Memory also remains future work.
 
 ## 7. External Seams and Configuration
 
