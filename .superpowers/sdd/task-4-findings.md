@@ -123,3 +123,7 @@
 ## Eighteenth full-range re-review finding
 
 1. OpenAI-compatible `model_identity` must include a stable, normalized, secret-free configured-provider identity in addition to adapter kind and model. Different provider hosts using the same model cannot collapse into one provenance source/correlation group; equivalent URLs for the same provider should normalize to the same identity, and URL paths, queries, fragments, or user information must never enter persisted identity text.
+
+## Nineteenth full-range re-review finding
+
+1. The adapter, normalized provider origin, and model components of OpenAI-compatible `model_identity` require an injective encoding. Delimiter concatenation is insufficient because a provider non-default port can collide with a model containing the same delimiter-prefixed text. Use canonical structured or length-prefixed encoding and prove distinct provider/model tuples cannot collapse into one provenance identity or correlation group.

@@ -378,10 +378,16 @@ def test_model_gateway_identity_distinguishes_models_with_the_same_adapter():
 
     assert model_gateway_adapter_kind(first) == model_gateway_adapter_kind(second)
     assert model_gateway_module.model_gateway_identity(first) == (
-        "openai_chat_completions:https://api.openai.com:provider/model-a"
+        "openai_model_identity:v1:"
+        '{"adapter_kind":"openai_chat_completions",'
+        '"model":"provider/model-a",'
+        '"provider_origin":"https://api.openai.com"}'
     )
     assert model_gateway_module.model_gateway_identity(second) == (
-        "openai_chat_completions:https://api.openai.com:provider/model-b"
+        "openai_model_identity:v1:"
+        '{"adapter_kind":"openai_chat_completions",'
+        '"model":"provider/model-b",'
+        '"provider_origin":"https://api.openai.com"}'
     )
     assert model_gateway_module.model_gateway_identity(first) != (
         model_gateway_module.model_gateway_identity(second)

@@ -13,6 +13,7 @@ from bayesprobe.model_gateway import ScriptedModelGateway
 from bayesprobe.openai_gateway import (
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
+    OpenAIResponsesModelGateway,
 )
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
@@ -68,6 +69,21 @@ _SECRET_MODEL_IDENTITIES = (
         "provider-secret-value-123"
     ),
 )
+_OPENAI_MODEL_IDENTITY_PREFIX = "openai_model_identity:v1:"
+
+
+def parse_openai_model_identity(identity: str) -> dict[str, str]:
+    assert identity.startswith(_OPENAI_MODEL_IDENTITY_PREFIX)
+    encoded = identity.removeprefix(_OPENAI_MODEL_IDENTITY_PREFIX)
+    payload = json.loads(encoded)
+    assert list(payload) == ["adapter_kind", "model", "provider_origin"]
+    assert encoded == json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return payload
 
 
 class RecordingGateway:
@@ -626,8 +642,21 @@ def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_emp
     assert result.signals[0].provenance.provider_model_or_tool_identity == "scripted"
 
 
-def test_model_probe_provenance_distinguishes_openai_provider_and_model_identity():
-    class StubOpenAICompatibleGateway(OpenAIChatCompletionsModelGateway):
+@pytest.mark.parametrize(
+    ("gateway_type", "adapter_kind"),
+    [
+        (OpenAIResponsesModelGateway, "openai"),
+        (
+            OpenAIChatCompletionsModelGateway,
+            "openai_chat_completions",
+        ),
+    ],
+)
+def test_model_probe_provenance_uses_injective_openai_component_identity(
+    gateway_type,
+    adapter_kind,
+):
+    class StubOpenAICompatibleGateway(gateway_type):
         def complete_structured(self, request):
             return {"raw_content": "A model-backed probe observation."}
 
@@ -657,18 +686,21 @@ def test_model_probe_provenance_distinguishes_openai_provider_and_model_identity
             context=context,
         ).signals[0]
 
-    first = execute("provider/model-a", "https://provider-a.example/v1")
+    first = execute("model-a", "https://provider.example:8443/v1")
     same_provider_model = execute(
-        "provider/model-a",
-        "https://user:ignored@PROVIDER-A.EXAMPLE:443/other?ignored=value#fragment",
+        "model-a",
+        (
+            "HTTPS://user:ignored@PROVIDER.EXAMPLE:8443/other"
+            "?ignored=value#fragment"
+        ),
+    )
+    boundary_distinct = execute(
+        "8443:model-a",
+        "https://provider.example/v1",
     )
     different_provider = execute(
-        "provider/model-a",
-        "https://provider-b.example/v1",
-    )
-    different_model = execute(
-        "provider/model-b",
-        "https://provider-a.example/v1",
+        "model-a",
+        "https://other.example:8443/v1",
     )
     normalizer = SignalProvenanceNormalizer()
     first = normalizer.normalize(first, run_id=context.run_id)
@@ -676,36 +708,41 @@ def test_model_probe_provenance_distinguishes_openai_provider_and_model_identity
         same_provider_model,
         run_id=context.run_id,
     )
+    boundary_distinct = normalizer.normalize(
+        boundary_distinct,
+        run_id=context.run_id,
+    )
     different_provider = normalizer.normalize(
         different_provider,
         run_id=context.run_id,
     )
-    different_model = normalizer.normalize(
-        different_model,
-        run_id=context.run_id,
-    )
 
     assert first.source == different_provider.source == (
-        "model_gateway:openai_chat_completions"
+        f"model_gateway:{adapter_kind}"
     )
-    assert first.provenance.provider_model_or_tool_identity == (
-        "openai_chat_completions:https://provider-a.example:provider/model-a"
-    )
-    assert different_provider.provenance.provider_model_or_tool_identity == (
-        "openai_chat_completions:https://provider-b.example:provider/model-a"
-    )
+    first_identity = first.provenance.provider_model_or_tool_identity
+    assert parse_openai_model_identity(first_identity) == {
+        "adapter_kind": adapter_kind,
+        "model": "model-a",
+        "provider_origin": "https://provider.example:8443",
+    }
     assert first.provenance.source_identity == (
-        "model_gateway:"
-        "openai_chat_completions:https://provider-a.example:provider/model-a"
+        f"model_gateway:{first_identity}"
+    )
+    assert first_identity == (
+        same_provider_model.provenance.provider_model_or_tool_identity
+    )
+    assert first_identity != (
+        boundary_distinct.provenance.provider_model_or_tool_identity
     )
     assert first.provenance.correlation_group == (
         same_provider_model.provenance.correlation_group
     )
     assert first.provenance.correlation_group != (
-        different_provider.provenance.correlation_group
+        boundary_distinct.provenance.correlation_group
     )
     assert first.provenance.correlation_group != (
-        different_model.provenance.correlation_group
+        different_provider.provenance.correlation_group
     )
 
 

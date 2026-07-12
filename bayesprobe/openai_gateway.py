@@ -365,6 +365,7 @@ EVIDENCE_JUDGMENT_SCHEMA_KEYS = frozenset(
 )
 MAX_PROVIDER_ATTEMPTS = 3
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_MODEL_IDENTITY_PREFIX = "openai_model_identity:v1:"
 
 
 class ProviderHTTPError(RuntimeError):
@@ -439,8 +440,19 @@ def _openai_model_identity(
     config: OpenAIModelGatewayConfig,
 ) -> str:
     provider_identity = _normalized_openai_provider_identity(config.base_url)
+    identity_components = {
+        "adapter_kind": validate_secret_free_provider_identity(adapter_kind),
+        "model": validate_secret_free_provider_identity(config.model),
+        "provider_origin": provider_identity,
+    }
+    encoded_components = json.dumps(
+        identity_components,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     return validate_secret_free_provider_identity(
-        f"{adapter_kind}:{provider_identity}:{config.model}"
+        f"{OPENAI_MODEL_IDENTITY_PREFIX}{encoded_components}"
     )
 
 

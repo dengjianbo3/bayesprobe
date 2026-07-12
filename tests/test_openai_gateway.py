@@ -47,6 +47,22 @@ FORBIDDEN_OPEN_QUESTION_TASK_FRAME_FIELDS = [
     "credential",
     "secret",
 ]
+OPENAI_MODEL_IDENTITY_PREFIX = "openai_model_identity:v1:"
+
+
+def parse_openai_model_identity(identity: str) -> dict[str, str]:
+    assert identity.startswith(OPENAI_MODEL_IDENTITY_PREFIX)
+    encoded = identity.removeprefix(OPENAI_MODEL_IDENTITY_PREFIX)
+    payload = json.loads(encoded)
+    assert list(payload) == ["adapter_kind", "model", "provider_origin"]
+    assert encoded == json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert all(isinstance(value, str) for value in payload.values())
+    return payload
 
 
 def make_judge_request() -> StructuredModelRequest:
@@ -333,10 +349,95 @@ def test_openai_model_identity_includes_adapter_provider_and_model(
         )
     )
 
-    expected = f"{adapter_kind}:https://api.openai.com:provider/model-a"
+    expected = (
+        f'{OPENAI_MODEL_IDENTITY_PREFIX}{{"adapter_kind":"{adapter_kind}",'
+        '"model":"provider/model-a",'
+        '"provider_origin":"https://api.openai.com"}'
+    )
     assert default_gateway.model_identity == expected
     assert explicit_default_gateway.model_identity == expected
+    assert parse_openai_model_identity(expected) == {
+        "adapter_kind": adapter_kind,
+        "model": "provider/model-a",
+        "provider_origin": "https://api.openai.com",
+    }
     assert validate_secret_free_provider_identity(expected) == expected
+
+
+@pytest.mark.parametrize(
+    "gateway_type",
+    [OpenAIResponsesModelGateway, OpenAIChatCompletionsModelGateway],
+)
+def test_openai_model_identity_is_injective_across_port_model_boundary(
+    gateway_type,
+):
+    provider_port = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="model-a",
+            base_url="https://provider.example:8443/v1",
+        )
+    )
+    model_prefix = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="8443:model-a",
+            base_url="https://provider.example/v1",
+        )
+    )
+
+    assert provider_port.model_identity != model_prefix.model_identity
+    assert parse_openai_model_identity(provider_port.model_identity) == {
+        "adapter_kind": gateway_type.adapter_kind,
+        "model": "model-a",
+        "provider_origin": "https://provider.example:8443",
+    }
+    assert parse_openai_model_identity(model_prefix.model_identity) == {
+        "adapter_kind": gateway_type.adapter_kind,
+        "model": "8443:model-a",
+        "provider_origin": "https://provider.example",
+    }
+
+
+@pytest.mark.parametrize(
+    "gateway_type",
+    [OpenAIResponsesModelGateway, OpenAIChatCompletionsModelGateway],
+)
+def test_openai_model_identity_canonically_encodes_adversarial_model_values(
+    gateway_type,
+):
+    models = [
+        "model:with:colons",
+        'model,\"provider_origin\":\"https://other.example\"',
+        'model\\segment\"quoted',
+        "model-\u6a21\u578b-\u03b1-\u2603",
+    ]
+    identities = []
+
+    for model in models:
+        configured = gateway_type(
+            config=OpenAIModelGatewayConfig(
+                model=model,
+                base_url="https://provider.example/v1",
+            )
+        )
+        equivalent = gateway_type(
+            config=OpenAIModelGatewayConfig(
+                model=model,
+                base_url=(
+                    "HTTPS://user:ignored@PROVIDER.EXAMPLE:443/other"
+                    "?ignored=value#fragment"
+                ),
+            )
+        )
+
+        assert configured.model_identity == equivalent.model_identity
+        assert parse_openai_model_identity(configured.model_identity) == {
+            "adapter_kind": gateway_type.adapter_kind,
+            "model": model,
+            "provider_origin": "https://provider.example",
+        }
+        identities.append(configured.model_identity)
+
+    assert len(set(identities)) == len(models)
 
 
 @pytest.mark.parametrize(
@@ -381,7 +482,16 @@ def test_openai_model_identity_normalizes_provider_origin_without_url_secrets(
     assert configured.model_identity == equivalent.model_identity
     assert configured.model_identity != nondefault_port.model_identity
     assert configured.model_identity != different_provider.model_identity
-    assert "https://provider.example" in configured.model_identity
+    assert parse_openai_model_identity(configured.model_identity) == {
+        "adapter_kind": gateway_type.adapter_kind,
+        "model": "same-model",
+        "provider_origin": "https://provider.example",
+    }
+    assert parse_openai_model_identity(nondefault_port.model_identity) == {
+        "adapter_kind": gateway_type.adapter_kind,
+        "model": "same-model",
+        "provider_origin": "https://provider.example:8443",
+    }
     assert credential not in configured.model_identity
     assert query_value not in configured.model_identity
     assert "alice" not in configured.model_identity
@@ -412,7 +522,11 @@ def test_openai_model_identity_normalizes_http_default_port(gateway_type):
     )
 
     assert implicit.model_identity == explicit.model_identity
-    assert "http://provider.example" in implicit.model_identity
+    assert parse_openai_model_identity(implicit.model_identity) == {
+        "adapter_kind": gateway_type.adapter_kind,
+        "model": "same-model",
+        "provider_origin": "http://provider.example",
+    }
 
 
 @pytest.mark.parametrize(

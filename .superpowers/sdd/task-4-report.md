@@ -1513,3 +1513,90 @@ identity.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 24
+
+### Design Decision
+
+- Replaced the delimiter-concatenated OpenAI identity with a versioned canonical
+  envelope: `openai_model_identity:v1:` followed by compact JSON containing the
+  exact `adapter_kind`, normalized `provider_origin`, and `model` fields.
+  `sort_keys=True`, fixed separators, and `ensure_ascii=False` make equivalent
+  tuples byte-identical while preserving exact Unicode for security inspection.
+- Validated adapter kind and model independently before JSON escaping, retained
+  the existing validated provider-origin canonicalizer, and validated the final
+  encoded identity as defense in depth. This prevents structured encoding from
+  hiding secret-like component text.
+- Kept `model_identity` as a plain string and added no dependency. The existing
+  URL normalization, user-information redaction, path/query/fragment omission,
+  default-port collapse, and non-default-port preservation are unchanged.
+
+### Changed Files
+
+- `bayesprobe/openai_gateway.py`
+- `tests/test_openai_gateway.py`
+- `tests/test_model_gateway.py`
+- `tests/test_probe_executor.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py::test_openai_model_identity_is_injective_across_port_model_boundary tests/test_openai_gateway.py::test_openai_model_identity_canonically_encodes_adversarial_model_values tests/test_probe_executor.py::test_model_probe_provenance_uses_injective_openai_component_identity -q --tb=short -p no:cacheprovider
+```
+
+Result: `6 failed in 0.20s`. For both Responses and Chat Completions,
+`provider=https://provider.example:8443, model=model-a` exactly equaled
+`provider=https://provider.example, model=8443:model-a`; canonical-envelope
+parsing also rejected every old delimiter identity in the adversarial and
+downstream provenance cases.
+
+- GREEN/refactor: the same focused command -> `6 passed in 0.14s`.
+- Direct adapter/factory/provenance suites:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_model_gateway.py tests/test_probe_executor.py -q --tb=short -p
+  no:cacheprovider` -> `195 passed in 0.30s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_probe_executor.py tests/evaluation/test_python_probe.py
+  tests/test_evidence_memory.py tests/test_core_cycles.py -q -p
+  no:cacheprovider` -> `488 passed in 1.99s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1382 passed, 10 skipped in 11.30s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before
+  report/commit; both checks are repeated after report and the range check after
+  commit.
+
+### Self-Review
+
+- The exact reported collision now decodes to two distinct component objects
+  and two distinct identity strings for both adapters. Canonical JSON escaping
+  also round-trips models containing colons, commas, field-like quoted text,
+  backslashes, quotes, and Unicode; all distinct models remain distinct.
+- Test parsers require the version prefix, exact three-key order, string values,
+  and byte-for-byte canonical JSON reserialization. Existing exact-string
+  factory assertions now name the complete encoded shape rather than falling
+  back to substring checks.
+- Equivalent URLs with case, user information, path, query, fragment, and
+  explicit default-port differences still yield identical identity. Parsed
+  payload assertions prove those raw URL components are absent.
+- Model-backed probe coverage runs both adapters through the exact collision.
+  Equivalent tuples keep equal provider identity, source identity, and
+  correlation group; the boundary-distinct tuple and a different host each
+  produce a different correlation group after provenance normalization.
+- Component-level and final secret-free validation remain before provenance
+  stamping, and all earlier provider, lifecycle, memory, and ledger suites stay
+  green.
+
+### Concerns
+
+No blocking concerns.
