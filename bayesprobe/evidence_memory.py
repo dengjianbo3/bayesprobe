@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import unicodedata
-from typing import Literal
+from typing import Any, Literal
 
 from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.schemas import (
@@ -36,6 +38,31 @@ class EvidenceMemoryDecision:
     discard_reason: str | None
     remaining_credit: dict[str, float]
     canonical_correlation_group: str
+
+
+def derive_deterministic_computation_root(
+    *,
+    tool_identity: str,
+    computation_inputs: Mapping[str, Any],
+) -> str:
+    """Hash stable, secret-free computation semantics into one factual root."""
+    if not isinstance(tool_identity, str) or not tool_identity.strip():
+        raise ValueError("deterministic computation tool identity must not be empty")
+    canonical_tool_identity = _canonical_computation_text(tool_identity)
+    _reject_secret_computation_text(canonical_tool_identity)
+    canonical_inputs = _canonical_computation_value(computation_inputs)
+    payload = json.dumps(
+        {
+            "computation_inputs": canonical_inputs,
+            "tool_identity": canonical_tool_identity,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"deterministic-computation:sha256:{digest}"
 
 
 class SignalProvenanceNormalizer:
@@ -289,6 +316,61 @@ def _clean_text(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).split())
 
 
+def _canonical_computation_text(value: str) -> str:
+    return _clean_text(value)
+
+
+def _reject_secret_computation_text(value: str) -> None:
+    if is_secret_like_value(value):
+        raise ValueError("deterministic computation inputs contain secret material")
+
+
+def _canonical_computation_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        canonical: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    "deterministic computation inputs require string object keys"
+                )
+            canonical_key = _canonical_computation_text(key)
+            if not canonical_key:
+                raise ValueError(
+                    "deterministic computation inputs require non-empty object keys"
+                )
+            if (
+                is_forbidden_secret_key_name(key)
+                or is_forbidden_secret_key_name(canonical_key)
+                or is_secret_like_value(key)
+                or is_secret_like_value(canonical_key)
+            ):
+                raise ValueError(
+                    "deterministic computation inputs contain secret material"
+                )
+            if canonical_key in canonical:
+                raise ValueError(
+                    "deterministic computation inputs have duplicate canonical keys"
+                )
+            canonical[canonical_key] = _canonical_computation_value(item)
+        return canonical
+    if isinstance(value, list | tuple):
+        return [_canonical_computation_value(item) for item in value]
+    if isinstance(value, str):
+        canonical_text = _canonical_computation_text(value)
+        _reject_secret_computation_text(value)
+        _reject_secret_computation_text(canonical_text)
+        return canonical_text
+    if value is None or isinstance(value, bool | int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(
+                "deterministic computation inputs require finite numbers"
+            )
+        return value
+    raise ValueError("deterministic computation inputs must be canonical JSON values")
+
+
 def _sha256_identity(source_identity: str, content: str) -> str:
     digest = hashlib.sha256(f"{source_identity}\n{content}".encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -423,4 +505,5 @@ __all__ = [
     "EvidenceMemoryDecision",
     "EvidenceMemoryManager",
     "SignalProvenanceNormalizer",
+    "derive_deterministic_computation_root",
 ]

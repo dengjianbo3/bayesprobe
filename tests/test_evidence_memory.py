@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -6,6 +7,7 @@ from bayesprobe.evidence import EvidenceIntegrationGate
 from bayesprobe.evidence_memory import (
     EvidenceMemoryManager,
     SignalProvenanceNormalizer,
+    derive_deterministic_computation_root,
 )
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.kernel_config import CorrelationCreditPolicy
@@ -103,6 +105,60 @@ def _signal(
             citations=["source.example/report#finding"],
         ),
     )
+
+
+def test_deterministic_computation_root_canonicalizes_structured_inputs():
+    first = derive_deterministic_computation_root(
+        tool_identity=" deterministic\u00a0probe gateway ",
+        computation_inputs={
+            "inquiry_goal": "Cafe\u0301   comparison\nresult",
+            "conditions": {"B": "weakens", "A": "supports"},
+            "targets": ["A", "B"],
+        },
+    )
+    equivalent = derive_deterministic_computation_root(
+        tool_identity="deterministic probe gateway",
+        computation_inputs={
+            "targets": ["A", "B"],
+            "conditions": {"A": "supports", "B": "weakens"},
+            "inquiry_goal": "Caf\u00e9 comparison result",
+        },
+    )
+    changed = derive_deterministic_computation_root(
+        tool_identity="deterministic probe gateway",
+        computation_inputs={
+            "targets": ["A", "B"],
+            "conditions": {"A": "supports", "B": "weakens"},
+            "inquiry_goal": "A materially different comparison",
+        },
+    )
+
+    assert first == equivalent
+    assert first != changed
+    assert re.fullmatch(
+        r"deterministic-computation:sha256:[0-9a-f]{64}",
+        first,
+    )
+
+
+@pytest.mark.parametrize(
+    "computation_inputs",
+    [
+        {"nested": {"api_key": "ordinary-looking-value"}},
+        {"code": "token=provider-secret-value-123"},
+    ],
+)
+def test_deterministic_computation_root_rejects_secrets_before_hashing(
+    computation_inputs,
+):
+    with pytest.raises(ValueError) as captured:
+        derive_deterministic_computation_root(
+            tool_identity="safe-tool",
+            computation_inputs=computation_inputs,
+        )
+
+    assert "secret" in str(captured.value).lower()
+    assert "provider-secret-value-123" not in str(captured.value)
 
 
 def test_normalization_is_deterministic_and_model_session_groups_are_stable():

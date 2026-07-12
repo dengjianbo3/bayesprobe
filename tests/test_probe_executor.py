@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore
+from bayesprobe.evidence import EvidenceIntegrationGate
 from bayesprobe.evidence_memory import SignalProvenanceNormalizer
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
@@ -24,6 +25,7 @@ from bayesprobe.schemas import (
     BeliefState,
     CycleRecord,
     CycleSignalShape,
+    EpistemicOrigin,
     ExternalSignal,
     Hypothesis,
     ProbeDesign,
@@ -167,6 +169,88 @@ def test_executor_turns_probe_set_into_active_signals():
     assert all(signal.cycle_id == "run_exec_cycle_1" for signal in result.signals)
     assert "SUPPORTS" in result.signals[0].raw_content
     assert "REFUTES" in result.signals[1].raw_content
+
+
+def test_repeated_deterministic_probe_reuses_root_and_spends_no_fresh_credit():
+    state = make_belief_state()
+    first_probe = ProbeDesign(
+        id="P_semantics_cycle_1",
+        cycle_id="run_exec_cycle_1",
+        target_hypotheses=["H2", "H1"],
+        inquiry_goal="Compare the same audited observation.",
+        method="source_tracing",
+        probe_type="discriminative_test",
+        support_condition={"H1": "Supports H1.", "H2": "Supports H2."},
+        weaken_condition={"H1": "Weakens H1.", "H2": "Weakens H2."},
+        reframe_condition={"unresolved": "Reframe if neither is explained."},
+    )
+    second_probe = first_probe.model_copy(
+        update={
+            "id": "P_semantics_cycle_2",
+            "cycle_id": "run_exec_cycle_2",
+            "target_hypotheses": ["H1", "H2"],
+        }
+    )
+
+    def execute(probe: ProbeDesign, cycle_id: str):
+        return ProbeExecutor(DeterministicProbeToolGateway()).execute_probe_set(
+            probe_set=make_probe_set([probe], cycle_id=cycle_id),
+            context=ProbeExecutionContext(
+                run_id="run_exec",
+                cycle_id=cycle_id,
+                belief_state=state,
+            ),
+        ).signals[0]
+
+    first_signal = execute(first_probe, "run_exec_cycle_1")
+    second_signal = execute(second_probe, "run_exec_cycle_2")
+    changed_signal = execute(
+        second_probe.model_copy(
+            update={"inquiry_goal": "Compute a materially different observation."}
+        ),
+        "run_exec_cycle_2",
+    )
+
+    assert first_signal.provenance.epistemic_origin == EpistemicOrigin.TOOL_RESULT
+    assert first_signal.provenance.derivation_root_id == (
+        second_signal.provenance.derivation_root_id
+    )
+    assert first_signal.provenance.derivation_root_id != (
+        changed_signal.provenance.derivation_root_id
+    )
+
+    gate = EvidenceIntegrationGate()
+    first = gate.integrate(
+        cycle=CycleRecord(
+            cycle_id="run_exec_cycle_1",
+            run_id="run_exec",
+            cycle_index=1,
+            signal_shape=CycleSignalShape.ACTIVE_ONLY,
+        ),
+        belief_state=state,
+        probe_set=make_probe_set([first_probe], cycle_id="run_exec_cycle_1"),
+        signals=[first_signal],
+    )
+    state = state.model_copy(update={"evidence_memory": first.evidence_memory})
+    repeated = gate.integrate(
+        cycle=CycleRecord(
+            cycle_id="run_exec_cycle_2",
+            run_id="run_exec",
+            cycle_index=2,
+            signal_shape=CycleSignalShape.ACTIVE_ONLY,
+        ),
+        belief_state=state,
+        probe_set=make_probe_set([second_probe], cycle_id="run_exec_cycle_2"),
+        signals=[second_signal],
+    )
+
+    event = repeated.evidence_events[0]
+    assert event.correlation_status == "correlated_restatement"
+    assert event.independence == 0.0
+    assert event.effective_update_weight == 0.0
+    assert repeated.evidence_memory.correlation_credit == (
+        first.evidence_memory.correlation_credit
+    )
 
 
 def test_model_backed_probe_gateway_turns_model_result_into_active_signal():

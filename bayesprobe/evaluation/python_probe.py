@@ -11,20 +11,29 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable, Protocol
 
+from bayesprobe.evidence_memory import derive_deterministic_computation_root
 from bayesprobe.model_gateway import (
     ModelGateway,
     ModelGatewayValidationError,
     StructuredModelRequest,
     model_gateway_adapter_kind,
+    model_gateway_identity,
 )
 from bayesprobe.probe_executor import ProbeExecutionContext
-from bayesprobe.schemas import ExternalSignal, ProbeDesign, SignalKind
+from bayesprobe.schemas import (
+    EpistemicOrigin,
+    ExternalSignal,
+    ProbeDesign,
+    SignalKind,
+    SignalProvenance,
+)
 
 
 _IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PLAN_KEYS = frozenset(
     {"mode", "purpose", "target_hypotheses", "expected_observation", "code"}
 )
+_PYTHON_SANDBOX_TOOL_IDENTITY = "python_sandbox:v1"
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -536,15 +545,28 @@ class PythonAugmentedProbeToolGateway:
             raise ModelGatewayValidationError(
                 "reasoning probe signal raw_content must not be empty"
             )
+        adapter_kind = model_gateway_adapter_kind(self._model_gateway)
+        model_identity = model_gateway_identity(self._model_gateway)
         return ExternalSignal(
             id=f"S_{context.cycle_id}_{probe.id}",
             cycle_id=context.cycle_id,
             signal_kind=SignalKind.ACTIVE,
             source_type="model_probe_gateway",
-            source=f"model_gateway:{model_gateway_adapter_kind(self._model_gateway)}",
+            source=f"model_gateway:{adapter_kind}",
             raw_content=raw_content.strip(),
             generated_by_probe=probe.id,
             initial_target_hypotheses=list(plan.target_hypotheses),
+            provenance=SignalProvenance(
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                source_identity=f"model_gateway:{model_identity}",
+                provider_model_or_tool_identity=model_identity,
+                session_id=context.run_id,
+                derivation_root_id=(
+                    f"model-probe:{context.run_id}:{context.cycle_id}:{probe.id}"
+                ),
+                correlation_group=f"model:{model_identity}:{context.run_id}",
+                canonical_content_fingerprint="pending-normalization",
+            ),
         )
 
     def _execute_code(
@@ -642,6 +664,18 @@ class PythonAugmentedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
     ) -> ExternalSignal:
+        derivation_root_id = derive_deterministic_computation_root(
+            tool_identity=_PYTHON_SANDBOX_TOOL_IDENTITY,
+            computation_inputs={
+                "code": record.code,
+                "plan": {
+                    "purpose": plan.purpose,
+                    "expected_observation": plan.expected_observation,
+                    "target_hypotheses": sorted(plan.target_hypotheses),
+                },
+                "environment": {"image_digest": record.image_digest},
+            },
+        )
         raw_content = "\n".join(
             [
                 f"purpose: {plan.purpose}",
@@ -662,6 +696,19 @@ class PythonAugmentedProbeToolGateway:
             raw_content=raw_content,
             generated_by_probe=probe.id,
             initial_target_hypotheses=list(plan.target_hypotheses),
+            provenance=SignalProvenance(
+                epistemic_origin=EpistemicOrigin.TOOL_RESULT,
+                source_identity=(
+                    f"{_PYTHON_SANDBOX_TOOL_IDENTITY}:{record.image_digest}"
+                ),
+                provider_model_or_tool_identity=_PYTHON_SANDBOX_TOOL_IDENTITY,
+                derivation_root_id=derivation_root_id,
+                correlation_group=(
+                    f"tool:{_PYTHON_SANDBOX_TOOL_IDENTITY}:{record.image_digest}"
+                ),
+                canonical_content_fingerprint="pending-normalization",
+                environment_state_id=record.image_digest,
+            ),
         )
 
     def _failure_signal(

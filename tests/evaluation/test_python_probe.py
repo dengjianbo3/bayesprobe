@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from bayesprobe.evidence import EvidenceIntegrationGate
 from bayesprobe.evaluation.python_probe import (
     DockerPythonSandbox,
     DockerPythonSandboxConfig,
@@ -16,7 +17,16 @@ from bayesprobe.evaluation.python_probe import (
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.evidence import SignalQualityAssessor
 from bayesprobe.probe_executor import ProbeExecutionContext
-from bayesprobe.schemas import EvidenceType, ExternalSignal, ProbeDesign, SignalKind
+from bayesprobe.schemas import (
+    CycleRecord,
+    CycleSignalShape,
+    EpistemicOrigin,
+    EvidenceType,
+    ExternalSignal,
+    ProbeDesign,
+    ProbeSet,
+    SignalKind,
+)
 
 
 IMAGE_DIGEST = "sha256:" + "a" * 64
@@ -292,6 +302,11 @@ class RecordingExecutionObserver:
 
 def execution_record(
     *,
+    execution_id=None,
+    cycle_id="cycle_1",
+    probe_id="probe_1",
+    code="print(4)",
+    image_digest=IMAGE_DIGEST,
     exit_code=0,
     stdout="4\n",
     stderr="",
@@ -300,13 +315,13 @@ def execution_record(
     repair_attempt_index=0,
 ):
     return PythonExecutionRecord(
-        execution_id=f"exec_{repair_attempt_index}",
+        execution_id=execution_id or f"exec_{repair_attempt_index}",
         run_id="run_1",
-        cycle_id="cycle_1",
-        probe_id="probe_1",
-        code="print(4)",
+        cycle_id=cycle_id,
+        probe_id=probe_id,
+        code=code,
         code_sha256="7" * 64,
-        image_digest=IMAGE_DIGEST,
+        image_digest=image_digest,
         started_at="2026-07-11T00:00:00Z",
         completed_at="2026-07-11T00:00:01Z",
         wall_seconds=1.0,
@@ -387,6 +402,127 @@ def test_python_augmented_gateway_converts_successful_execution_to_active_signal
     assert "gold" not in str(model.requests[0].input).lower()
 
 
+def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():
+    first_probe, first_context = probe_context()
+    second_probe = first_probe.model_copy(
+        update={"id": "probe_2", "cycle_id": "cycle_2"}
+    )
+    second_context = ProbeExecutionContext(
+        run_id=first_context.run_id,
+        cycle_id="cycle_2",
+        belief_state=first_context.belief_state,
+        metadata=dict(first_context.metadata),
+    )
+
+    def execute(
+        *,
+        plan_payload,
+        record,
+        probe=first_probe,
+        context=first_context,
+        image_digest=IMAGE_DIGEST,
+    ):
+        sandbox = FakeSandbox([record])
+        sandbox.image = ResolvedSandboxImage(
+            requested_reference="sandbox:v0.1",
+            digest=image_digest,
+        )
+        return PythonAugmentedProbeToolGateway(
+            SequenceModelGateway([plan_payload]),
+            sandbox,
+        ).execute_probe(probe=probe, context=context)[0]
+
+    first_signal = execute(
+        plan_payload=python_plan(),
+        record=execution_record(execution_id="exec_cycle_1"),
+    )
+    second_signal = execute(
+        plan_payload={
+            **python_plan(),
+            "target_hypotheses": ["C", "B", "A"],
+        },
+        record=execution_record(
+            execution_id="exec_cycle_2",
+            cycle_id="cycle_2",
+            probe_id="probe_2",
+        ),
+        probe=second_probe,
+        context=second_context,
+    )
+    changed_code_signal = execute(
+        plan_payload=python_plan("print(2 + 3)"),
+        record=execution_record(code="print(2 + 3)", stdout="5\n"),
+    )
+    changed_plan_signal = execute(
+        plan_payload={**python_plan(), "purpose": "Compute a different quantity."},
+        record=execution_record(),
+    )
+    changed_image = "sha256:" + "b" * 64
+    changed_image_signal = execute(
+        plan_payload=python_plan(),
+        record=execution_record(image_digest=changed_image),
+        image_digest=changed_image,
+    )
+
+    assert first_signal.provenance.epistemic_origin == EpistemicOrigin.TOOL_RESULT
+    assert first_signal.provenance.environment_state_id == IMAGE_DIGEST
+    assert first_signal.provenance.derivation_root_id == (
+        second_signal.provenance.derivation_root_id
+    )
+    assert first_signal.provenance.derivation_root_id != (
+        changed_code_signal.provenance.derivation_root_id
+    )
+    assert first_signal.provenance.derivation_root_id != (
+        changed_plan_signal.provenance.derivation_root_id
+    )
+    assert first_signal.provenance.derivation_root_id != (
+        changed_image_signal.provenance.derivation_root_id
+    )
+
+    def probe_set(probe, cycle_id):
+        return ProbeSet(
+            probe_set_id=f"ps_{cycle_id}",
+            cycle_id=cycle_id,
+            probes=[probe],
+            selection_reason="Python provenance regression.",
+        )
+
+    gate = EvidenceIntegrationGate()
+    first = gate.integrate(
+        cycle=CycleRecord(
+            cycle_id="cycle_1",
+            run_id="run_1",
+            cycle_index=1,
+            signal_shape=CycleSignalShape.ACTIVE_ONLY,
+        ),
+        belief_state=first_context.belief_state,
+        probe_set=probe_set(first_probe, "cycle_1"),
+        signals=[first_signal],
+    )
+    state = first_context.belief_state.model_copy(
+        update={"evidence_memory": first.evidence_memory}
+    )
+    repeated = gate.integrate(
+        cycle=CycleRecord(
+            cycle_id="cycle_2",
+            run_id="run_1",
+            cycle_index=2,
+            signal_shape=CycleSignalShape.ACTIVE_ONLY,
+        ),
+        belief_state=state,
+        probe_set=probe_set(second_probe, "cycle_2"),
+        signals=[second_signal],
+    )
+
+    event = repeated.evidence_events[0]
+    assert event.correlation_status == "correlated_restatement"
+    assert event.independence == 0.0
+    assert event.effective_update_weight == 0.0
+    assert repeated.evidence_memory.correlation_credit == (
+        first.evidence_memory.correlation_credit
+    )
+
+
 def test_reasoning_mode_uses_model_signal_without_starting_sandbox():
     model = SequenceModelGateway(
         [
@@ -407,6 +543,7 @@ def test_reasoning_mode_uses_model_signal_without_starting_sandbox():
     signal = gateway.execute_probe(probe=probe, context=context)[0]
 
     assert signal.source_type == "model_probe_gateway"
+    assert signal.provenance.epistemic_origin == EpistemicOrigin.MODEL_REASONING
     assert signal.raw_content == "A conceptual argument supports answer choice B."
     assert sandbox.requests == []
     assert [request.task for request in model.requests] == [

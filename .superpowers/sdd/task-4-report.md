@@ -52,9 +52,9 @@ expansion, WebUI, dependency, search, or retrieval files were changed.
   provenance/memory request context, origin quality caps, and reduce-only
   model quality overrides.
 - Versioned both OpenAI transport schemas and repairs. Native requests use the
-  seven-field v0.2 schema; exact legacy four-field provider payloads use a
-  named compatibility completion before strict validation. Seeded-hypothesis
-  evidence remains the explicit v0.1 route.
+  seven-field v0.2 schema, including explicit seeded frames. Exact legacy
+  four-field provider payloads use a named compatibility completion only on
+  the explicit legacy-migration route before strict validation.
 - Integrated normalized ledger signals and the committed memory snapshot into
   the same recursively revalidated final BeliefState before any cycle append.
   Replayed evidence ids neither recommit credit nor append another Evidence
@@ -238,3 +238,60 @@ runtime behavior.
 No blocking concerns. Legacy four-field judgment completion is intentionally
 unavailable to every native v0.2 route; stale provider fixtures were upgraded to
 the seven-field contract rather than receiving compatibility preprocessing.
+
+## Review Fix 3
+
+### Status
+
+Complete. The final-gate deterministic recomputation finding was addressed
+from reviewed HEAD `dd81971` without changing Task 5/6, WebUI, routing, or
+dependencies.
+
+### Changes
+
+- Added one shared deterministic-computation root helper in evidence memory.
+  It recursively rejects secret keys and values before hashing, canonicalizes
+  Unicode, whitespace, and JSON structure, includes only a safe tool identity
+  and structured computation inputs, and returns a namespaced SHA-256 root.
+- Stamped deterministic probe results with explicit `TOOL_RESULT` provenance.
+  Their roots use method, inquiry goal, sorted targets, support/weaken/reframe
+  conditions, probe type, and stable gateway identity, excluding probe, cycle,
+  and run ids plus rendered result labels.
+- Stamped successful Python sandbox results with explicit `TOOL_RESULT`
+  provenance. Their roots use executed code, plan purpose, expected
+  observation, sorted targets, and immutable image digest, excluding execution,
+  probe, cycle, and run ids plus output-wrapper metadata.
+- Kept Python reasoning fallback explicitly `MODEL_REASONING` with the existing
+  safe provider/model/session identity. It never uses the deterministic tool
+  root path.
+- Added gate regressions proving repeated deterministic probes and Python
+  computations retain one root across cycles, classify as
+  `correlated_restatement`, receive zero independence and effective weight,
+  and leave correlation credit unchanged. Changed probe semantics, code, plan
+  inputs, and image digest produce different roots.
+- Corrected the report: explicit seeded frames are native v0.2 and use the
+  seven-field judgment contract. Four-field compatibility exists only on the
+  explicit legacy-migration route.
+
+### RED Evidence
+
+1. Shared-helper regression stopped with `1 error` because
+   `derive_deterministic_computation_root` did not exist.
+2. Deterministic-probe regression produced `1 failed` because gateway signals
+   had no explicit provenance.
+3. Python provenance regressions produced `2 failed` because successful sandbox
+   and model-only reasoning signals had no explicit provenance.
+
+### GREEN Evidence
+
+- Focused provenance/probe/Python suites: `92 passed in 0.26s`.
+- Exact Task 4 focused suite: `282 passed in 0.53s`.
+- Full offline Python suite: `1081 passed, 10 skipped in 8.58s`.
+- Node WebUI stream regression: `15 passed, 0 failed`.
+- `git diff --check`: clean.
+
+### Concerns
+
+No blocking concerns. Deterministic roots intentionally describe computation
+semantics and environment identity, not rendered output or execution-instance
+metadata; changed stable inputs split the root.

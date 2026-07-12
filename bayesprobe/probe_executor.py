@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from bayesprobe.evidence_memory import derive_deterministic_computation_root
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import (
     ModelGateway,
@@ -21,6 +22,9 @@ from bayesprobe.schemas import (
     SignalKind,
     SignalProvenance,
 )
+
+
+_DETERMINISTIC_PROBE_TOOL_IDENTITY = "deterministic_probe_gateway:v1"
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,22 @@ class DeterministicProbeToolGateway:
     ) -> list[ExternalSignal]:
         cue = _deterministic_content_cue(probe.method)
         targets = ", ".join(probe.target_hypotheses)
+        derivation_root_id = derive_deterministic_computation_root(
+            tool_identity=_DETERMINISTIC_PROBE_TOOL_IDENTITY,
+            computation_inputs={
+                "method": probe.method,
+                "inquiry_goal": probe.inquiry_goal,
+                "target_hypotheses": sorted(probe.target_hypotheses),
+                "support_condition": dict(probe.support_condition),
+                "weaken_condition": dict(probe.weaken_condition),
+                "reframe_condition": (
+                    None
+                    if probe.reframe_condition is None
+                    else dict(probe.reframe_condition)
+                ),
+                "expected_probe_behavior": {"probe_type": probe.probe_type},
+            },
+        )
         return [
             ExternalSignal(
                 id=f"S_{context.cycle_id}_{probe.id}",
@@ -70,6 +90,18 @@ class DeterministicProbeToolGateway:
                 ),
                 generated_by_probe=probe.id,
                 initial_target_hypotheses=list(probe.target_hypotheses),
+                provenance=SignalProvenance(
+                    epistemic_origin=EpistemicOrigin.TOOL_RESULT,
+                    source_identity=_DETERMINISTIC_PROBE_TOOL_IDENTITY,
+                    provider_model_or_tool_identity=(
+                        _DETERMINISTIC_PROBE_TOOL_IDENTITY
+                    ),
+                    derivation_root_id=derivation_root_id,
+                    correlation_group=(
+                        f"tool:{_DETERMINISTIC_PROBE_TOOL_IDENTITY}"
+                    ),
+                    canonical_content_fingerprint="pending-normalization",
+                ),
             )
         ]
 
