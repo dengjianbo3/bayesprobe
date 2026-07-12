@@ -3089,6 +3089,56 @@ class _PolicyPreflightCore(BayesProbeCore):
         return self.counting_policy_gate
 
 
+@pytest.mark.parametrize(
+    ("field", "raw_value"),
+    [
+        ("memory_version", True),
+        (
+            "correlation_credit",
+            {"bypass-group|H1|confirming": True},
+        ),
+    ],
+    ids=["boolean-version", "boolean-credit"],
+)
+def test_core_recursive_preflight_rejects_model_construct_memory_scalar_bypass(
+    tmp_path: Path,
+    field,
+    raw_value,
+):
+    ledger_path = tmp_path / f"strict-memory-{field}.jsonl"
+    ledger_path.touch()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = _PolicyPreflightCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    memory_payload = state.evidence_memory.model_dump(mode="python")
+    memory_payload[field] = raw_value
+    bypass_memory = EvidenceMemorySnapshot.model_construct(**memory_payload)
+    state = state.model_copy(update={"evidence_memory": bypass_memory})
+    prior_state = state.model_dump(mode="python", warnings=False)
+    cycle = make_cycle(f"cycle_strict_memory_{field}")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[make_active_signal()],
+        )
+
+    assert core.counting_policy_gate.calls == 0
+    assert gateway.requests == []
+    assert solver.calls == 0
+    assert state.model_dump(mode="python", warnings=False) == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
 def test_core_rejects_overcap_prior_before_custom_gate_call(tmp_path: Path):
     policy = CorrelationCreditPolicy(
         max_cumulative_effective_weight_per_direction=0.2

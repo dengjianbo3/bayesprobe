@@ -1,3 +1,7 @@
+from decimal import Decimal
+from enum import IntEnum
+import json
+from types import MappingProxyType
 import unicodedata
 
 import pytest
@@ -52,6 +56,26 @@ _NFKC_SECRET_VALUE = (
     "provider-secret-value-123"
 )
 _NFKC_SECRET_KEY = "\uff41\uff50\uff49\uff3f\uff4b\uff45\uff59"
+
+
+class _MemoryVersionEnum(IntEnum):
+    VERSION_ONE = 1
+
+
+class _IntSubclass(int):
+    pass
+
+
+class _FloatSubclass(float):
+    pass
+
+
+class _CoercibleNumber:
+    def __int__(self) -> int:
+        return 1
+
+    def __float__(self) -> float:
+        return 0.25
 
 
 def make_v02_task_frame(
@@ -909,6 +933,220 @@ def test_v1_evidence_memory_identity_remains_compatible():
     )
 
     assert snapshot.source_content_fingerprints["S1"] == identity
+
+
+@pytest.mark.parametrize("entrypoint", ["init", "model_validate"])
+@pytest.mark.parametrize(
+    "raw_version",
+    [
+        True,
+        False,
+        1.0,
+        "1",
+        Decimal("1"),
+        _MemoryVersionEnum.VERSION_ONE,
+        _IntSubclass(1),
+        _CoercibleNumber(),
+        None,
+    ],
+    ids=[
+        "true",
+        "false",
+        "float",
+        "numeric-string",
+        "decimal",
+        "int-enum",
+        "int-subclass",
+        "coercible-object",
+        "none",
+    ],
+)
+def test_evidence_memory_version_rejects_raw_coercible_types(
+    entrypoint,
+    raw_version,
+):
+    payload = {"memory_version": raw_version}
+
+    with pytest.raises(ValueError, match="memory_version"):
+        if entrypoint == "init":
+            EvidenceMemorySnapshot(**payload)
+        else:
+            EvidenceMemorySnapshot.model_validate(payload)
+
+
+@pytest.mark.parametrize("entrypoint", ["init", "model_validate"])
+@pytest.mark.parametrize(
+    "raw_credit",
+    [
+        True,
+        False,
+        "0.25",
+        Decimal("0.25"),
+        _MemoryVersionEnum.VERSION_ONE,
+        _IntSubclass(1),
+        _FloatSubclass(0.25),
+        _CoercibleNumber(),
+        None,
+    ],
+    ids=[
+        "true",
+        "false",
+        "numeric-string",
+        "decimal",
+        "int-enum",
+        "int-subclass",
+        "float-subclass",
+        "coercible-object",
+        "none",
+    ],
+)
+def test_evidence_memory_credit_rejects_raw_coercible_types(
+    entrypoint,
+    raw_credit,
+):
+    payload = {
+        "correlation_credit": {
+            "strict-group|H1|confirming": raw_credit,
+        }
+    }
+
+    with pytest.raises(ValueError, match="correlation credit"):
+        if entrypoint == "init":
+            EvidenceMemorySnapshot(**payload)
+        else:
+            EvidenceMemorySnapshot.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "raw_container",
+    [
+        None,
+        [("strict-group|H1|confirming", 0.25)],
+        [["strict-group|H1|confirming", 0.25]],
+        "strict-group|H1|confirming",
+    ],
+    ids=["none", "tuple-pairs", "list-pairs", "string"],
+)
+def test_evidence_memory_credit_requires_a_mapping_container(raw_container):
+    with pytest.raises(ValueError, match="correlation credit"):
+        EvidenceMemorySnapshot(correlation_credit=raw_container)
+
+
+def test_evidence_memory_credit_accepts_mapping_and_normalizes_integers():
+    snapshot = EvidenceMemorySnapshot(
+        correlation_credit=MappingProxyType(
+            {
+                "strict-group|H1|confirming": 1,
+                "strict-group|H1|disconfirming": 0.25,
+            }
+        )
+    )
+
+    assert snapshot.correlation_credit == {
+        "strict-group|H1|confirming": 1.0,
+        "strict-group|H1|disconfirming": 0.25,
+    }
+    assert all(type(value) is float for value in snapshot.correlation_credit.values())
+
+
+def test_evidence_memory_scalar_validation_does_not_echo_persisted_input():
+    persisted_key = "opaque-persisted-group|H1|confirming"
+    persisted_value = "0.123456789"
+
+    with pytest.raises(ValueError) as exc_info:
+        EvidenceMemorySnapshot(
+            correlation_credit={persisted_key: persisted_value}
+        )
+
+    error_text = str(exc_info.value)
+    assert persisted_key not in error_text
+    assert persisted_value not in error_text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"memory_version": True},
+        {"memory_version": 1.0},
+        {"memory_version": "1"},
+        {
+            "correlation_credit": {
+                "strict-group|H1|confirming": True,
+            }
+        },
+        {
+            "correlation_credit": {
+                "strict-group|H1|confirming": "0.25",
+            }
+        },
+    ],
+    ids=[
+        "boolean-version",
+        "float-version",
+        "string-version",
+        "boolean-credit",
+        "string-credit",
+    ],
+)
+def test_evidence_memory_json_restore_rejects_coercive_scalars(payload):
+    with pytest.raises(ValueError):
+        EvidenceMemorySnapshot.model_validate_json(json.dumps(payload))
+
+
+def test_evidence_memory_json_restore_accepts_json_numbers():
+    snapshot = EvidenceMemorySnapshot.model_validate_json(
+        json.dumps(
+            {
+                "memory_version": 2,
+                "correlation_credit": {
+                    "strict-group|H1|confirming": 1,
+                    "strict-group|H1|disconfirming": 0.25,
+                },
+            }
+        )
+    )
+
+    assert snapshot.memory_version == 2
+    assert snapshot.correlation_credit == {
+        "strict-group|H1|confirming": 1.0,
+        "strict-group|H1|disconfirming": 0.25,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "raw_value"),
+    [
+        ("memory_version", True),
+        (
+            "correlation_credit",
+            {"strict-group|H1|confirming": True},
+        ),
+    ],
+    ids=["boolean-version", "boolean-credit"],
+)
+@pytest.mark.parametrize("entrypoint", ["python", "json"])
+def test_belief_state_restore_recursively_rejects_coercive_memory_scalars(
+    field,
+    raw_value,
+    entrypoint,
+):
+    historical_event_id = "E_strict_restore_history"
+    memory = EvidenceMemorySnapshot(
+        memory_version=2,
+        accepted_evidence_ids=[historical_event_id],
+        event_signal_identity_digests={historical_event_id: "a" * 64},
+    )
+    payload = make_v02_belief_state(
+        evidence_memory=memory,
+        ledger_evidence_ids=[historical_event_id],
+    ).model_dump(mode="json")
+    payload["evidence_memory"][field] = raw_value
+
+    with pytest.raises(ValueError):
+        if entrypoint == "python":
+            BeliefState.model_validate(payload)
+        else:
+            BeliefState.model_validate_json(json.dumps(payload))
 
 
 @pytest.mark.parametrize("memory_version", [0, 3, 999])

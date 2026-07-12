@@ -1558,6 +1558,47 @@ def test_manager_policy_snapshot_accepts_credit_at_exact_cap(cap):
     ) == snapshot
 
 
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        EvidenceMemorySnapshot.model_construct(memory_version=True),
+        EvidenceMemorySnapshot.model_construct(
+            correlation_credit={
+                "bypass-group|A|confirming": True,
+            }
+        ),
+    ],
+    ids=["boolean-version", "boolean-credit"],
+)
+def test_manager_policy_snapshot_rejects_model_construct_scalar_bypass(snapshot):
+    with pytest.raises(ValueError):
+        EvidenceMemoryManager().validate_policy_snapshot(snapshot)
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        EvidenceMemorySnapshot.model_construct(memory_version=True),
+        EvidenceMemorySnapshot.model_construct(
+            correlation_credit={
+                "bypass-group|A|confirming": True,
+            }
+        ),
+    ],
+    ids=["boolean-version", "boolean-credit"],
+)
+def test_transition_recursively_rejects_model_construct_scalar_bypass(snapshot):
+    with pytest.raises(ValueError, match="evidence memory transition is invalid"):
+        EvidenceMemoryManager().validate_transition(
+            snapshot,
+            snapshot,
+            evidence_events=[],
+            normalized_signals=[],
+            existing_evidence_ids=[],
+            frame_version=1,
+        )
+
+
 @pytest.mark.parametrize("cap", [1.0, 0.2], ids=["default", "custom"])
 def test_manager_policy_snapshot_rejects_smallest_representable_overcap(cap):
     manager = EvidenceMemoryManager(

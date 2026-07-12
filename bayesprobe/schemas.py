@@ -676,6 +676,8 @@ def _valid_correlation_credit_key(value: str) -> bool:
 
 
 class EvidenceMemorySnapshot(StrictTaskModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
     memory_version: int = 1
     accepted_evidence_ids: list[str] = Field(default_factory=list)
     content_fingerprints: dict[str, str] = Field(default_factory=dict)
@@ -687,10 +689,10 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     counterevidence_ids_by_hypothesis: dict[str, list[str]] = Field(default_factory=dict)
     discard_and_schema_history: list[str] = Field(default_factory=list)
 
-    @field_validator("memory_version")
+    @field_validator("memory_version", mode="before")
     @classmethod
-    def validate_memory_version(cls, value: int) -> int:
-        if value not in {1, 2}:
+    def validate_memory_version(cls, value: Any) -> int:
+        if type(value) is not int or value not in {1, 2}:
             raise ValueError("memory_version must be one of 1 or 2")
         return value
 
@@ -778,11 +780,15 @@ class EvidenceMemorySnapshot(StrictTaskModel):
             result[clean_event_id] = digest
         return result
 
-    @field_validator("correlation_credit")
+    @field_validator("correlation_credit", mode="before")
     @classmethod
-    def validate_correlation_credit(cls, value: dict[str, float]) -> dict[str, float]:
+    def validate_correlation_credit(cls, value: Any) -> dict[str, float]:
+        if not isinstance(value, Mapping):
+            raise ValueError("correlation credit must be a mapping")
         result: dict[str, float] = {}
         for key, credit in value.items():
+            if not isinstance(key, str):
+                raise ValueError("correlation credit key has invalid grammar")
             clean_key = _required_text(key, "correlation credit key")
             if clean_key != key or not _valid_correlation_credit_key(clean_key):
                 raise ValueError("correlation credit key has invalid grammar")

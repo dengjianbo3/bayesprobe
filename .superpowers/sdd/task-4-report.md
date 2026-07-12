@@ -2139,3 +2139,127 @@ Valid exact-cap native and authentic migration controls passed.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 30
+
+### Design Decision
+
+- `EvidenceMemorySnapshot.memory_version` now validates in Pydantic `before`
+  mode and accepts only an exact built-in `int` in the explicitly supported set
+  `{1, 2}`. Booleans, floats, strings, `Decimal`, integer enums/subclasses,
+  coercible objects, and `None` are rejected before conversion.
+- `correlation_credit` now validates its raw container and entries in the same
+  `before` phase. It accepts mapping inputs, retains the existing exact key
+  grammar and secret boundary, and accepts only exact built-in `int`/`float`
+  values that are finite and non-negative. Accepted integers are deliberately
+  normalized to floats for the existing serialized snapshot contract.
+- Snapshot-local `hide_input_in_errors` keeps Pydantic's rendered validation
+  errors from reprinting the raw persisted mapping. This privacy setting does
+  not alter validation strictness in any other schema.
+- Strictness remains field-local; `StrictTaskModel` was not made globally
+  strict. Existing manager policy validation remains the defense for deliberate
+  `model_construct` bypass objects, while transition and lifecycle recursive
+  revalidation now encounter the raw schema checks rather than silently
+  coercing bypass values.
+
+### Changed Files
+
+- `bayesprobe/schemas.py`
+- `tests/test_schemas.py`
+- `tests/test_migrations.py`
+- `tests/test_evidence_memory.py`
+- `tests/test_core_cycles.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py::test_evidence_memory_version_rejects_raw_coercible_types tests/test_schemas.py::test_evidence_memory_credit_rejects_raw_coercible_types tests/test_schemas.py::test_evidence_memory_credit_requires_a_mapping_container tests/test_schemas.py::test_evidence_memory_credit_accepts_mapping_and_normalizes_integers tests/test_schemas.py::test_evidence_memory_json_restore_rejects_coercive_scalars tests/test_schemas.py::test_evidence_memory_json_restore_accepts_json_numbers tests/test_schemas.py::test_belief_state_restore_recursively_rejects_coercive_memory_scalars tests/test_migrations.py::test_migrated_belief_state_restore_rejects_coercive_memory_scalars tests/test_evidence_memory.py::test_manager_policy_snapshot_rejects_model_construct_scalar_bypass tests/test_evidence_memory.py::test_transition_recursively_rejects_model_construct_scalar_bypass tests/test_core_cycles.py::test_core_recursive_preflight_rejects_model_construct_memory_scalar_bypass -q --tb=short -p no:cacheprovider
+```
+
+Result: `49 failed, 10 passed in 1.01s`. Raw booleans, integral floats,
+numeric strings, `Decimal`, enums/subclasses, and coercible credit objects were
+accepted; persisted JSON and nested/migrated BeliefState restores also accepted
+coercive scalars. Transition reconstruction converted bypass values, and Core
+reached its later manager check instead of rejecting during recursive lifecycle
+validation. Existing direct manager bypass checks and valid numeric controls
+were already green.
+
+- GREEN: the same focused command -> `59 passed in 0.40s`.
+- Error-rendering RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py::test_evidence_memory_scalar_validation_does_not_echo_persisted_input -q --tb=short -p no:cacheprovider
+```
+
+Result: `1 failed in 0.13s`; Pydantic's default rendering echoed the raw
+persisted credit value despite the generic validator message. After applying
+snapshot-local hidden-input rendering, the same command -> `1 passed in
+0.11s`.
+- Consolidated focused GREEN (the original focused command plus the no-echo
+  regression) -> `60 passed in 0.40s`.
+- Directly affected suite:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_evidence_memory.py tests/test_migrations.py tests/test_core_cycles.py -q --tb=short -p no:cacheprovider
+```
+
+Result: `563 passed in 2.28s`.
+
+- Task 4 focused:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py tests/test_evidence_memory.py tests/test_core_cycles.py -q -p no:cacheprovider
+```
+
+Result: `550 passed in 2.73s`.
+
+- Compatibility:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider
+```
+
+Result: `390 passed in 0.56s`.
+
+- Full offline:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
+```
+
+Result: `1498 passed, 10 skipped in 12.11s`.
+
+- Node stream: `node --test tests/test_webui_stream.js` -> `15 passed, 0
+  failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before the
+  report; both are repeated after the report and the range check after commit.
+
+### Self-Review
+
+- Direct construction, Python `model_validate`, JSON `model_validate_json`,
+  recursively nested native BeliefState restoration, and restoration of a
+  snapshot produced by real v0.1 migration all reject coercive persisted
+  scalars. The nested restoration fixture includes accepted lifecycle history,
+  an event-signal binding, and the corresponding ledger reference, covering the
+  persisted replay shape as well as an empty snapshot. JSON integer/float
+  numbers remain accepted where their raw parsed types satisfy the field
+  contract.
+- Supported memory versions 1 and 2 and normal v2 native snapshots remain
+  compatible. Valid integer credit values normalize to float, while list/pair
+  containers, booleans, numeric strings, `Decimal`, custom numeric values,
+  non-finite values, and negative values cannot enter persisted credit state.
+- A deliberate `model_construct` bypass is still rejected directly by the
+  manager. Transition reconstruction rejects it generically after deep schema
+  revalidation, and Core rejects it during lifecycle envelope validation before
+  gate/provider, solver, state, or ledger effects.
+- Validator messages remain generic and never interpolate persisted credit
+  keys or values. No global Pydantic strictness or unrelated schema behavior was
+  changed.
+
+### Concerns
+
+No blocking concerns.

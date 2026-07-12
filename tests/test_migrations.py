@@ -163,6 +163,29 @@ def test_migrates_belief_state_with_frame_and_empty_memory():
     assert [item.answer_value for item in migrated.hypotheses] == [None, None]
 
 
+@pytest.mark.parametrize(
+    ("field", "raw_value"),
+    [
+        ("memory_version", True),
+        (
+            "correlation_credit",
+            {"legacy-group|A|confirming": True},
+        ),
+    ],
+    ids=["boolean-version", "boolean-credit"],
+)
+def test_migrated_belief_state_restore_rejects_coercive_memory_scalars(
+    field,
+    raw_value,
+):
+    migrated = migrate_belief_state_v0_1(legacy_belief_state_payload())
+    payload = migrated.model_dump(mode="python")
+    payload["evidence_memory"][field] = raw_value
+
+    with pytest.raises(ValueError):
+        BeliefState.model_validate(payload)
+
+
 @pytest.mark.parametrize("include_task_frame", [False, True])
 def test_explicit_migration_receipt_survives_copy_but_not_public_round_trip(
     include_task_frame,

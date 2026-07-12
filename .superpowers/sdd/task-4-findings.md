@@ -148,3 +148,7 @@
 
 1. Native event effective weight must equal the authoritative reconstructed decision exactly. One-ULP inflation cannot pass through `math.isclose`, and commit cannot tolerate then clamp an over-cap sum: solver-applied weight and persisted credit must describe the same exact accepted amount. Production decision arithmetic may deliberately choose a representable at-or-below-cap value, but validation never repairs submitted state.
 2. Core must validate its isolated authoritative prior Evidence Memory against its configured policy before invoking any EvidenceGate, including a custom gate. A policy-invalid prior cannot reach provider calls or any other gate side effect merely because the production gate normally validates itself.
+
+## Twenty-fifth full-range re-review finding
+
+1. Persisted Evidence Memory fields must reject coercive scalar types before Pydantic conversion. `memory_version` accepts only an actual integer in the supported set, never bool/string/float; every `correlation_credit` value accepts only an actual finite int/float excluding bool, never numeric strings or other coercible values. Strict raw-input validation must apply through direct snapshot construction, nested BeliefState validation, migration parsing, and ledger/replay restoration.
