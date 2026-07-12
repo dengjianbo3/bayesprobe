@@ -9,9 +9,10 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from bayesprobe.evidence_memory import derive_deterministic_computation_root
+from bayesprobe.lifecycle import resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
     ModelGateway,
     ModelGatewayValidationError,
@@ -445,8 +446,15 @@ class PythonAugmentedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
     ) -> list[ExternalSignal]:
+        provider_version = resolve_belief_lifecycle(
+            context.belief_state
+        ).provider_version
         try:
-            plan = self._plan_probe(probe=probe, context=context)
+            plan = self._plan_probe(
+                probe=probe,
+                context=context,
+                provider_version=provider_version,
+            )
         except Exception:
             return [
                 self._failure_signal(
@@ -464,6 +472,7 @@ class PythonAugmentedProbeToolGateway:
                         plan=plan,
                         probe=probe,
                         context=context,
+                        provider_version=provider_version,
                     )
                 ]
             except Exception:
@@ -492,6 +501,7 @@ class PythonAugmentedProbeToolGateway:
                     record=first_record,
                     probe=probe,
                     context=context,
+                    provider_version=provider_version,
                 )
             except Exception:
                 return [
@@ -527,6 +537,7 @@ class PythonAugmentedProbeToolGateway:
         *,
         probe: ProbeDesign,
         context: ProbeExecutionContext,
+        provider_version: Literal["v0.1", "v0.2"],
     ) -> PythonProbePlan:
         request_input = _probe_request_input(probe=probe, context=context)
         metadata = _probe_request_metadata(probe=probe, context=context)
@@ -537,9 +548,9 @@ class PythonAugmentedProbeToolGateway:
                     task="plan_python_probe",
                     input=request_input,
                     prompt_id="python_probe_plan",
-                    prompt_version="v0.1",
+                    prompt_version=provider_version,
                     schema_name="PythonProbePlan",
-                    schema_version="v0.1",
+                    schema_version=provider_version,
                     metadata=metadata,
                 )
             )
@@ -561,9 +572,9 @@ class PythonAugmentedProbeToolGateway:
                     "validation_error": validation_error,
                 },
                 prompt_id="python_probe_plan_repair",
-                prompt_version="v0.1",
+                prompt_version=provider_version,
                 schema_name="PythonProbePlan",
-                schema_version="v0.1",
+                schema_version=provider_version,
                 metadata={**metadata, "repair_attempt_index": 1},
             )
         )
@@ -578,15 +589,16 @@ class PythonAugmentedProbeToolGateway:
         plan: PythonProbePlan,
         probe: ProbeDesign,
         context: ProbeExecutionContext,
+        provider_version: Literal["v0.1", "v0.2"],
     ) -> ExternalSignal:
         payload = self._model_gateway.complete_structured(
             StructuredModelRequest(
                 task="execute_probe",
                 input=_probe_request_input(probe=probe, context=context),
                 prompt_id="probe_execution",
-                prompt_version="v0.1",
+                prompt_version=provider_version,
                 schema_name="ProbeSignal",
-                schema_version="v0.1",
+                schema_version=provider_version,
                 metadata=_probe_request_metadata(probe=probe, context=context),
             )
         )
@@ -663,6 +675,7 @@ class PythonAugmentedProbeToolGateway:
         record: PythonExecutionRecord,
         probe: ProbeDesign,
         context: ProbeExecutionContext,
+        provider_version: Literal["v0.1", "v0.2"],
     ) -> str | None:
         if record.timed_out or record.policy_violation:
             return None
@@ -681,9 +694,9 @@ class PythonAugmentedProbeToolGateway:
                     },
                 },
                 prompt_id="python_probe_code_repair",
-                prompt_version="v0.1",
+                prompt_version=provider_version,
                 schema_name="PythonCodeRepair",
-                schema_version="v0.1",
+                schema_version=provider_version,
                 metadata={
                     **_probe_request_metadata(probe=probe, context=context),
                     "repair_attempt_index": 1,

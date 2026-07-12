@@ -1457,6 +1457,23 @@ def test_explicit_migration_route_completes_exact_legacy_shape_auditably():
     )
 
 
+def test_unmigrated_v01_direct_gate_rejects_before_provider_or_memory():
+    gateway = CountingGateway()
+    state = _state().model_copy(update={"schema_version": "v0.1"})
+    prior_memory = state.evidence_memory.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        EvidenceIntegrationGate(model_gateway=gateway).integrate(
+            cycle=_cycle(1),
+            belief_state=state,
+            probe_set=_probe_set(1),
+            signals=[_signal("S_invalid_lifecycle", "Must not be judged.")],
+        )
+
+    assert gateway.requests == []
+    assert state.evidence_memory.model_dump(mode="json") == prior_memory
+
+
 def test_v02_evidence_event_requires_native_provenance_and_memory_fields():
     with pytest.raises(ValueError, match="v0.2 evidence event requires"):
         EvidenceEvent(

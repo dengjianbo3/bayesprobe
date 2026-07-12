@@ -42,7 +42,7 @@ from bayesprobe.schemas import (
     TaskAdmissionStatus,
     TaskKind,
 )
-from bayesprobe.task_framing import ModelTaskFramer
+from bayesprobe.task_framing import ModelTaskFramer, migrate_legacy_belief_state
 
 
 class RecordingSignalInbox(SignalInbox):
@@ -199,6 +199,15 @@ def make_exact_belief_state() -> BeliefState:
     ).belief_state
 
 
+def make_explicit_legacy_belief_state(
+    cycle_id: str = "cycle_1",
+    cycle_index: int = 0,
+) -> BeliefState:
+    return migrate_legacy_belief_state(
+        make_belief_state(cycle_id=cycle_id, cycle_index=cycle_index)
+    )
+
+
 def make_cycle(cycle_id: str = "cycle_repair") -> CycleRecord:
     return CycleRecord(
         cycle_id=cycle_id,
@@ -211,9 +220,10 @@ def make_cycle(cycle_id: str = "cycle_repair") -> CycleRecord:
 def legacy_judgment_route_metadata() -> dict[str, str]:
     return {
         "judgment_route": "legacy_v0.1_migration",
-        "lifecycle_schema_version": "v0.1",
+        "lifecycle_schema_version": "v0.2",
         "frame_competition": "exclusive",
         "frame_coverage": "exhaustive",
+        "framing_method": "legacy_migration",
     }
 
 
@@ -525,7 +535,7 @@ def test_direct_signal_schema_violation_does_not_attempt_repair_by_default():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_repair_default"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_repair_default"),
         signals=[make_active_signal()],
     )
@@ -563,7 +573,7 @@ def test_direct_signal_repair_success_produces_normal_evidence():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_repair_success"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_repair_success"),
         signals=[make_active_signal()],
     )
@@ -618,7 +628,7 @@ def test_direct_signal_invalid_repair_becomes_schema_violation():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_repair_failure"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_repair_failure"),
         signals=[make_active_signal()],
     )
@@ -658,7 +668,7 @@ def test_direct_signal_missing_repair_task_raises_when_repair_enabled():
     with pytest.raises(ValueError, match="no scripted response for task: repair_evidence_judgment"):
         gate.integrate(
             cycle=make_cycle("cycle_repair_missing_task"),
-            belief_state=make_belief_state(cycle_id="cycle_0"),
+            belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
             probe_set=make_empty_probe_set("cycle_repair_missing_task"),
             signals=[make_active_signal()],
         )
@@ -682,7 +692,7 @@ def test_direct_signal_valid_judgment_records_model_trace():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_model_trace_valid"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_model_trace_valid"),
         signals=[make_active_signal()],
     )
@@ -719,7 +729,7 @@ def test_direct_signal_schema_violation_records_judge_model_trace():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_model_trace_violation"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_model_trace_violation"),
         signals=[make_active_signal()],
     )
@@ -737,7 +747,7 @@ def test_direct_signal_gateway_validation_error_becomes_schema_violation():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_gateway_validation"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_gateway_validation"),
         signals=[make_active_signal()],
     )
@@ -783,7 +793,7 @@ def test_direct_signal_repaired_judgment_records_repair_model_trace():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_model_trace_repair"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_model_trace_repair"),
         signals=[make_active_signal()],
     )
@@ -820,7 +830,7 @@ def test_direct_signal_repair_exhaustion_records_latest_repair_trace():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_model_trace_repair_exhausted"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_model_trace_repair_exhausted"),
         signals=[make_active_signal()],
     )
@@ -859,7 +869,7 @@ def test_projection_decomposition_events_keep_empty_model_trace():
 
     result = gate.integrate(
         cycle=make_cycle("cycle_projection_trace"),
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set("cycle_projection_trace"),
         signals=[signal],
     )
@@ -1286,7 +1296,10 @@ def test_direct_signal_judgment_uses_model_gateway():
 
     result = gate.integrate(
         cycle=cycle,
-        belief_state=make_belief_state(cycle_id="cycle_model_gateway", cycle_index=1),
+        belief_state=make_explicit_legacy_belief_state(
+            cycle_id="cycle_model_gateway",
+            cycle_index=1,
+        ),
         probe_set=ProbeSet(
             probe_set_id="ps_model_gateway",
             cycle_id="cycle_model_gateway",
@@ -1421,7 +1434,9 @@ def test_direct_signal_schema_violation_becomes_discarded_evidence():
 
     result = gate.integrate(
         cycle=cycle,
-        belief_state=make_belief_state(cycle_id="cycle_schema_violation"),
+        belief_state=make_explicit_legacy_belief_state(
+            cycle_id="cycle_schema_violation"
+        ),
         probe_set=ProbeSet(
             probe_set_id="ps_schema_violation",
             cycle_id="cycle_schema_violation",
@@ -1905,6 +1920,28 @@ def test_invalid_committed_memory_fails_before_any_cycle_ledger_append(tmp_path:
         )
 
     assert ledger.read_all() == []
+
+
+def test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append(tmp_path: Path):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger_path = tmp_path / "invalid-lifecycle-ledger.jsonl"
+    ledger_path.touch()
+    state = make_exact_belief_state().model_copy(update={"task_frame": None})
+    prior_memory = state.evidence_memory.model_dump(mode="json")
+    core = BayesProbeCore(ledger=JsonlLedgerStore(ledger_path), model_gateway=gateway)
+    cycle = make_cycle("cycle_invalid_lifecycle")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[make_active_signal()],
+        )
+
+    assert gateway.requests == []
+    assert state.evidence_memory.model_dump(mode="json") == prior_memory
+    assert ledger_path.read_bytes() == b""
 
 
 class TrackingRetirementEngine(HypothesisEvolutionEngine):

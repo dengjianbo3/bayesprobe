@@ -5,6 +5,7 @@ from typing import Any, Protocol
 
 from bayesprobe.evidence_memory import derive_deterministic_computation_root
 from bayesprobe.ledger import JsonlLedgerStore
+from bayesprobe.lifecycle import resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
     ModelGateway,
     ModelGatewayValidationError,
@@ -16,7 +17,6 @@ from bayesprobe.schemas import (
     BeliefState,
     EpistemicOrigin,
     ExternalSignal,
-    FramingMethod,
     ProbeDesign,
     ProbeSet,
     SignalKind,
@@ -116,19 +116,9 @@ class ModelBackedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
     ) -> list[ExternalSignal]:
-        task_frame = context.belief_state.task_frame
-        explicit_legacy_migration = (
-            task_frame is not None
-            and task_frame.framing_method == FramingMethod.LEGACY_MIGRATION
-        )
-        if (
-            context.belief_state.schema_version != "v0.2"
-            and not explicit_legacy_migration
-        ):
-            raise ValueError(
-                "model-backed probe execution requires v0.2 or explicit legacy migration"
-            )
-        native_v02 = not explicit_legacy_migration
+        provider_version = resolve_belief_lifecycle(
+            context.belief_state
+        ).provider_version
         request = StructuredModelRequest(
             task="execute_probe",
             input={
@@ -155,9 +145,9 @@ class ModelBackedProbeToolGateway:
                 ],
             },
             prompt_id="probe_execution",
-            prompt_version="v0.2" if native_v02 else "v0.1",
+            prompt_version=provider_version,
             schema_name="ProbeSignal",
-            schema_version="v0.2" if native_v02 else "v0.1",
+            schema_version=provider_version,
             metadata={
                 "run_id": context.run_id,
                 "cycle_id": context.cycle_id,

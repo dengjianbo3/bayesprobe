@@ -24,6 +24,7 @@ from bayesprobe.schemas import (
     EpistemicOrigin,
     EvidenceType,
     ExternalSignal,
+    FramingMethod,
     ProbeDesign,
     ProbeSet,
     SignalKind,
@@ -319,12 +320,14 @@ class FakeSandbox:
     def __init__(self, records):
         self.records = list(records)
         self.requests = []
+        self.preflight_calls = 0
         self.image = ResolvedSandboxImage(
             requested_reference="sandbox:v0.1",
             digest=IMAGE_DIGEST,
         )
 
     def preflight(self):
+        self.preflight_calls += 1
         return self.image
 
     def execute(self, request):
@@ -444,6 +447,8 @@ def test_python_augmented_gateway_converts_successful_execution_to_active_signal
     assert len(sandbox.requests) == 1
     assert observer.records == [execution_record()]
     assert model.requests[0].task == "plan_python_probe"
+    assert model.requests[0].prompt_version == "v0.2"
+    assert model.requests[0].schema_version == "v0.2"
     assert "gold" not in str(model.requests[0].input).lower()
 
 
@@ -660,6 +665,8 @@ def test_reasoning_mode_uses_model_signal_without_starting_sandbox():
         "plan_python_probe",
         "execute_probe",
     ]
+    assert {request.prompt_version for request in model.requests} == {"v0.2"}
+    assert {request.schema_version for request in model.requests} == {"v0.2"}
 
 
 def test_reasoning_mode_provider_failure_becomes_unverified_signal():
@@ -710,6 +717,8 @@ def test_runtime_failure_gets_one_code_repair_and_second_execution():
         "plan_python_probe",
         "repair_python_probe_code",
     ]
+    assert {request.prompt_version for request in model.requests} == {"v0.2"}
+    assert {request.schema_version for request in model.requests} == {"v0.2"}
     assert len(observer.records) == 2
 
 
@@ -759,6 +768,90 @@ def test_invalid_plan_gets_one_plan_repair():
         "plan_python_probe",
         "repair_python_probe_plan",
     ]
+    assert {request.prompt_version for request in model.requests} == {"v0.2"}
+    assert {request.schema_version for request in model.requests} == {"v0.2"}
+
+
+def test_explicit_migration_uses_v01_for_every_python_model_route():
+    probe, context = probe_context()
+    migrated_state = context.belief_state.model_copy(
+        update={
+            "task_frame": context.belief_state.task_frame.model_copy(
+                update={"framing_method": FramingMethod.LEGACY_MIGRATION}
+            )
+        }
+    )
+    migrated_context = ProbeExecutionContext(
+        run_id=context.run_id,
+        cycle_id=context.cycle_id,
+        belief_state=migrated_state,
+        metadata=dict(context.metadata),
+    )
+    python_model = SequenceModelGateway(
+        [
+            python_plan(code=""),
+            python_plan(code="bad()"),
+            {"code": "print(4)"},
+        ]
+    )
+    PythonAugmentedProbeToolGateway(
+        python_model,
+        FakeSandbox(
+            [
+                execution_record(exit_code=1, stderr="NameError: bad", stdout=""),
+                execution_record(repair_attempt_index=1),
+            ]
+        ),
+    ).execute_probe(probe=probe, context=migrated_context)
+    reasoning_model = SequenceModelGateway(
+        [
+            {
+                "mode": "reasoning",
+                "purpose": "Use a conceptual argument.",
+                "target_hypotheses": ["A", "B", "C"],
+                "expected_observation": "One option follows logically.",
+                "code": None,
+            },
+            {"raw_content": "A conceptual argument supports B."},
+        ]
+    )
+    PythonAugmentedProbeToolGateway(
+        reasoning_model,
+        FakeSandbox([]),
+    ).execute_probe(probe=probe, context=migrated_context)
+    requests = [*python_model.requests, *reasoning_model.requests]
+
+    assert {request.task for request in requests} == {
+        "plan_python_probe",
+        "repair_python_probe_plan",
+        "repair_python_probe_code",
+        "execute_probe",
+    }
+    assert {request.prompt_version for request in requests} == {"v0.1"}
+    assert {request.schema_version for request in requests} == {"v0.1"}
+
+
+def test_unmigrated_v01_python_gateway_rejects_before_model_or_sandbox():
+    probe, context = probe_context()
+    invalid_context = ProbeExecutionContext(
+        run_id=context.run_id,
+        cycle_id=context.cycle_id,
+        belief_state=context.belief_state.model_copy(
+            update={"schema_version": "v0.1"}
+        ),
+        metadata=dict(context.metadata),
+    )
+    model = SequenceModelGateway([python_plan()])
+    sandbox = FakeSandbox([execution_record()])
+    gateway = PythonAugmentedProbeToolGateway(model, sandbox)
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        gateway.execute_probe(probe=probe, context=invalid_context)
+
+    assert model.requests == []
+    assert sandbox.preflight_calls == 0
+    assert sandbox.requests == []
+    assert set(gateway.process_metrics.values()) == {0}
 
 
 def test_python_signal_quality_is_verifiable_but_not_independent():

@@ -477,3 +477,44 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 8
+
+### Changes
+
+- Added one shared belief-lifecycle resolver with exactly two valid routes:
+  native v0.2 and explicit legacy migration. All other lifecycle shapes raise
+  before downstream work.
+- Resolved the Python augmented gateway lifecycle once at execution entry and
+  used that provider version for plan, plan repair, reasoning, and code repair.
+- Applied the same resolver to the evidence gate and model-backed probe gateway.
+  Direct invalid-state evidence integration now fails before normalization,
+  provider access, memory work, or core ledger append.
+- Converted legacy direct-gate fixtures into explicit v0.1 migrations so their
+  four-field transport and `legacy_v0.1_migration` audit metadata remain covered.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_python_probe.py::test_python_augmented_gateway_converts_successful_execution_to_active_signal tests/evaluation/test_python_probe.py::test_invalid_plan_gets_one_plan_repair tests/evaluation/test_python_probe.py::test_reasoning_mode_uses_model_signal_without_starting_sandbox tests/evaluation/test_python_probe.py::test_runtime_failure_gets_one_code_repair_and_second_execution tests/evaluation/test_python_probe.py::test_explicit_migration_uses_v01_for_every_python_model_route tests/evaluation/test_python_probe.py::test_unmigrated_v01_python_gateway_rejects_before_model_or_sandbox tests/test_evidence_memory.py::test_unmigrated_v01_direct_gate_rejects_before_provider_or_memory tests/test_core_cycles.py::test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append -q -p no:cacheprovider` -> `7 failed, 1 passed in 0.36s`.
+- GREEN: the same focused command -> `8 passed in 0.28s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `346 passed in 0.77s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `306 passed in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1133 passed, 10 skipped in 8.90s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- Native Python requests remain v0.2 across all retries and fallbacks because
+  one immutable resolved version is threaded through every model route. Explicit
+  migration uses v0.1 throughout; invalid states cannot reach the model,
+  sandbox preflight, execution, observer, or process counters.
+- Evidence routing now derives both transport and audit route from the shared
+  lifecycle result. Unmigrated v0.1 and incomplete v0.2 states fail before
+  provider, accepted/discard event construction, identity memory, or core ledger
+  writes. Explicit migration retains the reviewed four-field completion path,
+  and native v0.2 retains the exact seven-field contract.
+
+### Concerns
+
+No blocking concerns.

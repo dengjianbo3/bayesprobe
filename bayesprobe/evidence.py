@@ -12,6 +12,7 @@ from bayesprobe.evidence_memory import (
     EvidenceMemoryManager,
     SignalProvenanceNormalizer,
 )
+from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     EvidenceJudgment,
@@ -243,6 +244,7 @@ class EvidenceIntegrationGate:
         signals: list[ExternalSignal],
     ) -> EvidenceIntegrationResult:
         self._ensure_helpers()
+        resolve_belief_lifecycle(belief_state)
         evidence_events: list[EvidenceEvent] = []
         probe_candidates: list[ProbeCandidate] = []
         closed_signals: list[ExternalSignal] = []
@@ -1240,11 +1242,8 @@ def _reject_unverifiable_migrated_cycle_replay(
 
 def _is_native_v02_state(belief_state: BeliefState) -> bool:
     return (
-        belief_state.schema_version == "v0.2"
-        and belief_state.task_frame is not None
-        and belief_state.frame_state is not None
-        and belief_state.evidence_memory is not None
-        and belief_state.task_frame.framing_method != FramingMethod.LEGACY_MIGRATION
+        resolve_belief_lifecycle(belief_state)
+        == BeliefLifecycle.NATIVE_V02
     )
 
 
@@ -1263,7 +1262,7 @@ def _exclusive_open_unresolved_likelihood(
 
 
 def _judgment_route_for_state(belief_state: BeliefState) -> str:
-    return "native_v0.2" if _is_native_v02_state(belief_state) else "legacy_v0.1_migration"
+    return resolve_belief_lifecycle(belief_state).value
 
 
 def _migrate_v01_judgment_payload(

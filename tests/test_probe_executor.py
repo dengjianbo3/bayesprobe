@@ -174,7 +174,7 @@ def test_executor_turns_probe_set_into_active_signals():
 
 
 def test_repeated_deterministic_probe_reuses_root_and_spends_no_fresh_credit():
-    state = make_belief_state()
+    state = migrate_legacy_belief_state(make_belief_state())
     first_probe = ProbeDesign(
         id="P_semantics_cycle_1",
         cycle_id="run_exec_cycle_1",
