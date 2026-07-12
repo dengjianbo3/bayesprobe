@@ -12,6 +12,12 @@ from bayesprobe.initialization import (
     InitializeRunInput,
     validate_initialize_run_input_security,
 )
+from bayesprobe.probe_design import (
+    FrameProbeDesigner,
+    ProbeDesignContext,
+    ProbeDesignResult,
+    ProbeDesigner,
+)
 from bayesprobe.task_admission import (
     ExplicitTaskAdmitter,
     TaskAdmitter,
@@ -31,6 +37,8 @@ from bayesprobe.schemas import (
     AnswerProjection,
     BeliefState,
     BeliefUpdate,
+    CapabilityDecision,
+    CapabilityDescriptor,
     CycleRecord,
     CycleSignalShape,
     EvidenceEvent,
@@ -45,6 +53,7 @@ from bayesprobe.schemas import (
     TaskFrame,
     TaskAdmissionDecision,
     TaskAdmissionStatus,
+    TaskKind,
     utc_now,
 )
 
@@ -80,6 +89,8 @@ class AutonomousQuestionProgressKind(StrEnum):
     TASK_FRAMING_STARTED = "task_framing_started"
     TASK_FRAMING_COMPLETED = "task_framing_completed"
     INITIALIZATION_COMPLETED = "initialization_completed"
+    PROBE_DESIGN_STARTED = "probe_design_started"
+    PROBE_DESIGN_COMPLETED = "probe_design_completed"
     CYCLE_STARTED = "cycle_started"
     PROBE_SET_PLANNED = "probe_set_planned"
     PROBE_EXECUTION_STARTED = "probe_execution_started"
@@ -136,12 +147,20 @@ class AutonomousQuestionProgress:
     run: RunRecord | None = None
     belief_state: BeliefState | None = None
     probe_set: ProbeSet | None = None
+    probe_candidates: tuple[ProbeCandidate, ...] = ()
+    capability_decisions: tuple[CapabilityDecision, ...] = ()
     signals: tuple[ExternalSignal, ...] = ()
     cycle_result: AutonomousQuestionCycleResult | None = None
     result: AutonomousQuestionRunResult | None = None
 
 
 AutonomousQuestionProgressObserver = Callable[[AutonomousQuestionProgress], None]
+
+
+class _AdmissionCapabilityDescriptor(CapabilityDescriptor):
+    def model_dump(self, *args, **kwargs):
+        kwargs["mode"] = "json"
+        return super().model_dump(*args, **kwargs)
 
 
 class AutonomousQuestionRunner:
@@ -155,6 +174,8 @@ class AutonomousQuestionRunner:
         config: AutonomousQuestionRunConfig | None = None,
         progress_observer: AutonomousQuestionProgressObserver | None = None,
         task_admitter: TaskAdmitter | None = None,
+        probe_designer: ProbeDesigner | None = None,
+        available_capabilities: tuple[CapabilityDescriptor, ...] = (),
     ) -> None:
         self.core = core
         self.initializer = initializer or BayesProbeInitializer(ledger=core.ledger)
@@ -166,6 +187,8 @@ class AutonomousQuestionRunner:
         self.config = config or AutonomousQuestionRunConfig()
         self.progress_observer = progress_observer
         self.task_admitter = task_admitter or ExplicitTaskAdmitter()
+        self.probe_designer = probe_designer or FrameProbeDesigner()
+        self.available_capabilities = tuple(available_capabilities)
 
     def run_question(
         self,
@@ -173,7 +196,12 @@ class AutonomousQuestionRunner:
     ) -> AutonomousQuestionRunResult | NeedsReframingResult | OutOfScopeResult:
         validate_initialize_run_input_security(input)
         admission = validate_task_admission_decision(
-            self.task_admitter.assess(_task_admission_input(input))
+            self.task_admitter.assess(
+                _task_admission_input(
+                    input,
+                    available_capabilities=self.available_capabilities,
+                )
+            )
         )
         if admission.status != TaskAdmissionStatus.ADMITTED:
             if self.core.ledger is not None:
@@ -206,9 +234,18 @@ class AutonomousQuestionRunner:
             run_id=run.run_id,
             run=run,
             belief_state=initial_belief_state,
+            probe_candidates=tuple(initialization.probe_candidates),
         )
         current_belief_state = initial_belief_state
-        candidate_pool = list(initialization.probe_candidates)
+        if task_frame.task_kind == TaskKind.MULTIPLE_CHOICE:
+            candidate_pool = list(initialization.probe_candidates)
+        else:
+            initial_design = self._design_probes(
+                run=run,
+                cycle_id=initial_belief_state.cycle_id,
+                belief_state=initial_belief_state,
+            )
+            candidate_pool = list(initial_design.candidates)
         cycle_results: list[AutonomousQuestionCycleResult] = []
         previous_answer: AnswerProjection | None = None
 
@@ -343,9 +380,16 @@ class AutonomousQuestionRunner:
             )
             current_belief_state = core_result.belief_state
             previous_answer = answer_projection
+            design_result = self._design_probes(
+                run=run,
+                cycle_id=cycle_id,
+                belief_state=current_belief_state,
+            )
             candidate_pool = self._next_candidate_pool(
                 previous_pool=candidate_pool,
                 selected_candidates=planning.selected_candidates,
+                core_candidates=core_result.probe_candidates,
+                designed_candidates=design_result.candidates,
                 answer_projection=answer_projection,
             )
 
@@ -417,6 +461,8 @@ class AutonomousQuestionRunner:
         *,
         previous_pool: list[ProbeCandidate],
         selected_candidates: list[ProbeCandidate],
+        core_candidates: list[ProbeCandidate],
+        designed_candidates: list[ProbeCandidate],
         answer_projection: AnswerProjection,
     ) -> list[ProbeCandidate]:
         selected_ids = {candidate.candidate_id for candidate in selected_candidates}
@@ -425,10 +471,47 @@ class AutonomousQuestionRunner:
             for candidate in previous_pool
             if candidate.candidate_id not in selected_ids
         ]
-        projection_candidates = list(
-            answer_projection.change_my_mind_condition.structured_probe_candidates
+        ordered = [
+            *core_candidates,
+            *designed_candidates,
+            *answer_projection.change_my_mind_condition.structured_probe_candidates,
+            *remaining,
+        ]
+        return _deduplicate_probe_candidates(ordered)
+
+    def _design_probes(
+        self,
+        *,
+        run: RunRecord,
+        cycle_id: str,
+        belief_state: BeliefState,
+    ) -> ProbeDesignResult:
+        self._emit_progress(
+            AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
+            run_id=run.run_id,
+            cycle_id=cycle_id,
+            cycle_index=belief_state.cycle_index,
+            belief_state=belief_state,
         )
-        return [*projection_candidates, *remaining]
+        result = self.probe_designer.propose(
+            ProbeDesignContext(
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                task_frame=belief_state.task_frame,
+                belief_state=belief_state,
+                available_capabilities=self.available_capabilities,
+            )
+        )
+        self._emit_progress(
+            AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
+            run_id=run.run_id,
+            cycle_id=cycle_id,
+            cycle_index=belief_state.cycle_index,
+            belief_state=belief_state,
+            probe_candidates=tuple(result.candidates),
+            capability_decisions=tuple(result.capability_decisions),
+        )
+        return result
 
     def _confidence_reached(self, belief_state: BeliefState) -> bool:
         threshold = self.config.confidence_threshold
@@ -502,6 +585,8 @@ class AutonomousQuestionRunner:
         run: RunRecord | None = None,
         belief_state: BeliefState | None = None,
         probe_set: ProbeSet | None = None,
+        probe_candidates: tuple[ProbeCandidate, ...] = (),
+        capability_decisions: tuple[CapabilityDecision, ...] = (),
         signals: tuple[ExternalSignal, ...] = (),
         cycle_result: AutonomousQuestionCycleResult | None = None,
         result: AutonomousQuestionRunResult | None = None,
@@ -520,6 +605,8 @@ class AutonomousQuestionRunner:
                         run=run,
                         belief_state=belief_state,
                         probe_set=probe_set,
+                        probe_candidates=probe_candidates,
+                        capability_decisions=capability_decisions,
                         signals=signals,
                         cycle_result=cycle_result,
                         result=result,
@@ -534,7 +621,11 @@ def _top_hypothesis(belief_state: BeliefState) -> Hypothesis:
     return max(belief_state.hypotheses, key=lambda hypothesis: hypothesis.posterior)
 
 
-def _task_admission_input(input: InitializeRunInput) -> TaskAdmissionInput:
+def _task_admission_input(
+    input: InitializeRunInput,
+    *,
+    available_capabilities: tuple[CapabilityDescriptor, ...],
+) -> TaskAdmissionInput:
     choices = list(input.answer_choices)
     if not choices:
         parsed = parse_legacy_answer_choice_frame(input.problem)
@@ -547,6 +638,12 @@ def _task_admission_input(input: InitializeRunInput) -> TaskAdmissionInput:
         task_context=input.task_context,
         answer_choices=choices,
         hypothesis_seeds=list(input.hypothesis_seeds),
+        available_capabilities=[
+            _AdmissionCapabilityDescriptor.model_validate(
+                descriptor.model_dump(mode="json")
+            )
+            for descriptor in available_capabilities
+        ],
         requested_output_shape=(
             output_shape
             if isinstance(output_shape, str) and output_shape.strip()
@@ -556,6 +653,26 @@ def _task_admission_input(input: InitializeRunInput) -> TaskAdmissionInput:
             "task_kind": input.task_kind.value if input.task_kind is not None else None
         },
     )
+
+
+def _deduplicate_probe_candidates(
+    candidates: list[ProbeCandidate],
+) -> list[ProbeCandidate]:
+    unique: list[ProbeCandidate] = []
+    identities: set[tuple[object, ...]] = set()
+    for candidate in candidates:
+        probe = candidate.candidate_probe
+        identity = (
+            probe.purpose,
+            tuple(sorted(probe.target_hypotheses)),
+            probe.required_capability,
+            " ".join(probe.inquiry_goal.casefold().split()),
+        )
+        if identity in identities:
+            continue
+        identities.add(identity)
+        unique.append(candidate)
+    return unique
 
 
 def _initial_context_signals(

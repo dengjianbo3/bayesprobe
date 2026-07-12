@@ -315,20 +315,15 @@ def _initial_probe_candidates(
     hypotheses: list[Hypothesis],
     is_multiple_choice: bool,
 ) -> list[ProbeCandidate]:
-    candidates: list[ProbeCandidate] = []
-    if is_multiple_choice:
-        candidates.append(
-            _answer_choice_discriminator_candidate(
-                run_id=run_id,
-                problem=problem,
-                hypotheses=hypotheses,
-            )
+    if not is_multiple_choice:
+        return []
+    return [
+        _answer_choice_discriminator_candidate(
+            run_id=run_id,
+            problem=problem,
+            hypotheses=hypotheses,
         )
-    candidates.extend(
-        _probe_candidate(run_id=run_id, problem=problem, hypothesis=hypothesis)
-        for hypothesis in hypotheses
-    )
-    return candidates
+    ]
 
 
 def _answer_choice_discriminator_candidate(
@@ -374,33 +369,6 @@ def _answer_choice_discriminator_candidate(
             "question_frame": "multiple_choice",
             "probe_role": "answer_choice_discriminator",
             "target_hypotheses": hypothesis_ids,
-        },
-    )
-
-
-def _probe_candidate(*, run_id: str, problem: str, hypothesis: Hypothesis) -> ProbeCandidate:
-    probe_id = f"P_{run_id}_{INITIAL_CYCLE_ID}_{hypothesis.id}"
-    support_condition = hypothesis.predictions[0] if hypothesis.predictions else "Independent support appears."
-    weaken_condition = hypothesis.falsifiers[0] if hypothesis.falsifiers else "Reliable counterevidence appears."
-    return ProbeCandidate(
-        candidate_id=f"pc_{run_id}_{INITIAL_CYCLE_ID}_{hypothesis.id}",
-        source="manual",
-        candidate_probe=ProbeDesign(
-            id=probe_id,
-            cycle_id=INITIAL_CYCLE_ID,
-            target_hypotheses=[hypothesis.id],
-            inquiry_goal=(
-                f"Find a signal that can support or weaken {hypothesis.id}.\n"
-                f"Hypothesis: {hypothesis.statement}\n"
-                f"Problem: {problem}"
-            ),
-            method="source_tracing",
-            support_condition={hypothesis.id: support_condition},
-            weaken_condition={hypothesis.id: weaken_condition},
-        ),
-        priority_features={
-            "initialization_method": INITIALIZATION_METHOD,
-            "target_hypothesis": hypothesis.id,
         },
     )
 

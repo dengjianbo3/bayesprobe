@@ -9,6 +9,7 @@ from bayesprobe.model_gateway import ScriptedModelGateway
 from bayesprobe.runners import AutonomousLoopConfig, AutonomousLoopRunner, AutonomousStopReason
 from bayesprobe.schemas import (
     AnswerContractOutline,
+    AnswerRelationship,
     AnswerValueType,
     ExternalSignal,
     FrameAdequacyStatus,
@@ -226,6 +227,21 @@ def test_initializer_open_hypotheses_never_acquire_answer_values():
     )
 
 
+def test_open_initializer_does_not_emit_generic_per_hypothesis_probes():
+    result = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_open_without_generic_probes",
+            problem="Which explanation best fits?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+            task_kind=TaskKind.DECISION,
+        ),
+        admission_decision=admitted_seed_decision(),
+    )
+
+    assert result.task_frame.answer_relationship == AnswerRelationship.SYNTHESIS
+    assert result.probe_candidates == []
+
+
 def test_initializer_revalidates_direct_admitter_result_before_framing_or_persistence(
     tmp_path: Path,
 ):
@@ -382,6 +398,7 @@ E. The class of all connected bipartite graphs."""
     assert result.belief_state.posterior_summary["frame_adequacy"] == "adequate"
 
     first_candidate = result.probe_candidates[0]
+    assert len(result.probe_candidates) == 1
     assert first_candidate.source == "manual"
     assert first_candidate.priority_features["probe_role"] == "answer_choice_discriminator"
     assert first_candidate.candidate_probe.target_hypotheses == ["A", "B", "C", "D", "E"]
@@ -521,8 +538,6 @@ def test_initializer_writes_ledger_records_without_evidence_or_answers(tmp_path:
         "task_frame",
         "run",
         "belief_state",
-        "probe_candidate",
-        "probe_candidate",
     ]
     assert "evidence_event" not in record_types
     assert "belief_update" not in record_types

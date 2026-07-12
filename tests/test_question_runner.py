@@ -12,6 +12,7 @@ from bayesprobe.probe_executor import (
     ProbeExecutionResult,
     ProbeExecutor,
 )
+from bayesprobe.probe_design import MODEL_REASONING_CAPABILITY, ModelProbeDesigner
 from bayesprobe.probe_planner import ProbePlanningResult
 from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
@@ -34,10 +35,14 @@ from bayesprobe.task_admission import (
 from bayesprobe.schemas import (
     AnswerChoice,
     AnswerContractOutline,
+    AnswerProjection,
     AnswerValueType,
+    ChangeMyMindCondition,
     CycleSignalShape,
     FramingMethod,
     HypothesisRelation,
+    ProbeCandidate,
+    ProbeDesign,
     ProbeSet,
     RunRegime,
     RunStatus,
@@ -158,6 +163,27 @@ class RecordingOpenQuestionGateway:
             }
         if request.task == "frame_open_question":
             return valid_open_frame_payload()
+        if request.task == "design_probes":
+            return {
+                "proposals": [
+                    {
+                        "purpose": "hypothesis_discrimination",
+                        "target_hypotheses": ["H1", "H2"],
+                        "inquiry_goal": "Compare the active explanations under matched conditions.",
+                        "expected_observation": "The result favors one explanation over the other.",
+                        "support_condition": {
+                            "H1": "The matched effect remains.",
+                            "H2": "The effect disappears after matching.",
+                        },
+                        "weaken_condition": {
+                            "H1": "Matching removes the effect.",
+                            "H2": "The effect survives matching.",
+                        },
+                        "reframe_condition": None,
+                        "required_capability": "model_reasoning",
+                    }
+                ]
+            }
         if request.task == "execute_probe":
             return {"raw_content": "MODEL REASONING: A matched controlled test is required."}
         if request.task == "judge_evidence":
@@ -351,6 +377,99 @@ def test_open_question_framing_precedes_belief_initialization():
     )
 
 
+def test_runner_designs_open_probe_after_belief_initialization():
+    gateway = RecordingOpenQuestionGateway()
+    progress = []
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(model_gateway=gateway),
+        initializer=BayesProbeInitializer(task_framer=ModelTaskFramer(gateway)),
+        executor=ProbeExecutor(ModelBackedProbeToolGateway(gateway)),
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+        progress_observer=progress.append,
+        task_admitter=ModelTaskAdmitter(gateway),
+        probe_designer=ModelProbeDesigner(gateway),
+        available_capabilities=(MODEL_REASONING_CAPABILITY,),
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_open_probe_design",
+            problem="How should a model-scale claim be tested?",
+        )
+    )
+
+    tasks = [request.task for request in gateway.requests]
+    assert tasks.index("frame_open_question") < tasks.index("design_probes")
+    assert tasks.index("design_probes") < tasks.index("execute_probe")
+    kinds = [event.kind for event in progress]
+    assert AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED in kinds
+    assert AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED in kinds
+    completed = next(
+        event
+        for event in progress
+        if event.kind == AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED
+    )
+    assert len(completed.probe_candidates) == 1
+    assert completed.capability_decisions[0].available is True
+    assert gateway.requests[0].input["available_capabilities"] == [
+        MODEL_REASONING_CAPABILITY.model_dump(mode="json")
+    ]
+    assert len(result.cycle_results[0].probe_set.probes) == 1
+
+
+def _candidate(candidate_id: str, inquiry_goal: str) -> ProbeCandidate:
+    return ProbeCandidate(
+        candidate_id=candidate_id,
+        source="manual",
+        candidate_probe=ProbeDesign(
+            id=f"P_{candidate_id}",
+            cycle_id="cycle_1",
+            target_hypotheses=["H1", "H2"],
+            inquiry_goal=inquiry_goal,
+            method="model_reasoning",
+        ),
+    )
+
+
+def _answer_projection(candidate: ProbeCandidate) -> AnswerProjection:
+    return AnswerProjection(
+        answer="H1",
+        current_best_hypothesis="H1",
+        posterior_summary="H1=0.6",
+        main_uncertainty="H2 remains plausible.",
+        weakest_assumption="The test generalizes.",
+        main_evidence_events=[],
+        change_my_mind_condition=ChangeMyMindCondition(
+            human_readable_condition="A contrary result changes the answer.",
+            structured_probe_candidates=[candidate],
+        ),
+    )
+
+
+def test_next_pool_keeps_core_candidates_before_fresh_and_remaining():
+    runner = AutonomousQuestionRunner(core=BayesProbeCore())
+    core = _candidate("core", "Check the core-generated concern.")
+    duplicate_core = _candidate("duplicate_core", "  check THE core-generated concern. ")
+    designed = _candidate("designed", "Compare the current hypotheses.")
+    projection = _candidate("projection", "Challenge the current answer.")
+    remaining = _candidate("remaining", "Keep a deferred candidate.")
+
+    pool = runner._next_candidate_pool(
+        previous_pool=[remaining],
+        selected_candidates=[],
+        core_candidates=[core],
+        designed_candidates=[duplicate_core, designed],
+        answer_projection=_answer_projection(projection),
+    )
+
+    assert [item.candidate_id for item in pool] == [
+        core.candidate_id,
+        designed.candidate_id,
+        projection.candidate_id,
+        remaining.candidate_id,
+    ]
+
+
 def test_malformed_single_choice_routes_through_model_admission_and_framing():
     gateway = RecordingOpenQuestionGateway()
     runner = AutonomousQuestionRunner(
@@ -423,7 +542,7 @@ def test_recorded_open_question_frames_before_running_cycle():
     assert result.initial_belief_state.task_frame == result.task_frame
     assert result.cycle_results[0].signals[0].source_type == "model_probe_gateway"
     final_by_id = result.final_belief_state.hypotheses_by_id()
-    assert final_by_id["H1"].posterior > 0.5
+    assert final_by_id["H1"].posterior == 0.5
     assert final_by_id["H2"].posterior == 0.5
     assert final_by_id["H3"].posterior == 0.5
     assert sum(item.posterior for item in final_by_id.values()) > 1.0
@@ -568,7 +687,7 @@ def test_question_runner_stops_on_confidence_threshold():
     )
 
     assert result.stop_reason == AutonomousQuestionStopReason.CONFIDENCE_REACHED
-    assert len(result.cycle_results) == 1
+    assert len(result.cycle_results) == 2
     assert result.final_answer_projection is not None
     assert result.final_belief_state.hypotheses_by_id()["H1"].posterior >= 0.6
 
@@ -687,7 +806,7 @@ def test_question_runner_writes_end_to_end_ledger_records(tmp_path: Path):
 
     record_types = [record["record_type"] for record in ledger.read_all()]
     assert "run" in record_types
-    assert "probe_candidate" in record_types
+    assert "probe_candidate" not in record_types
     assert "probe_set" in record_types
     assert "probe_execution" in record_types
     assert "external_signal" in record_types
@@ -742,15 +861,23 @@ def test_question_runner_emits_truthful_progress_for_integrated_cycle():
         AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
         AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
         AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
+        AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
+        AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
         AutonomousQuestionProgressKind.CYCLE_STARTED,
         AutonomousQuestionProgressKind.PROBE_SET_PLANNED,
         AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED,
         AutonomousQuestionProgressKind.SIGNALS_COLLECTED,
         AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED,
         AutonomousQuestionProgressKind.CYCLE_INTEGRATED,
+        AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
+        AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
         AutonomousQuestionProgressKind.RUN_COMPLETED,
     ]
-    cycle_event = events[-2]
+    cycle_event = next(
+        event
+        for event in events
+        if event.kind == AutonomousQuestionProgressKind.CYCLE_INTEGRATED
+    )
     assert cycle_event.cycle_result == result.cycle_results[0]
     assert cycle_event.cycle_result.cycle.boundary_status.value == "integrated"
     assert sum(
@@ -927,12 +1054,16 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
         AutonomousQuestionProgressKind.SIGNALS_COLLECTED,
         AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED,
         AutonomousQuestionProgressKind.CYCLE_INTEGRATED,
+        AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
+        AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
     ]
     assert observed_kinds == [
         AutonomousQuestionProgressKind.RUN_STARTED,
         AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
         AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
         AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
+        AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
+        AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
         *per_cycle,
         *per_cycle,
         AutonomousQuestionProgressKind.RUN_COMPLETED,
