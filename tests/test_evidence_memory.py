@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+import bayesprobe.evidence as evidence_module
 import bayesprobe.evidence_memory as evidence_memory
 from bayesprobe.evidence import EvidenceIntegrationGate
 from bayesprobe.evidence_memory import (
@@ -50,6 +51,11 @@ _INVALID_MIGRATION_ENVELOPES = (
     "missing_frame_state",
     "missing_evidence_memory",
     "incoherent_frame_state",
+)
+_NFKC_SECRET_VALUE = (
+    "\uff21\uff55\uff54\uff48\uff4f\uff52\uff49\uff5a\uff41\uff54"
+    "\uff49\uff4f\uff4e\uff1a \uff22\uff45\uff41\uff52\uff45\uff52 "
+    "provider-secret-value-123"
 )
 
 
@@ -664,6 +670,83 @@ def test_batch_preflight_normalizes_once_and_stops_before_provider():
         (conflicting.id, conflicting.raw_content),
     ]
     assert gateway.requests == []
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["id", "cycle_id", "generated_by_probe", "initial_target_hypotheses"],
+)
+def test_recursive_signal_secret_validation_precedes_identity_hash(
+    monkeypatch,
+    location,
+):
+    signal = _signal("S_prehash_secret", "An ordinary observation.")
+    update = {
+        location: (
+            [_NFKC_SECRET_VALUE]
+            if location == "initial_target_hypotheses"
+            else _NFKC_SECRET_VALUE
+        )
+    }
+    signal = signal.model_copy(update=update)
+    hash_calls = []
+    original_hash = evidence_memory._sha256_identity
+
+    def recording_hash(source_identity, content):
+        hash_calls.append((source_identity, content))
+        return original_hash(source_identity, content)
+
+    monkeypatch.setattr(evidence_memory, "_sha256_identity", recording_hash)
+
+    with pytest.raises(ValueError, match="secret") as exc_info:
+        SignalProvenanceNormalizer().normalize(signal, run_id="run_memory")
+
+    assert _NFKC_SECRET_VALUE not in str(exc_info.value)
+    assert hash_calls == []
+
+
+def test_projection_secondary_event_id_is_validated_during_batch_planning(
+    monkeypatch,
+):
+    validated_ids = []
+
+    def validate_event_id(event_id):
+        validated_ids.append(event_id)
+        if event_id.endswith("_source"):
+            raise ValueError("canonical event binding id is invalid")
+        return event_id
+
+    monkeypatch.setattr(
+        evidence_module,
+        "validate_canonical_event_binding_id",
+        validate_event_id,
+        raising=False,
+    )
+    gateway = CountingGateway()
+    state = _state()
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="canonical event binding id"):
+        EvidenceIntegrationGate(model_gateway=gateway).integrate(
+            cycle=_cycle(1),
+            belief_state=state,
+            probe_set=_probe_set(1),
+            signals=[
+                ExternalSignal(
+                    id="S_projection_event_id",
+                    cycle_id="pending",
+                    signal_kind=SignalKind.PASSIVE,
+                    source_type="external_agent_projection",
+                    source="agent-a",
+                    raw_content="Agent A cites source X while favoring option A.",
+                    initial_target_hypotheses=["A", "B"],
+                )
+            ],
+        )
+
+    assert validated_ids[-1].endswith("_source")
+    assert gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
 
 
 def test_native_event_identity_distinguishes_same_content_with_different_roots():

@@ -40,6 +40,7 @@ from bayesprobe.schemas import (
     ProbeDesign,
     ProbeSet,
     redact_secret_material,
+    validate_canonical_event_binding_id,
 )
 
 
@@ -387,25 +388,33 @@ class EvidenceIntegrationGate:
         signals: list[ExternalSignal],
         native_v02: bool,
     ) -> list[_PlannedSignalEvents]:
+        if signals:
+            validate_canonical_event_binding_id(
+                _scoped_cycle_key(cycle.run_id, cycle.cycle_id)
+            )
         identity_occurrences: dict[str, int] = {}
         planned: list[_PlannedSignalEvents] = []
         for index, signal in enumerate(signals, start=1):
             identity_digest = canonical_signal_identity_digest(signal)
             occurrence = identity_occurrences.get(identity_digest, 0) + 1
             identity_occurrences[identity_digest] = occurrence
-            event_id = _event_id_for_signal(
-                cycle=cycle,
-                signal_identity_digest=identity_digest,
-                index=index,
-                occurrence=occurrence,
-                native_v02=native_v02,
+            event_id = validate_canonical_event_binding_id(
+                _event_id_for_signal(
+                    cycle=cycle,
+                    signal_identity_digest=identity_digest,
+                    index=index,
+                    occurrence=occurrence,
+                    native_v02=native_v02,
+                )
             )
             event_ids = [event_id]
             if (
                 signal.source_type == "external_agent_projection"
                 and self._projection_decomposer.should_decompose(signal)
             ):
-                event_ids.append(f"{event_id}_source")
+                event_ids.append(
+                    validate_canonical_event_binding_id(f"{event_id}_source")
+                )
             planned.append(
                 _PlannedSignalEvents(
                     signal=signal,

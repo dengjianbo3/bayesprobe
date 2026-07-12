@@ -5,6 +5,7 @@ from enum import StrEnum
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -324,15 +325,22 @@ _FORBIDDEN_SECRET_KEY_SEQUENCES = {
 }
 
 
+def _security_text_forms(value: str) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        return ()
+    normalized = unicodedata.normalize("NFKC", value)
+    return (value,) if normalized == value else (value, normalized)
+
+
 def is_secret_like_value(value: str) -> bool:
-    return isinstance(value, str) and any(
-        pattern.search(value) is not None for pattern in _SECRET_VALUE_PATTERNS
+    return any(
+        pattern.search(form) is not None
+        for form in _security_text_forms(value)
+        for pattern in _SECRET_VALUE_PATTERNS
     )
 
 
-def is_forbidden_secret_key_name(value: str) -> bool:
-    if not isinstance(value, str):
-        return False
+def _is_forbidden_secret_key_name_exact(value: str) -> bool:
     separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
     parts = re.findall(r"[a-z0-9]+", separated.casefold())
     if not parts:
@@ -355,6 +363,13 @@ def is_forbidden_secret_key_name(value: str) -> bool:
     return False
 
 
+def is_forbidden_secret_key_name(value: str) -> bool:
+    return any(
+        _is_forbidden_secret_key_name_exact(form)
+        for form in _security_text_forms(value)
+    )
+
+
 def redact_secret_material(value: Any) -> Any:
     if isinstance(value, BaseModel):
         return redact_secret_material(value.model_dump(mode="python"))
@@ -375,19 +390,36 @@ def redact_secret_material(value: Any) -> Any:
     return "[UNSUPPORTED]"
 
 
-def _contains_secret_material(value: Any) -> bool:
+def contains_secret_material(value: Any) -> bool:
     if isinstance(value, BaseModel):
-        return _contains_secret_material(value.model_dump(mode="python"))
+        return contains_secret_material(value.model_dump(mode="python"))
     if isinstance(value, Mapping):
         return any(
             is_forbidden_secret_key_name(str(key))
             or is_secret_like_value(str(key))
-            or _contains_secret_material(item)
+            or contains_secret_material(item)
             for key, item in value.items()
         )
     if isinstance(value, list | tuple):
-        return any(_contains_secret_material(item) for item in value)
+        return any(contains_secret_material(item) for item in value)
     return isinstance(value, str) and is_secret_like_value(value)
+
+
+def _contains_secret_material(value: Any) -> bool:
+    return contains_secret_material(value)
+
+
+def validate_canonical_event_binding_id(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.strip() != value
+        or contains_secret_material({value: None})
+    ):
+        raise ValueError(
+            "canonical event binding id must be non-empty, exact, and secret-free"
+        )
+    return value
 
 
 def _reject_secret_string(value: str) -> None:
@@ -718,14 +750,12 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     ) -> dict[str, str]:
         result: dict[str, str] = {}
         for event_id, digest in value.items():
-            clean_event_id = _required_text(event_id, "event binding id")
-            if (
-                clean_event_id != event_id
-                or _contains_secret_material(event_id)
-            ):
+            try:
+                clean_event_id = validate_canonical_event_binding_id(event_id)
+            except ValueError:
                 raise ValueError(
                     "event_signal_identity_digests requires exact non-secret event ids"
-                )
+                ) from None
             if (
                 not isinstance(digest, str)
                 or _CANONICAL_SIGNAL_IDENTITY_DIGEST_PATTERN.fullmatch(digest)
@@ -734,7 +764,7 @@ class EvidenceMemorySnapshot(StrictTaskModel):
                 raise ValueError(
                     "event_signal_identity_digests requires a canonical signal identity digest"
                 )
-            result[event_id] = digest
+            result[clean_event_id] = digest
         return result
 
     @field_validator("correlation_credit")

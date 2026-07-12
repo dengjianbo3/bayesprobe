@@ -750,3 +750,48 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 14
+
+### Changes
+
+- Centralized exact-plus-NFKC secret detection in the shared schema predicates
+  and exposed one recursive inspector used by redaction, schema validation, and
+  `ExternalSignal` normalization. The full signal payload is now rejected at
+  normalization entry before identity hashing or provider-request construction.
+- Added one canonical event-binding id helper for non-empty, trim-exact,
+  secret-free ids. Evidence-memory binding validation and EvidenceGate planning
+  now share it; every planned primary and projection-secondary id is checked
+  before provider access.
+- Added atomic regressions for whitespace and NFKC-secret run/cycle namespaces,
+  every string-bearing signal/provenance field, pre-hash ordering, recursive
+  schema/redaction behavior, persisted bindings, and projection-secondary ids.
+
+### Verification
+
+- RED: `pytest -q tests/test_schemas.py::test_canonical_event_binding_id_helper_enforces_exact_secret_free_text tests/test_schemas.py::test_evidence_memory_rejects_nfkc_secret_event_signal_binding_id tests/test_schemas.py::test_secret_predicates_recognize_nfkc_equivalent_forms tests/test_schemas.py::test_shared_redaction_recognizes_nfkc_secret_keys_and_values tests/test_schemas.py::test_task_frame_recursive_secret_validation_recognizes_nfkc_forms tests/test_evidence_memory.py::test_projection_secondary_event_id_is_validated_during_batch_planning tests/test_core_cycles.py::test_nfkc_secret_anywhere_in_signal_fails_atomically tests/test_core_cycles.py::test_noncanonical_planned_event_namespace_fails_atomically` -> `10 failed, 18 passed in 0.52s`.
+- Pre-hash RED: `pytest -q tests/test_evidence_memory.py::test_recursive_signal_secret_validation_precedes_identity_hash` -> `4 failed in 0.15s`.
+- GREEN: `pytest -q tests/test_schemas.py::test_canonical_event_binding_id_helper_enforces_exact_secret_free_text tests/test_schemas.py::test_evidence_memory_rejects_nfkc_secret_event_signal_binding_id tests/test_schemas.py::test_secret_predicates_recognize_nfkc_equivalent_forms tests/test_schemas.py::test_shared_redaction_recognizes_nfkc_secret_keys_and_values tests/test_schemas.py::test_task_frame_recursive_secret_validation_recognizes_nfkc_forms tests/test_evidence_memory.py::test_recursive_signal_secret_validation_precedes_identity_hash tests/test_evidence_memory.py::test_projection_secondary_event_id_is_validated_during_batch_planning tests/test_core_cycles.py::test_nfkc_secret_anywhere_in_signal_fails_atomically tests/test_core_cycles.py::test_noncanonical_planned_event_namespace_fails_atomically` -> `32 passed in 0.14s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `438 passed in 1.02s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `326 passed in 0.35s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1245 passed, 10 skipped in 9.50s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- Signal validation recursively examines every mapping key and nested string in
+  the serialized `ExternalSignal`, including ids, cycle/probe linkage, targets,
+  source/content fields, and all provenance lists and scalars. Errors remain
+  generic and tests prove neither exact nor normalized credential text is echoed.
+- Planning validates the scoped namespace plus every complete primary and
+  projection-secondary event id before lineage preflight or provider calls.
+  Persistence invokes the same helper, so planned and stored binding grammar
+  cannot drift; prior event-set and binding preflights remain unchanged.
+- Exact-form behavior remains covered, NFKC strengthening flows through existing
+  redaction and global schema callers, immediate source/content pre-hash checks
+  remain in place, and empty signal batches retain their prior behavior.
+
+### Concerns
+
+No blocking concerns.

@@ -16,6 +16,7 @@ from bayesprobe.schemas import (
     ExternalSignal,
     LikelihoodBand,
     SignalProvenance,
+    contains_secret_material,
     decode_discard_history_entry,
     encode_discard_history_entry,
     is_forbidden_secret_key_name,
@@ -535,37 +536,13 @@ def _sha256_identity(source_identity: str, content: str) -> str:
 
 
 def _reject_secret_signal(signal: ExternalSignal) -> None:
-    values = [
-        signal.source_type,
-        signal.source,
-        signal.raw_content,
-        signal.generated_by_probe,
-        *signal.initial_target_hypotheses,
-    ]
-    if any(value is not None and is_secret_like_value(value) for value in values):
+    if contains_secret_material(signal.model_dump(mode="python")):
         raise ValueError("external signal contains secret material")
-    if signal.provenance is not None:
-        _reject_secret_provenance(signal.provenance)
 
 
 def _reject_secret_provenance(provenance: SignalProvenance) -> None:
-    payload = provenance.model_dump(mode="python")
-    for key, value in payload.items():
-        normalized_key = _clean_text(key)
-        if is_forbidden_secret_key_name(key) or is_forbidden_secret_key_name(
-            normalized_key
-        ):
-            raise ValueError("signal provenance contains secret material")
-        values = value if isinstance(value, list) else [value]
-        if any(
-            isinstance(item, str)
-            and (
-                is_secret_like_value(item)
-                or is_secret_like_value(_clean_text(item))
-            )
-            for item in values
-        ):
-            raise ValueError("signal provenance contains secret material")
+    if contains_secret_material(provenance.model_dump(mode="python")):
+        raise ValueError("signal provenance contains secret material")
 
 
 def _required_provenance(signal: ExternalSignal) -> SignalProvenance:

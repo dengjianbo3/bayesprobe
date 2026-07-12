@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import unicodedata
 
 import pytest
 
@@ -44,6 +45,13 @@ from bayesprobe.schemas import (
     TaskKind,
 )
 from bayesprobe.task_framing import ModelTaskFramer, migrate_legacy_belief_state
+
+
+_NFKC_SECRET_VALUE = (
+    "\uff21\uff55\uff54\uff48\uff4f\uff52\uff49\uff5a\uff41\uff54"
+    "\uff49\uff4f\uff4e\uff1a \uff22\uff45\uff41\uff52\uff45\uff52 "
+    "provider-secret-value-123"
+)
 
 
 class RecordingSignalInbox(SignalInbox):
@@ -2767,6 +2775,180 @@ def test_unicode_normalized_secret_fails_before_provider_memory_or_ledger(tmp_pa
     assert belief_state.evidence_memory is None
     assert gateway.requests == []
     assert ledger.read_all() == []
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "id",
+        "cycle_id",
+        "generated_by_probe",
+        "initial_target_hypotheses",
+        "source_type",
+        "source",
+        "raw_content",
+        "provenance.source_identity",
+        "provenance.provider_model_or_tool_identity",
+        "provenance.session_id",
+        "provenance.parent_signal_ids",
+        "provenance.derivation_root_id",
+        "provenance.correlation_group",
+        "provenance.supplied_correlation_group",
+        "provenance.canonical_content_fingerprint",
+        "provenance.citations",
+        "provenance.artifact_refs",
+        "provenance.environment_state_id",
+    ],
+)
+def test_nfkc_secret_anywhere_in_signal_fails_atomically(
+    tmp_path,
+    location,
+):
+    normalized_secret = unicodedata.normalize("NFKC", _NFKC_SECRET_VALUE)
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    ledger_path = tmp_path / f"recursive-secret-{location.replace('.', '-')}.jsonl"
+    ledger_path.touch()
+    core = BayesProbeCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    state = make_exact_belief_state()
+    signal = ExternalSignal(
+        id="S_recursive_secret",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="retrieved_source",
+        source="source.example/audit",
+        raw_content="An ordinary audited observation.",
+        generated_by_probe="P_recursive_secret",
+        initial_target_hypotheses=["H1", "H2"],
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.RETRIEVED_SOURCE,
+            source_identity="source.example/audit",
+            provider_model_or_tool_identity="retriever/audit",
+            session_id="session-recursive-secret",
+            parent_signal_ids=["S_external_parent"],
+            derivation_root_id="root-recursive-secret",
+            correlation_group="source.example/audit",
+            supplied_correlation_group="caller-audit-group",
+            canonical_content_fingerprint="normalize-me",
+            citations=["source.example/audit#finding"],
+            artifact_refs=["artifact-audit-1"],
+            environment_state_id="environment-audit-1",
+        ),
+    )
+    cycle_id = "cycle_recursive_secret"
+    if location == "cycle_id":
+        cycle_id = _NFKC_SECRET_VALUE
+    elif location == "initial_target_hypotheses":
+        signal = signal.model_copy(
+            update={location: ["H1", _NFKC_SECRET_VALUE]}
+        )
+    elif location.startswith("provenance."):
+        provenance_field = location.removeprefix("provenance.")
+        provenance_value = (
+            [_NFKC_SECRET_VALUE]
+            if provenance_field in {"parent_signal_ids", "citations", "artifact_refs"}
+            else _NFKC_SECRET_VALUE
+        )
+        signal = signal.model_copy(
+            update={
+                "provenance": signal.provenance.model_copy(
+                    update={provenance_field: provenance_value}
+                )
+            }
+        )
+    else:
+        signal = signal.model_copy(update={location: _NFKC_SECRET_VALUE})
+    cycle = CycleRecord(
+        cycle_id=cycle_id,
+        run_id=state.run_id,
+        cycle_index=1,
+        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+    )
+    prior_state = state.model_dump(mode="json")
+    prior_memory = state.evidence_memory.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+
+    with pytest.raises(ValueError) as exc_info:
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[signal],
+        )
+
+    error_text = str(exc_info.value)
+    assert "secret" in error_text.casefold()
+    assert _NFKC_SECRET_VALUE not in error_text
+    assert normalized_secret not in error_text
+    assert gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
+    assert state.evidence_memory.model_dump(mode="json") == prior_memory
+    assert ledger_path.read_bytes() == prior_ledger
+
+
+@pytest.mark.parametrize(
+    ("run_id", "cycle_id"),
+    [
+        (" run_1", "cycle_event_id"),
+        ("run_1", "cycle_event_id "),
+        (f"run-{_NFKC_SECRET_VALUE}", "cycle_event_id"),
+    ],
+)
+def test_noncanonical_planned_event_namespace_fails_atomically(
+    tmp_path,
+    run_id,
+    cycle_id,
+):
+    normalized_secret = unicodedata.normalize("NFKC", _NFKC_SECRET_VALUE)
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    ledger_path = tmp_path / "noncanonical-event-id.jsonl"
+    ledger_path.touch()
+    core = BayesProbeCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    state = make_exact_belief_state().model_copy(update={"run_id": run_id})
+    cycle = CycleRecord(
+        cycle_id=cycle_id,
+        run_id=run_id,
+        cycle_index=1,
+        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+    )
+    prior_state = state.model_dump(mode="json")
+    prior_memory = state.evidence_memory.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+
+    with pytest.raises(ValueError, match="canonical event binding id") as exc_info:
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                ExternalSignal(
+                    id="S_noncanonical_event_id",
+                    cycle_id="pending",
+                    signal_kind=SignalKind.ACTIVE,
+                    source_type="retrieved_source",
+                    source="source.example/audit",
+                    raw_content="An event-id validation observation.",
+                    initial_target_hypotheses=["H1", "H2"],
+                )
+            ],
+        )
+
+    error_text = str(exc_info.value)
+    assert _NFKC_SECRET_VALUE not in error_text
+    assert normalized_secret not in error_text
+    assert gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
+    assert state.evidence_memory.model_dump(mode="json") == prior_memory
+    assert ledger_path.read_bytes() == prior_ledger
 
 
 def test_low_reliability_signal_caps_quality_scores():

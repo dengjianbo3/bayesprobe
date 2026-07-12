@@ -1,3 +1,5 @@
+import unicodedata
+
 import pytest
 
 import bayesprobe.schemas as schemas
@@ -42,6 +44,14 @@ from bayesprobe.schemas import (
     is_forbidden_secret_key_name,
     is_secret_like_value,
 )
+
+
+_NFKC_SECRET_VALUE = (
+    "\uff21\uff55\uff54\uff48\uff4f\uff52\uff49\uff5a\uff41\uff54"
+    "\uff49\uff4f\uff4e\uff1a \uff22\uff45\uff41\uff52\uff45\uff52 "
+    "provider-secret-value-123"
+)
+_NFKC_SECRET_KEY = "\uff41\uff50\uff49\uff3f\uff4b\uff45\uff59"
 
 
 def make_v02_task_frame(
@@ -559,6 +569,35 @@ def test_v1_evidence_memory_rejects_event_signal_bindings():
             memory_version=1,
             accepted_evidence_ids=["E1"],
             event_signal_identity_digests={"E1": "a" * 64},
+        )
+
+
+def test_canonical_event_binding_id_helper_enforces_exact_secret_free_text():
+    validate_event_id = getattr(
+        schemas,
+        "validate_canonical_event_binding_id",
+        None,
+    )
+
+    assert callable(validate_event_id)
+    assert validate_event_id("run_1_cycle_1_E1") == "run_1_cycle_1_E1"
+    for invalid in (
+        " run_1_cycle_1_E1",
+        "run_1_cycle_1_E1 ",
+        f"run_1_{_NFKC_SECRET_VALUE}_E1",
+    ):
+        with pytest.raises(ValueError, match="canonical event binding id"):
+            validate_event_id(invalid)
+
+
+def test_evidence_memory_rejects_nfkc_secret_event_signal_binding_id():
+    event_id = f"run_1_{_NFKC_SECRET_VALUE}_E1"
+
+    with pytest.raises(ValueError, match="exact non-secret event ids"):
+        EvidenceMemorySnapshot(
+            memory_version=2,
+            accepted_evidence_ids=[event_id],
+            event_signal_identity_digests={event_id: "a" * 64},
         )
 
 
@@ -1094,6 +1133,12 @@ def test_secret_predicates_allow_ordinary_tokenization_prose():
     assert not is_secret_like_value("Tokenization is a useful concept.")
 
 
+def test_secret_predicates_recognize_nfkc_equivalent_forms():
+    assert _NFKC_SECRET_VALUE != unicodedata.normalize("NFKC", _NFKC_SECRET_VALUE)
+    assert is_secret_like_value(_NFKC_SECRET_VALUE)
+    assert is_forbidden_secret_key_name(_NFKC_SECRET_KEY)
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -1207,6 +1252,35 @@ def test_shared_redaction_removes_forbidden_fields_and_redacts_secret_strings():
             "ordinary_source": "A source compares password policies.",
         }
     }
+
+
+def test_shared_redaction_recognizes_nfkc_secret_keys_and_values():
+    redact_secret_material = getattr(schemas, "redact_secret_material")
+
+    assert redact_secret_material(
+        {
+            _NFKC_SECRET_KEY: "hidden",
+            "ordinary": _NFKC_SECRET_VALUE,
+        }
+    ) == {"ordinary": "[REDACTED]"}
+
+
+@pytest.mark.parametrize(
+    "framing_trace",
+    [
+        {_NFKC_SECRET_KEY: "hidden"},
+        {"ordinary": _NFKC_SECRET_VALUE},
+    ],
+)
+def test_task_frame_recursive_secret_validation_recognizes_nfkc_forms(
+    framing_trace,
+):
+    frame = _open_task_frame().model_copy(
+        update={"framing_trace": framing_trace}
+    )
+
+    with pytest.raises(ValueError, match="secret"):
+        TaskFrame.model_validate(frame.model_dump(mode="python"))
 
 
 @pytest.mark.parametrize(
