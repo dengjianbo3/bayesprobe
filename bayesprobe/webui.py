@@ -110,18 +110,39 @@ class _PreparedAutonomousRun:
     provider_kind: str
 
 
+class _AutonomousRunStageTracker:
+    def __init__(self) -> None:
+        self.failure_stage = "task framing"
+
+    def observe(self, progress: AutonomousQuestionProgress) -> None:
+        self.failure_stage = _failure_stage_after_progress(
+            self.failure_stage,
+            progress,
+        )
+
+
 def handle_autonomous_run_request(
     payload: Mapping[str, Any],
     *,
     client_factory: Callable[..., Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     try:
-        prepared = _prepare_autonomous_run(payload, client_factory=client_factory)
+        stage_tracker = _AutonomousRunStageTracker()
+        prepared = _prepare_autonomous_run(
+            payload,
+            client_factory=client_factory,
+            progress_observer=stage_tracker.observe,
+        )
         try:
             result = prepared.runner.run_question(prepared.input)
         except TaskFramingError as error:
             if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
-                raise ProviderError(_provider_error_message(prepared.provider_kind)) from error
+                raise ProviderError(
+                    _provider_stage_error_message(
+                        prepared.provider_kind,
+                        stage_tracker.failure_stage,
+                    )
+                ) from error
             raise WebUIError(str(error)) from error
         except Exception as error:
             if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
@@ -129,6 +150,7 @@ def handle_autonomous_run_request(
                     _provider_runtime_error_message(
                         error,
                         prepared.provider_kind,
+                        failure_stage=stage_tracker.failure_stage,
                     )
                 ) from error
             raise
@@ -167,7 +189,13 @@ def handle_autonomous_stream_request(
             emitter.emit_admission_result(result, run_id=prepared.input.run_id)
     except TaskFramingError as error:
         if prepared.provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
-            emitter.emit_failure("provider_error", _provider_error_message(prepared.provider_kind))
+            emitter.emit_failure(
+                "provider_error",
+                _provider_stage_error_message(
+                    prepared.provider_kind,
+                    emitter.failure_stage,
+                ),
+            )
         elif emitter.started:
             emitter.emit_failure("validation_error", str(error))
         else:
@@ -179,6 +207,7 @@ def handle_autonomous_stream_request(
                 _provider_runtime_error_message(
                     error,
                     prepared.provider_kind,
+                    failure_stage=emitter.failure_stage,
                 ),
             )
         else:
@@ -218,7 +247,7 @@ def serialize_autonomous_cycle_result(
         "probes": _dump_domain(cycle.probe_set.probes),
         "signals": _dump_domain(cycle.signals),
         "belief_state": _dump_domain(cycle.belief_state),
-        "evidence_events": _dump_domain(cycle.evidence_events),
+        "evidence_events": _serialize_evidence_events(cycle.evidence_events),
         "belief_updates": _dump_domain(cycle.belief_updates),
         "hypothesis_evolutions": _dump_domain(cycle.hypothesis_evolutions),
         "answer_projection": _dump_domain(cycle.answer_projection),
@@ -232,12 +261,17 @@ class _AutonomousProgressEventEmitter:
         self.run_id: str | None = None
         self.cycle_id: str | None = None
         self.cycle_index: int | None = None
+        self.failure_stage = "task framing"
 
     @property
     def started(self) -> bool:
         return self.sequence > 0
 
     def emit(self, progress: AutonomousQuestionProgress) -> None:
+        self.failure_stage = _failure_stage_after_progress(
+            self.failure_stage,
+            progress,
+        )
         self.run_id = progress.run_id
         self.cycle_id = progress.cycle_id
         self.cycle_index = progress.cycle_index
@@ -831,6 +865,35 @@ def _dump_domain(value: Any) -> Any:
     return value
 
 
+def _serialize_evidence_events(events: Sequence[Any]) -> list[Any]:
+    serialized_events = _dump_domain(events)
+    assert isinstance(serialized_events, list)
+    for event in serialized_events:
+        if not isinstance(event, dict):
+            continue
+        discard_reason = event.get("discard_reason")
+        if isinstance(discard_reason, str) and discard_reason.startswith(
+            "schema_violation"
+        ):
+            event["discard_reason"] = (
+                "evidence judgment provider/schema validation failed"
+            )
+    return serialized_events
+
+
+def _failure_stage_after_progress(
+    current_stage: str,
+    progress: AutonomousQuestionProgress,
+) -> str:
+    if progress.kind == AutonomousQuestionProgressKind.TASK_FRAMING_STARTED:
+        return "task framing"
+    if progress.kind == AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED:
+        return "probe execution"
+    if progress.kind == AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED:
+        return "evidence judgment"
+    return current_stage
+
+
 def _required_nonempty_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str):
         raise WebUIError(f"{field_name} must not be empty")
@@ -973,6 +1036,8 @@ def _is_official_deepseek_v4_chat(
 def _provider_runtime_error_message(
     error: Exception,
     provider_kind: str,
+    *,
+    failure_stage: str | None = None,
 ) -> str:
     current: BaseException | None = error
     seen: set[int] = set()
@@ -991,12 +1056,24 @@ def _provider_runtime_error_message(
         if isinstance(current, ModelGatewayValidationError) and (
             "exhausted max_tokens before producing structured content" in str(current)
         ):
-            return (
+            message = (
                 "provider exhausted max output tokens before producing structured "
                 "content. Increase max output tokens and retry."
             )
+            if failure_stage is not None:
+                return f"{message} Failed during {failure_stage}."
+            return message
         current = current.__cause__ or current.__context__
+    if failure_stage is not None:
+        return _provider_stage_error_message(provider_kind, failure_stage)
     return _provider_error_message(provider_kind)
+
+
+def _provider_stage_error_message(provider_kind: str, stage: str) -> str:
+    return (
+        f"provider request failed during {stage} for {provider_kind}. "
+        "Check the provider configuration and retry."
+    )
 
 
 def _provider_error_message(provider_kind: str) -> str:

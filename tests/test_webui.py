@@ -609,6 +609,131 @@ class SecretRepairWebUIChatOpenAI:
         self.chat = type("FakeChat", (), {"completions": completions})()
 
 
+class StageFailureWebUIChatCompletions:
+    failed_task = ""
+    secret = "provider-secret-123"
+
+    def create(self, **payload):
+        request = json.loads(payload["messages"][1]["content"])
+        task = request["task"]
+        if task == self.__class__.failed_task:
+            raise RuntimeError(
+                f"raw provider payload={request!r}; credential={self.secret}"
+            )
+        if task in {"judge_evidence", "repair_evidence_judgment"}:
+            content = {"unexpected": "raw-provider-payload"}
+        elif task == "assess_task_admission":
+            content = valid_admission_payload()
+        elif task == "frame_open_question":
+            content = valid_open_frame_payload()
+        elif task == "design_probes":
+            content = valid_probe_design_payload()
+        elif task == "execute_probe":
+            content = {"raw_content": "A matched controlled test is required."}
+        elif task == "project_answer":
+            content = valid_synthesis_projection_payload(request)
+        else:
+            raise AssertionError(f"unexpected task: {task}")
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+
+class StageFailureWebUIChatOpenAI:
+    def __init__(self, **kwargs):
+        del kwargs
+        self.chat = type(
+            "FakeChat",
+            (),
+            {"completions": StageFailureWebUIChatCompletions()},
+        )()
+
+
+def _stage_failure_open_question_request():
+    return {
+        "question": "How should a model-scale claim be tested?",
+        "provider": {
+            "kind": "openai_chat_completions",
+            "api_key": StageFailureWebUIChatCompletions.secret,
+            "model": "provider-model",
+        },
+        "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+    }
+
+
+@pytest.mark.parametrize(
+    ("failed_task", "stage"),
+    [
+        ("frame_open_question", "task framing"),
+        ("execute_probe", "probe execution"),
+    ],
+)
+def test_webui_openai_provider_failures_identify_their_stage_without_raw_material(
+    failed_task, stage
+):
+    StageFailureWebUIChatCompletions.failed_task = failed_task
+    request = _stage_failure_open_question_request()
+    events = []
+
+    status, response = handle_autonomous_run_request(
+        request,
+        client_factory=StageFailureWebUIChatOpenAI,
+    )
+    stream_status, stream_response = handle_autonomous_stream_request(
+        request,
+        event_sink=events.append,
+        client_factory=StageFailureWebUIChatOpenAI,
+    )
+
+    expected_message = (
+        f"provider request failed during {stage} for openai_chat_completions. "
+        "Check the provider configuration and retry."
+    )
+    assert status == 502
+    assert response == {
+        "error": {"type": "provider_error", "message": expected_message}
+    }
+    assert stream_status == 200
+    assert stream_response is None
+    assert events[-1]["event"] == "run_failed"
+    assert events[-1]["data"]["error"] == {
+        "type": "provider_error",
+        "message": expected_message,
+    }
+    serialized = json.dumps([response, events])
+    assert "raw provider payload" not in serialized
+    assert StageFailureWebUIChatCompletions.secret not in serialized
+
+
+def test_webui_openai_evidence_judgment_schema_failure_is_neutral_and_safely_staged():
+    StageFailureWebUIChatCompletions.failed_task = ""
+    request = _stage_failure_open_question_request()
+    events = []
+
+    status, response = handle_autonomous_run_request(
+        request,
+        client_factory=StageFailureWebUIChatOpenAI,
+    )
+    stream_status, stream_response = handle_autonomous_stream_request(
+        request,
+        event_sink=events.append,
+        client_factory=StageFailureWebUIChatOpenAI,
+    )
+
+    expected_reason = "evidence judgment provider/schema validation failed"
+    evidence_event = response["cycles"][0]["evidence_events"][0]
+    streamed_cycle = next(event for event in events if event["event"] == "cycle_integrated")
+    streamed_evidence_event = streamed_cycle["data"]["evidence_events"][0]
+    assert status == 200
+    assert stream_status == 200
+    assert stream_response is None
+    assert evidence_event["evidence_type"] == "neutral"
+    assert evidence_event["discard_reason"] == expected_reason
+    assert streamed_evidence_event["evidence_type"] == "neutral"
+    assert streamed_evidence_event["discard_reason"] == expected_reason
+    serialized = json.dumps([response, events])
+    assert "raw-provider-payload" not in serialized
+    assert StageFailureWebUIChatCompletions.secret not in serialized
+
+
 def test_webui_provider_frames_open_question_before_exposing_belief():
     events = []
     status, body = handle_autonomous_stream_request(
@@ -2233,8 +2358,8 @@ def test_webui_provider_errors_are_sanitized():
     assert status == 502
     assert payload["error"]["type"] == "provider_error"
     assert payload["error"]["message"] == (
-        "provider request failed for openai_responses. "
-        "Use Chat Completions for /chat/completions-compatible providers."
+        "provider request failed during probe execution for openai_responses. "
+        "Check the provider configuration and retry."
     )
     assert "sk-webui-secret" not in json.dumps(payload)
     assert FailingWebUIOpenAI.calls == 1
@@ -2260,8 +2385,8 @@ def test_webui_provider_request_failures_return_safe_diagnostic_for_non_sk_keys(
         "error": {
             "type": "provider_error",
             "message": (
-                "provider request failed for openai_responses. "
-                "Use Chat Completions for /chat/completions-compatible providers."
+                "provider request failed during probe execution for openai_responses. "
+                "Check the provider configuration and retry."
             ),
         }
     }
@@ -2408,7 +2533,7 @@ def test_webui_reports_exhausted_output_budget_without_leaking_provider_data():
 
     expected_message = (
         "provider exhausted max output tokens before producing structured "
-        "content. Increase max output tokens and retry."
+        "content. Increase max output tokens and retry. Failed during probe execution."
     )
     assert status == 502
     assert payload == {
@@ -2447,8 +2572,8 @@ def test_webui_chat_completions_provider_failures_return_safe_diagnostic_hint():
         "error": {
             "type": "provider_error",
             "message": (
-                "provider request failed for openai_chat_completions. "
-                "Check base URL, model, API key, and max output tokens."
+                "provider request failed during probe execution for openai_chat_completions. "
+                "Check the provider configuration and retry."
             ),
         }
     }
