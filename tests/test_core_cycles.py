@@ -1983,7 +1983,7 @@ class StaticEventGate(EvidenceIntegrationGate):
                         "provenance": SignalProvenance(
                             epistemic_origin=(
                                 original.epistemic_origin
-                                or EpistemicOrigin.MODEL_REASONING
+                                or EpistemicOrigin.EXTERNAL_OBSERVATION
                             ),
                             source_identity=(
                                 f"static-event:{original.derived_from_signal}"
@@ -2014,14 +2014,23 @@ class StaticEventGate(EvidenceIntegrationGate):
             frame_fit = original.frame_fit
             if unresolved_likelihood in confirming:
                 frame_fit = FrameFit.SUPPORTS_UNRESOLVED
-            base_weight = original.effective_update_weight
-            if base_weight is None:
-                base_weight = (
-                    original.reliability
-                    * original.independence
-                    * original.relevance
-                    * original.novelty
+            quality_cap = evidence_memory.SignalQualityAssessor().assess(
+                signal=signal,
+                event_type=original.evidence_type,
+            )
+            quality = {
+                metric: min(
+                    getattr(original, metric),
+                    getattr(quality_cap, metric),
                 )
+                for metric in evidence_memory.SIGNAL_QUALITY_METRICS
+            }
+            base_weight = (
+                quality["reliability"]
+                * quality["independence"]
+                * quality["relevance"]
+                * quality["novelty"]
+            )
             decision = manager.classify(
                 working_memory,
                 signal,
@@ -2030,9 +2039,13 @@ class StaticEventGate(EvidenceIntegrationGate):
                 frame_version=belief_state.frame_state.frame_version,
                 base_effective_weight=base_weight,
             )
+            if decision.correlation_status == "correlated_restatement":
+                quality["independence"] = 0.0
+                quality["novelty"] = min(quality["novelty"], 0.25)
             event = EvidenceEvent.model_validate(
                 {
                     **original.model_dump(mode="python"),
+                    **quality,
                     "schema_version": "v0.2",
                     "epistemic_origin": signal.provenance.epistemic_origin,
                     "derivation_root_id": signal.provenance.derivation_root_id,
@@ -2108,6 +2121,99 @@ class SuppliedIntegrationCore(BayesProbeCore):
 
     def _create_evidence_integration_gate(self):
         return self.supplied_gate
+
+
+def _policy_transition_event(
+    signal: ExternalSignal,
+    *,
+    event_id: str,
+    correlation_status: str,
+    effective_update_weight: float,
+    quality: dict[str, float] | None = None,
+    discard_reason: str | None = None,
+) -> EvidenceEvent:
+    quality = quality or {
+        "reliability": 0.8,
+        "independence": 0.8,
+        "relevance": 0.9,
+        "novelty": 0.8,
+        "specificity": 0.7,
+        "verifiability": 0.7,
+    }
+    return EvidenceEvent(
+        schema_version="v0.2",
+        id=event_id,
+        derived_from_signal=signal.id,
+        epistemic_origin=signal.provenance.epistemic_origin,
+        derivation_root_id=signal.provenance.derivation_root_id,
+        target_hypotheses=["H1", "H2"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=signal.raw_content,
+        likelihoods={
+            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
+            "H2": LikelihoodBand.NEUTRAL,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        frame_fit=FrameFit.UNDERDETERMINED,
+        correlation_status=correlation_status,
+        effective_update_weight=effective_update_weight,
+        discard_reason=discard_reason,
+        **quality,
+    )
+
+
+def _commit_self_declared_transition(
+    prior_memory: EvidenceMemorySnapshot,
+    *,
+    signal: ExternalSignal,
+    event: EvidenceEvent,
+    resulting_used_credit: float,
+) -> EvidenceMemorySnapshot:
+    manager = evidence_memory.EvidenceMemoryManager()
+    canonical = manager.classify(prior_memory, signal)
+    credit_key = (
+        f"{canonical.canonical_correlation_group}|H1|confirming"
+    )
+    declared = evidence_memory.EvidenceMemoryDecision(
+        correlation_status=event.correlation_status,
+        effective_update_weight=event.effective_update_weight,
+        discard_reason=event.discard_reason,
+        remaining_credit={credit_key: 1.0 - resulting_used_credit},
+        canonical_correlation_group=canonical.canonical_correlation_group,
+    )
+    return manager.commit(
+        prior_memory,
+        signal=signal,
+        event=event,
+        decision=declared,
+    )
+
+
+def _assert_supplied_transition_rejected_atomically(
+    tmp_path: Path,
+    *,
+    name: str,
+    state: BeliefState,
+    integration: EvidenceIntegrationResult,
+) -> None:
+    ledger_path = tmp_path / f"{name}.jsonl"
+    ledger_path.touch()
+    core = SuppliedIntegrationCore(
+        integration,
+        ledger=JsonlLedgerStore(ledger_path),
+    )
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="native evidence memory transition"):
+        core.integrate_cycle(
+            cycle=make_cycle(f"cycle_{name}"),
+            belief_state=state,
+            probe_set=make_empty_probe_set(f"cycle_{name}"),
+            signals=[make_active_signal()],
+        )
+
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
 
 
 def _native_transition_fixture():
@@ -2586,6 +2692,405 @@ def test_new_directional_event_cannot_skip_its_credit_commit(tmp_path: Path):
     assert ledger_path.read_bytes() == b""
 
 
+@pytest.mark.parametrize(
+    ("prior_used_credit", "declared_weight", "resulting_used_credit"),
+    [
+        pytest.param(0.25, 0.9, 1.15, id="inflated-weight"),
+        pytest.param(1.0, 0.2, 1.2, id="saturated-over-cap"),
+    ],
+)
+def test_self_consistent_inflated_credit_transition_fails_atomically(
+    tmp_path: Path,
+    prior_used_credit: float,
+    declared_weight: float,
+    resulting_used_credit: float,
+):
+    state = make_exact_belief_state()
+    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
+        _memory_signal(
+            "S_forged_credit",
+            "A fresh audit favors H1.",
+            root="root-forged-credit",
+        ),
+        run_id=state.run_id,
+    )
+    group = signal.provenance.correlation_group
+    prior_memory = state.evidence_memory.model_copy(
+        update={
+            "correlation_credit": {
+                f"{group}|H1|confirming": prior_used_credit
+            }
+        }
+    )
+    state = state.model_copy(update={"evidence_memory": prior_memory})
+    event = _policy_transition_event(
+        signal,
+        event_id="E_forged_credit",
+        correlation_status="correlated_novel",
+        effective_update_weight=declared_weight,
+    )
+    candidate = _commit_self_declared_transition(
+        prior_memory,
+        signal=signal,
+        event=event,
+        resulting_used_credit=resulting_used_credit,
+    )
+    assert candidate.correlation_credit[
+        f"{group}|H1|confirming"
+    ] == pytest.approx(resulting_used_credit)
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name=f"self_consistent_credit_{prior_used_credit}",
+        state=state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[event],
+            probe_candidates=[],
+            evidence_memory=candidate,
+            normalized_signals=[signal],
+        ),
+    )
+
+
+@pytest.mark.parametrize("repeat_kind", ["exact", "same_root"])
+def test_repeat_mislabeled_novel_with_positive_weight_fails_atomically(
+    tmp_path: Path,
+    repeat_kind: str,
+):
+    state = make_exact_belief_state()
+    normalizer = evidence_memory.SignalProvenanceNormalizer()
+    prior_signal = normalizer.normalize(
+        _memory_signal(
+            "S_repeat_prior",
+            "A stable audited observation.",
+            root="root-repeat-policy",
+        ),
+        run_id=state.run_id,
+    )
+    prior_memory = evidence_memory.EvidenceMemoryManager().remember_signal_identity(
+        state.evidence_memory,
+        prior_signal,
+    )
+    current_raw = _memory_signal(
+        "S_repeat_current",
+        (
+            prior_signal.raw_content
+            if repeat_kind == "exact"
+            else "A differently worded result from the same factual root."
+        ),
+        root="root-repeat-policy",
+    )
+    current_signal = normalizer.normalize(current_raw, run_id=state.run_id)
+    state = state.model_copy(update={"evidence_memory": prior_memory})
+    quality = None
+    declared_weight = 0.2
+    if repeat_kind == "exact":
+        quality = {
+            "reliability": 0.8,
+            "independence": 0.25,
+            "relevance": 0.9,
+            "novelty": 0.25,
+            "specificity": 0.7,
+            "verifiability": 0.7,
+        }
+        declared_weight = 0.045
+    event = _policy_transition_event(
+        current_signal,
+        event_id=f"E_mislabeled_{repeat_kind}",
+        correlation_status="novel",
+        effective_update_weight=declared_weight,
+        quality=quality,
+    )
+    candidate = _commit_self_declared_transition(
+        prior_memory,
+        signal=current_signal,
+        event=event,
+        resulting_used_credit=declared_weight,
+    )
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name=f"mislabeled_{repeat_kind}",
+        state=state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[event],
+            probe_candidates=[],
+            evidence_memory=candidate,
+            normalized_signals=[current_signal],
+        ),
+    )
+
+
+def test_inflated_model_origin_quality_and_matching_memory_fail_atomically(
+    tmp_path: Path,
+):
+    state = make_exact_belief_state()
+    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
+        ExternalSignal(
+            id="S_inflated_model_quality",
+            cycle_id="pending",
+            signal_kind=SignalKind.ACTIVE,
+            source_type="model_probe_gateway",
+            source="model_gateway:scripted",
+            raw_content="A model comparison favors H1.",
+            initial_target_hypotheses=["H1", "H2"],
+        ),
+        run_id=state.run_id,
+    )
+    inflated_quality = {
+        "reliability": 0.9,
+        "independence": 0.9,
+        "relevance": 0.9,
+        "novelty": 0.9,
+        "specificity": 0.9,
+        "verifiability": 0.9,
+    }
+    declared_weight = 0.9**4
+    event = _policy_transition_event(
+        signal,
+        event_id="E_inflated_model_quality",
+        correlation_status="novel",
+        effective_update_weight=declared_weight,
+        quality=inflated_quality,
+    )
+    candidate = _commit_self_declared_transition(
+        state.evidence_memory,
+        signal=signal,
+        event=event,
+        resulting_used_credit=declared_weight,
+    )
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name="inflated_model_quality",
+        state=state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[event],
+            probe_candidates=[],
+            evidence_memory=candidate,
+            normalized_signals=[signal],
+        ),
+    )
+
+
+def test_valid_lower_model_quality_transition_is_accepted(tmp_path: Path):
+    state = make_exact_belief_state()
+    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
+        ExternalSignal(
+            id="S_lower_model_quality",
+            cycle_id="pending",
+            signal_kind=SignalKind.ACTIVE,
+            source_type="model_probe_gateway",
+            source="model_gateway:scripted",
+            raw_content="A cautious model comparison favors H1.",
+            initial_target_hypotheses=["H1", "H2"],
+        ),
+        run_id=state.run_id,
+    )
+    lower_quality = {
+        "reliability": 0.4,
+        "independence": 0.2,
+        "relevance": 0.7,
+        "novelty": 0.3,
+        "specificity": 0.5,
+        "verifiability": 0.2,
+    }
+    base_weight = 0.4 * 0.2 * 0.7 * 0.3
+    manager = evidence_memory.EvidenceMemoryManager()
+    decision = manager.classify(
+        state.evidence_memory,
+        signal,
+        likelihoods={
+            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
+            "H2": LikelihoodBand.NEUTRAL,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        frame_version=state.frame_state.frame_version,
+        base_effective_weight=base_weight,
+    )
+    event = _policy_transition_event(
+        signal,
+        event_id="E_lower_model_quality",
+        correlation_status=decision.correlation_status,
+        effective_update_weight=decision.effective_update_weight,
+        quality=lower_quality,
+    )
+    candidate = manager.commit(
+        state.evidence_memory,
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+    ledger = JsonlLedgerStore(tmp_path / "lower-model-quality.jsonl")
+    result = SuppliedIntegrationCore(
+        EvidenceIntegrationResult(
+            evidence_events=[event],
+            probe_candidates=[],
+            evidence_memory=candidate,
+            normalized_signals=[signal],
+        ),
+        ledger=ledger,
+    ).integrate_cycle(
+        cycle=make_cycle("cycle_lower_model_quality"),
+        belief_state=state,
+        probe_set=make_empty_probe_set("cycle_lower_model_quality"),
+        signals=[make_active_signal()],
+    )
+
+    assert result.evidence_events == [event]
+    assert result.belief_state.evidence_memory == candidate
+
+
+def _existing_binding_transition_fixture():
+    state = make_exact_belief_state()
+    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
+        _memory_signal(
+            "S_binding_prior",
+            "The bound historical audit favors H1.",
+            root="root-binding-prior",
+        ),
+        run_id=state.run_id,
+    )
+    manager = evidence_memory.EvidenceMemoryManager()
+    quality = {
+        "reliability": 0.8,
+        "independence": 0.8,
+        "relevance": 0.9,
+        "novelty": 0.8,
+        "specificity": 0.7,
+        "verifiability": 0.7,
+    }
+    base_weight = 0.8 * 0.8 * 0.9 * 0.8
+    decision = manager.classify(
+        state.evidence_memory,
+        signal,
+        likelihoods={
+            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
+            "H2": LikelihoodBand.NEUTRAL,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        frame_version=state.frame_state.frame_version,
+        base_effective_weight=base_weight,
+    )
+    event = _policy_transition_event(
+        signal,
+        event_id="E_binding_prior",
+        correlation_status=decision.correlation_status,
+        effective_update_weight=decision.effective_update_weight,
+        quality=quality,
+    )
+    memory = manager.commit(
+        state.evidence_memory,
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+    payload = state.model_dump(mode="python")
+    payload.update(
+        {
+            "evidence_memory": memory.model_dump(mode="python"),
+            "ledger_refs": {
+                **state.ledger_refs,
+                "evidence_events": [event.id],
+            },
+        }
+    )
+    return BeliefState.model_validate(payload), signal, event
+
+
+@pytest.mark.parametrize("changed_identity", ["content", "root"])
+def test_existing_event_changed_signal_binding_fails_atomically(
+    tmp_path: Path,
+    changed_identity: str,
+):
+    state, prior_signal, prior_event = _existing_binding_transition_fixture()
+    raw_updates = {"id": f"S_binding_changed_{changed_identity}"}
+    provenance_updates = {}
+    if changed_identity == "content":
+        raw_updates["raw_content"] = "A materially changed historical audit."
+    else:
+        provenance_updates["derivation_root_id"] = "root-binding-changed"
+    raw_updates["provenance"] = prior_signal.provenance.model_copy(
+        update=provenance_updates
+    )
+    changed_signal = evidence_memory.SignalProvenanceNormalizer().normalize(
+        prior_signal.model_copy(update=raw_updates),
+        run_id=state.run_id,
+    )
+    replay_event = EvidenceEvent.model_validate(
+        {
+            **prior_event.model_dump(mode="python"),
+            "derived_from_signal": changed_signal.id,
+            "epistemic_origin": changed_signal.provenance.epistemic_origin,
+            "derivation_root_id": changed_signal.provenance.derivation_root_id,
+            "evidence_type": EvidenceType.NEUTRAL,
+            "likelihoods": {
+                "H1": LikelihoodBand.NEUTRAL,
+                "H2": LikelihoodBand.NEUTRAL,
+            },
+            "correlation_status": "duplicate_exact",
+            "effective_update_weight": 0.0,
+            "discard_reason": "duplicate evidence event id",
+        }
+    )
+    candidate = evidence_memory.EvidenceMemoryManager().remember_signal_identity(
+        state.evidence_memory,
+        changed_signal,
+    )
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name=f"changed_existing_binding_{changed_identity}",
+        state=state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[replay_event],
+            probe_candidates=[],
+            evidence_memory=candidate,
+            normalized_signals=[changed_signal],
+        ),
+    )
+
+
+def test_existing_event_missing_historical_binding_fails_atomically(
+    tmp_path: Path,
+):
+    state, signal, prior_event = _existing_binding_transition_fixture()
+    memory_without_binding = state.evidence_memory.model_copy(
+        update={"event_signal_identity_digests": {}}
+    )
+    state = BeliefState.model_validate(
+        {
+            **state.model_dump(mode="python"),
+            "evidence_memory": memory_without_binding.model_dump(mode="python"),
+        }
+    )
+    replay_event = EvidenceEvent.model_validate(
+        {
+            **prior_event.model_dump(mode="python"),
+            "evidence_type": EvidenceType.NEUTRAL,
+            "likelihoods": {
+                "H1": LikelihoodBand.NEUTRAL,
+                "H2": LikelihoodBand.NEUTRAL,
+            },
+            "correlation_status": "duplicate_exact",
+            "effective_update_weight": 0.0,
+            "discard_reason": "duplicate evidence event id",
+        }
+    )
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name="missing_existing_binding",
+        state=state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[replay_event],
+            probe_candidates=[],
+            evidence_memory=memory_without_binding,
+            normalized_signals=[signal],
+        ),
+    )
+
+
 def _native_event_contract_case(*, replay: bool, malformed: str):
     state = make_exact_belief_state()
     signal = evidence_memory.SignalProvenanceNormalizer().normalize(
@@ -2849,7 +3354,7 @@ def test_core_integrates_named_and_unresolved_mass_atomically(tmp_path: Path):
         unresolved_likelihood=LikelihoodBand.MODERATELY_CONFIRMING,
         frame_fit=FrameFit.SUPPORTS_UNRESOLVED,
         effective_update_weight=1.0,
-        epistemic_origin="model_reasoning",
+        epistemic_origin="tool_result",
         derivation_root_id="model-root",
     )
     ledger = JsonlLedgerStore(tmp_path / "open-core-ledger.jsonl")

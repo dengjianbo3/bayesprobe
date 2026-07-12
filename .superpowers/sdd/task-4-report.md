@@ -932,3 +932,79 @@ through the explicit v0.1 migration function.
 
 No blocking concerns. Serialized migrated envelopes intentionally remain
 unauthorized for the v0.1 provider route because the receipt is runtime-only.
+
+## Review Fix 17
+
+### Design Decision
+
+- Made `EvidenceMemoryManager.validate_transition` reconstruct the sole valid
+  native transition by replaying the shared classification policy and
+  `EvidenceMemoryManager.commit` from the prior snapshot. Each signal captures
+  its classification snapshot before any of that signal's events are committed,
+  preserving production projection decomposition semantics without a second
+  credit algorithm.
+- Moved `SignalQuality`, `SignalQualityAssessor`, and the quality metric set into
+  the cycle-safe evidence-memory layer. `bayesprobe.evidence` imports and
+  re-exports the same public assessor, so production event construction and
+  transition verification cannot drift while existing imports remain valid.
+- Treats historical event binding proof as a batch-wide first preflight. Every
+  event id already in `ledger_refs.evidence_events` must have a prior binding
+  equal to the current normalized signal digest before any identity remembering
+  or classification. Only after all bindings pass does full-batch lineage
+  validation and formal ordered reconstruction begin.
+
+### Changes
+
+- Replaced `_expected_transition_credit`, append-only field checklists, and
+  event-declared weight summation with exact classify/commit replay. New events
+  must match independently derived correlation status, quality-product weight,
+  remaining-credit cap, and policy discard semantics; the supplied candidate
+  memory must equal the reconstructed snapshot exactly.
+- Enforced source/type/origin and low-reliability quality ceilings on all six
+  event quality fields. Lower provider overrides remain valid. Exact duplicates
+  use duplicate caps, while same-root restatements must retain zero independence
+  and bounded novelty.
+- Added ordered event grouping for one-event signals and projection primary plus
+  `_source` secondary pairs. Both projection decisions use the signal-start
+  snapshot, while commits remain in event order.
+- Moved EvidenceGate's historical binding check ahead of its identity-only
+  preflight shadow. Existing events can now perform only exact identity-only
+  remembering; lifecycle, binding, credit, discovery, and counterevidence state
+  must remain unchanged.
+- Added atomic adversarial regressions for self-consistent inflated and over-cap
+  credit, exact/same-root events mislabeled novel, inflated model-origin quality,
+  changed or missing replay bindings, and preflight ordering. Added positive
+  coverage for lower quality, production transitions, projection two-event
+  reconstruction, identity-only replay, and saturation. Updated the test-only
+  `StaticEventGate` to synthesize policy-valid native quality and weight.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py::test_self_consistent_inflated_credit_transition_fails_atomically tests/test_core_cycles.py::test_repeat_mislabeled_novel_with_positive_weight_fails_atomically tests/test_core_cycles.py::test_inflated_model_origin_quality_and_matching_memory_fail_atomically tests/test_core_cycles.py::test_valid_lower_model_quality_transition_is_accepted tests/test_core_cycles.py::test_existing_event_changed_signal_binding_fails_atomically tests/test_core_cycles.py::test_existing_event_missing_historical_binding_fails_atomically tests/test_evidence_memory.py::test_existing_binding_preflight_precedes_identity_or_classification tests/test_evidence_memory.py::test_memory_transition_validator_accepts_projection_two_event_reconstruction -q -p no:cacheprovider` -> `9 failed, 2 passed in 0.64s`.
+- GREEN: the same focused command -> `11 passed in 0.28s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `513 passed in 1.63s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `331 passed in 0.37s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1325 passed, 10 skipped in 10.60s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check`, `git diff --check 67abac9..HEAD` -> clean before commit; the exact range check is repeated after commit.
+
+### Self-Review
+
+- A later replay conflict is checked against prior memory before any earlier new
+  event can be remembered or classified. Missing and changed bindings therefore
+  fail before solver and ledger work; Core tests prove unchanged input state,
+  memory, and ledger bytes.
+- Every new event's base weight comes only from its recursively validated quality
+  fields. Classification independently applies duplicate/root/source grouping,
+  directional remaining credit, and the configured cumulative cap. Commit then
+  owns accepted/discard history, bindings, credit, and counterevidence, and exact
+  snapshot equality rejects every forged matching event/memory pair.
+- Production direct evidence, neutral/schema-discard behavior, projection pairs,
+  exact replay identity additions, same-root zero-independence handling, and
+  saturated ledger-visible events all remain covered by the focused GREEN suite.
+  The preflight shadow is used only for lineage validation; formal classification
+  still starts from prior memory in normalized signal order.
+
+### Concerns
+
+No blocking concerns.

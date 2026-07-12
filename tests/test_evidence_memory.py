@@ -751,6 +751,122 @@ def test_memory_transition_validator_rejects_replay_only_credit_replacement():
         )
 
 
+def test_existing_binding_preflight_precedes_identity_or_classification(
+    monkeypatch,
+):
+    state = _state()
+    first = EvidenceIntegrationGate(model_gateway=CountingGateway()).integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[
+            _signal(
+                "S_binding_preflight_prior",
+                "The original bound observation.",
+                root="root-binding-preflight",
+            )
+        ],
+    )
+    prior_event = first.evidence_events[0]
+    changed_signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_binding_preflight_changed",
+            "A changed observation must not reuse the event.",
+            root="root-binding-preflight-changed",
+        ),
+        run_id=state.run_id,
+    )
+    replay_event = EvidenceEvent.model_validate(
+        {
+            **prior_event.model_dump(mode="python"),
+            "derived_from_signal": changed_signal.id,
+            "epistemic_origin": changed_signal.provenance.epistemic_origin,
+            "derivation_root_id": changed_signal.provenance.derivation_root_id,
+            "evidence_type": EvidenceType.NEUTRAL,
+            "likelihoods": {
+                "A": LikelihoodBand.NEUTRAL,
+                "B": LikelihoodBand.NEUTRAL,
+            },
+            "correlation_status": "duplicate_exact",
+            "effective_update_weight": 0.0,
+            "discard_reason": "duplicate evidence event id",
+        }
+    )
+    manager = EvidenceMemoryManager()
+    candidate = manager.remember_signal_identity(
+        first.evidence_memory,
+        changed_signal,
+    )
+    calls = []
+    original_remember = EvidenceMemoryManager.remember_signal_identity
+    original_classify = EvidenceMemoryManager.classify
+
+    def recording_remember(self, *args, **kwargs):
+        calls.append("remember")
+        return original_remember(self, *args, **kwargs)
+
+    def recording_classify(self, *args, **kwargs):
+        calls.append("classify")
+        return original_classify(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        EvidenceMemoryManager,
+        "remember_signal_identity",
+        recording_remember,
+    )
+    monkeypatch.setattr(
+        EvidenceMemoryManager,
+        "classify",
+        recording_classify,
+    )
+
+    with pytest.raises(ValueError, match="evidence memory transition"):
+        manager.validate_transition(
+            first.evidence_memory,
+            candidate,
+            evidence_events=[replay_event],
+            normalized_signals=[changed_signal],
+            existing_evidence_ids=[prior_event.id],
+            frame_version=state.frame_state.frame_version,
+        )
+
+    assert calls == []
+
+
+def test_memory_transition_validator_accepts_projection_two_event_reconstruction():
+    state = _state()
+    result = EvidenceIntegrationGate().integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[
+            ExternalSignal(
+                id="S_projection_transition",
+                cycle_id="pending",
+                signal_kind=SignalKind.PASSIVE,
+                source_type="external_agent_projection",
+                source="agent-a",
+                raw_content=(
+                    "Agent A cites source X as evidence while favoring option A."
+                ),
+                initial_target_hypotheses=["A", "B"],
+            )
+        ],
+    )
+
+    validated = EvidenceMemoryManager().validate_transition(
+        state.evidence_memory,
+        result.evidence_memory,
+        evidence_events=result.evidence_events,
+        normalized_signals=result.normalized_signals,
+        existing_evidence_ids=[],
+        frame_version=state.frame_state.frame_version,
+    )
+
+    assert len(result.evidence_events) == 2
+    assert validated == result.evidence_memory
+
+
 def test_native_event_identity_is_unique_for_duplicate_signals_in_one_batch():
     gateway = CountingGateway()
     duplicate = _signal("S_duplicate_1", "The same audited observation.")

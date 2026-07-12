@@ -8,6 +8,9 @@ from typing import Any
 from bayesprobe.evidence_memory import (
     EvidenceMemoryDecision,
     EvidenceMemoryManager,
+    SIGNAL_QUALITY_METRICS,
+    SignalQuality,
+    SignalQualityAssessor,
     SignalProvenanceNormalizer,
     canonical_signal_identity_digest,
 )
@@ -26,7 +29,6 @@ from bayesprobe.model_gateway import (
 from bayesprobe.schemas import (
     BeliefState,
     CycleRecord,
-    EpistemicOrigin,
     EvidenceEvent,
     EvidenceMemorySnapshot,
     EvidenceType,
@@ -58,16 +60,6 @@ class _PlannedSignalEvents:
     event_ids: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class SignalQuality:
-    reliability: float
-    independence: float
-    relevance: float
-    novelty: float
-    specificity: float
-    verifiability: float
-
-
 class _EvidenceJudgmentFailure(Exception):
     def __init__(
         self,
@@ -78,130 +70,6 @@ class _EvidenceJudgmentFailure(Exception):
         super().__init__(str(error))
         self.error = error
         self.model_trace = model_trace
-
-
-class SignalQualityAssessor:
-    def assess(
-        self,
-        *,
-        signal: ExternalSignal,
-        event_type: EvidenceType,
-        is_duplicate: bool = False,
-    ) -> SignalQuality:
-        if event_type == EvidenceType.SOURCE_CLAIM:
-            quality = SignalQuality(
-                reliability=0.5,
-                independence=0.5,
-                relevance=0.7,
-                novelty=0.7,
-                specificity=0.6,
-                verifiability=0.65,
-            )
-        elif signal.source_type == "model_probe_gateway":
-            quality = SignalQuality(
-                reliability=0.55,
-                independence=0.35,
-                relevance=0.85,
-                novelty=0.55,
-                specificity=0.65,
-                verifiability=0.3,
-            )
-        elif signal.source_type == "python_sandbox":
-            quality = SignalQuality(
-                reliability=0.75,
-                independence=0.35,
-                relevance=0.85,
-                novelty=0.65,
-                specificity=0.9,
-                verifiability=0.9,
-            )
-        elif signal.source_type == "external_agent_projection":
-            quality = SignalQuality(
-                reliability=0.55,
-                independence=0.45,
-                relevance=0.75,
-                novelty=0.6,
-                specificity=0.6,
-                verifiability=0.4,
-            )
-        else:
-            quality = SignalQuality(
-                reliability=0.8,
-                independence=0.8,
-                relevance=0.9,
-                novelty=0.8,
-                specificity=0.7,
-                verifiability=0.7,
-            )
-
-        if _has_low_reliability_cue(signal.raw_content):
-            quality = SignalQuality(
-                reliability=min(quality.reliability, 0.35),
-                independence=quality.independence,
-                relevance=quality.relevance,
-                novelty=quality.novelty,
-                specificity=quality.specificity,
-                verifiability=min(quality.verifiability, 0.4),
-            )
-
-        if is_duplicate:
-            quality = SignalQuality(
-                reliability=quality.reliability,
-                independence=0.25,
-                relevance=quality.relevance,
-                novelty=0.25,
-                specificity=quality.specificity,
-                verifiability=quality.verifiability,
-            )
-
-        if signal.provenance is not None:
-            quality = _cap_quality_for_origin(
-                quality,
-                signal.provenance.epistemic_origin,
-            )
-
-        return quality
-
-
-def _cap_quality_for_origin(
-    quality: SignalQuality,
-    origin: EpistemicOrigin,
-) -> SignalQuality:
-    if origin in {EpistemicOrigin.MODEL_REASONING, EpistemicOrigin.DERIVED_SUMMARY}:
-        cap = SignalQuality(
-            reliability=0.55,
-            independence=0.35,
-            relevance=0.85,
-            novelty=0.55,
-            specificity=0.65,
-            verifiability=0.3,
-        )
-    elif origin == EpistemicOrigin.TOOL_RESULT:
-        cap = SignalQuality(
-            reliability=0.8,
-            independence=0.8,
-            relevance=0.9,
-            novelty=0.8,
-            specificity=0.9,
-            verifiability=0.9,
-        )
-    elif origin == EpistemicOrigin.AGENT_MESSAGE:
-        cap = SignalQuality(
-            reliability=0.55,
-            independence=0.45,
-            relevance=0.75,
-            novelty=0.6,
-            specificity=0.6,
-            verifiability=0.4,
-        )
-    else:
-        return quality
-    return SignalQuality(
-        **{
-            metric: min(getattr(quality, metric), getattr(cap, metric))
-            for metric in _QUALITY_METRICS
-        }
-    )
 
 
 class ProjectionDecomposer:
@@ -278,6 +146,16 @@ class EvidenceIntegrationGate:
             planned_signals=planned_signals,
             native_v02=native_v02,
         )
+        for planned in planned_signals:
+            for event_id in planned.event_ids:
+                if event_id in prior_evidence_ids:
+                    self._memory_manager.validate_event_signal_identity(
+                        working_memory,
+                        event_id=event_id,
+                        signal=planned.signal,
+                        require_existing=True,
+                    )
+
         preflight_memory = working_memory
         for planned in planned_signals:
             signal = planned.signal
@@ -292,14 +170,6 @@ class EvidenceIntegrationGate:
                 preflight_memory,
                 signal,
             )
-            for event_id in planned.event_ids:
-                if event_id in prior_evidence_ids:
-                    self._memory_manager.validate_event_signal_identity(
-                        preflight_memory,
-                        event_id=event_id,
-                        signal=signal,
-                        require_existing=True,
-                    )
 
         for planned in planned_signals:
             signal = planned.signal
@@ -1174,16 +1044,6 @@ def _verification_probe_candidate(
     )
 
 
-_QUALITY_METRICS = (
-    "reliability",
-    "independence",
-    "relevance",
-    "novelty",
-    "specificity",
-    "verifiability",
-)
-
-
 _ZERO_QUALITY_OVERRIDES = {
     "reliability": 0.0,
     "independence": 0.0,
@@ -1199,7 +1059,10 @@ def _apply_quality_overrides(
     quality: SignalQuality,
     overrides: dict[str, float],
 ) -> SignalQuality:
-    values = {metric: getattr(quality, metric) for metric in _QUALITY_METRICS}
+    values = {
+        metric: getattr(quality, metric)
+        for metric in SIGNAL_QUALITY_METRICS
+    }
     for metric, value in overrides.items():
         if metric in values:
             values[metric] = value
@@ -1219,11 +1082,6 @@ def _is_duplicate_signal(
 
 def _content_signature(content: str) -> str:
     return " ".join(content.lower().split())
-
-
-def _has_low_reliability_cue(content: str) -> bool:
-    content_lower = content.lower()
-    return any(cue in content_lower for cue in ("rumor", "unverified", "hearsay", "maybe", "unclear"))
 
 
 def _endorsed_hypothesis(content: str, hypotheses: list[Hypothesis]) -> str | None:

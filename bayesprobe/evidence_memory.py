@@ -13,6 +13,7 @@ from bayesprobe.schemas import (
     EpistemicOrigin,
     EvidenceEvent,
     EvidenceMemorySnapshot,
+    EvidenceType,
     ExternalSignal,
     LikelihoodBand,
     SignalProvenance,
@@ -33,6 +34,151 @@ CorrelationStatus = Literal[
 
 _CURRENT_MEMORY_VERSION = 2
 _SUPPORTED_MEMORY_VERSIONS = frozenset({1, 2})
+SIGNAL_QUALITY_METRICS = (
+    "reliability",
+    "independence",
+    "relevance",
+    "novelty",
+    "specificity",
+    "verifiability",
+)
+
+
+@dataclass(frozen=True)
+class SignalQuality:
+    reliability: float
+    independence: float
+    relevance: float
+    novelty: float
+    specificity: float
+    verifiability: float
+
+
+class SignalQualityAssessor:
+    def assess(
+        self,
+        *,
+        signal: ExternalSignal,
+        event_type: EvidenceType,
+        is_duplicate: bool = False,
+    ) -> SignalQuality:
+        if event_type == EvidenceType.SOURCE_CLAIM:
+            quality = SignalQuality(
+                reliability=0.5,
+                independence=0.5,
+                relevance=0.7,
+                novelty=0.7,
+                specificity=0.6,
+                verifiability=0.65,
+            )
+        elif signal.source_type == "model_probe_gateway":
+            quality = SignalQuality(
+                reliability=0.55,
+                independence=0.35,
+                relevance=0.85,
+                novelty=0.55,
+                specificity=0.65,
+                verifiability=0.3,
+            )
+        elif signal.source_type == "python_sandbox":
+            quality = SignalQuality(
+                reliability=0.75,
+                independence=0.35,
+                relevance=0.85,
+                novelty=0.65,
+                specificity=0.9,
+                verifiability=0.9,
+            )
+        elif signal.source_type == "external_agent_projection":
+            quality = SignalQuality(
+                reliability=0.55,
+                independence=0.45,
+                relevance=0.75,
+                novelty=0.6,
+                specificity=0.6,
+                verifiability=0.4,
+            )
+        else:
+            quality = SignalQuality(
+                reliability=0.8,
+                independence=0.8,
+                relevance=0.9,
+                novelty=0.8,
+                specificity=0.7,
+                verifiability=0.7,
+            )
+
+        if _has_low_reliability_cue(signal.raw_content):
+            quality = SignalQuality(
+                reliability=min(quality.reliability, 0.35),
+                independence=quality.independence,
+                relevance=quality.relevance,
+                novelty=quality.novelty,
+                specificity=quality.specificity,
+                verifiability=min(quality.verifiability, 0.4),
+            )
+
+        if is_duplicate:
+            quality = SignalQuality(
+                reliability=quality.reliability,
+                independence=0.25,
+                relevance=quality.relevance,
+                novelty=0.25,
+                specificity=quality.specificity,
+                verifiability=quality.verifiability,
+            )
+
+        provenance = signal.provenance
+        if provenance is not None:
+            quality = _cap_quality_for_origin(
+                quality,
+                provenance.epistemic_origin,
+            )
+        return quality
+
+
+def _cap_quality_for_origin(
+    quality: SignalQuality,
+    origin: EpistemicOrigin,
+) -> SignalQuality:
+    if origin in {
+        EpistemicOrigin.MODEL_REASONING,
+        EpistemicOrigin.DERIVED_SUMMARY,
+    }:
+        cap = SignalQuality(
+            reliability=0.55,
+            independence=0.35,
+            relevance=0.85,
+            novelty=0.55,
+            specificity=0.65,
+            verifiability=0.3,
+        )
+    elif origin == EpistemicOrigin.TOOL_RESULT:
+        cap = SignalQuality(
+            reliability=0.8,
+            independence=0.8,
+            relevance=0.9,
+            novelty=0.8,
+            specificity=0.9,
+            verifiability=0.9,
+        )
+    elif origin == EpistemicOrigin.AGENT_MESSAGE:
+        cap = SignalQuality(
+            reliability=0.55,
+            independence=0.45,
+            relevance=0.75,
+            novelty=0.6,
+            specificity=0.6,
+            verifiability=0.4,
+        )
+    else:
+        return quality
+    return SignalQuality(
+        **{
+            metric: min(getattr(quality, metric), getattr(cap, metric))
+            for metric in SIGNAL_QUALITY_METRICS
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -328,142 +474,107 @@ class EvidenceMemoryManager:
         existing_evidence_ids: list[str],
         frame_version: int,
     ) -> None:
-        signals_by_id: dict[str, ExternalSignal] = {}
+        ordered_events = _unique_transition_events(evidence_events)
+        signal_event_groups = _transition_signal_event_groups(
+            normalized_signals,
+            ordered_events,
+        )
+        existing_ids = set(existing_evidence_ids)
+
+        for signal, events in signal_event_groups:
+            provenance = _required_provenance(signal)
+            for event in events:
+                if (
+                    event.epistemic_origin != provenance.epistemic_origin
+                    or event.derivation_root_id != provenance.derivation_root_id
+                ):
+                    raise ValueError("evidence memory transition is invalid")
+                if event.id in existing_ids:
+                    self.validate_event_signal_identity(
+                        prior,
+                        event_id=event.id,
+                        signal=signal,
+                        require_existing=True,
+                    )
+
         identity_shadow = prior
         for signal in normalized_signals:
-            existing_signal = signals_by_id.get(signal.id)
-            if (
-                existing_signal is not None
-                and canonical_signal_identity_digest(existing_signal)
-                != canonical_signal_identity_digest(signal)
-            ):
-                raise ValueError("evidence memory transition is invalid")
-            signals_by_id[signal.id] = signal
             identity_shadow = self.remember_signal_identity(
                 identity_shadow,
                 signal,
             )
+        for signal in normalized_signals:
+            self.validate_signal_lineage(identity_shadow, signal)
 
-        identity_fields = (
-            "content_fingerprints",
-            "source_content_fingerprints",
-            "derivation_roots",
-        )
-        if candidate.memory_version != identity_shadow.memory_version or any(
-            getattr(candidate, field_name) != getattr(identity_shadow, field_name)
-            for field_name in identity_fields
-        ):
-            raise ValueError("evidence memory transition is invalid")
+        expected = prior
+        quality_assessor = SignalQualityAssessor()
+        for signal, events in signal_event_groups:
+            classification_snapshot = expected
+            for event in events:
+                if event.id in existing_ids:
+                    expected = self.remember_signal_identity(
+                        expected,
+                        signal,
+                    )
+                    continue
 
-        events_by_id: dict[str, EvidenceEvent] = {}
-        ordered_events: list[EvidenceEvent] = []
-        for event in evidence_events:
-            prior_event = events_by_id.get(event.id)
-            if prior_event is not None:
-                if prior_event != event:
+                base_weight = (
+                    event.reliability
+                    * event.independence
+                    * event.relevance
+                    * event.novelty
+                )
+                decision = self.classify(
+                    classification_snapshot,
+                    signal,
+                    likelihoods=event.likelihoods,
+                    unresolved_likelihood=event.unresolved_likelihood,
+                    frame_version=frame_version,
+                    base_effective_weight=base_weight,
+                )
+                quality_cap = quality_assessor.assess(
+                    signal=signal,
+                    event_type=event.evidence_type,
+                    is_duplicate=(
+                        decision.correlation_status == "duplicate_exact"
+                    ),
+                )
+                if any(
+                    getattr(event, metric) > getattr(quality_cap, metric)
+                    for metric in SIGNAL_QUALITY_METRICS
+                ):
                     raise ValueError("evidence memory transition is invalid")
-                continue
-            events_by_id[event.id] = event
-            ordered_events.append(event)
-        if set(signals_by_id) != {
-            event.derived_from_signal for event in ordered_events
-        }:
-            raise ValueError("evidence memory transition is invalid")
-        for event in ordered_events:
-            provenance = _required_provenance(
-                signals_by_id[event.derived_from_signal]
-            )
-            if (
-                event.epistemic_origin != provenance.epistemic_origin
-                or event.derivation_root_id != provenance.derivation_root_id
-            ):
-                raise ValueError("evidence memory transition is invalid")
+                if (
+                    decision.correlation_status == "correlated_restatement"
+                    and (
+                        event.independence != 0.0
+                        or event.novelty > 0.25
+                    )
+                ):
+                    raise ValueError("evidence memory transition is invalid")
+                if (
+                    event.correlation_status != decision.correlation_status
+                    or event.effective_update_weight is None
+                    or not math.isclose(
+                        event.effective_update_weight,
+                        decision.effective_update_weight,
+                        rel_tol=1e-12,
+                        abs_tol=1e-12,
+                    )
+                    or not _matches_required_discard_semantics(
+                        event.discard_reason,
+                        decision.discard_reason,
+                    )
+                ):
+                    raise ValueError("evidence memory transition is invalid")
+                expected = self.commit(
+                    expected,
+                    signal=signal,
+                    event=event,
+                    decision=decision,
+                )
 
-        existing_ids = set(existing_evidence_ids)
-        new_events = [
-            event for event in ordered_events if event.id not in existing_ids
-        ]
-        expected_accepted = [
-            event.id for event in new_events if event.discard_reason is None
-        ]
-        expected_discarded = [
-            encode_discard_history_entry(event.id, event.discard_reason)
-            for event in new_events
-            if event.discard_reason is not None
-        ]
-        if candidate.accepted_evidence_ids != [
-            *prior.accepted_evidence_ids,
-            *expected_accepted,
-        ]:
-            raise ValueError("evidence memory transition is invalid")
-        if candidate.discard_and_schema_history != [
-            *prior.discard_and_schema_history,
-            *expected_discarded,
-        ]:
-            raise ValueError("evidence memory transition is invalid")
-
-        for event_id, digest in prior.event_signal_identity_digests.items():
-            if candidate.event_signal_identity_digests.get(event_id) != digest:
-                raise ValueError("evidence memory transition is invalid")
-        added_binding_ids = set(
-            candidate.event_signal_identity_digests
-        ).difference(prior.event_signal_identity_digests)
-        if added_binding_ids != {event.id for event in new_events}:
-            raise ValueError("evidence memory transition is invalid")
-        for event in new_events:
-            signal = signals_by_id[event.derived_from_signal]
-            if candidate.event_signal_identity_digests.get(
-                event.id
-            ) != canonical_signal_identity_digest(signal):
-                raise ValueError("evidence memory transition is invalid")
-
-        prior_discovery_count = len(prior.discovery_evidence_ids)
-        if (
-            candidate.discovery_evidence_ids[:prior_discovery_count]
-            != prior.discovery_evidence_ids
-            or not set(
-                candidate.discovery_evidence_ids[prior_discovery_count:]
-            ).issubset(expected_accepted)
-        ):
-            raise ValueError("evidence memory transition is invalid")
-
-        expected_counterevidence = {
-            hypothesis_id: list(event_ids)
-            for hypothesis_id, event_ids in (
-                prior.counterevidence_ids_by_hypothesis.items()
-            )
-        }
-        for event in new_events:
-            if event.discard_reason is not None:
-                continue
-            for hypothesis_id, band in event.likelihoods.items():
-                if _direction_for(band) == "disconfirming":
-                    expected_counterevidence.setdefault(
-                        hypothesis_id,
-                        [],
-                    ).append(event.id)
-        if (
-            candidate.counterevidence_ids_by_hypothesis
-            != expected_counterevidence
-        ):
-            raise ValueError("evidence memory transition is invalid")
-
-        expected_credit = _expected_transition_credit(
-            prior.correlation_credit,
-            new_events,
-            signals_by_id=signals_by_id,
-            identity_snapshot=identity_shadow,
-            frame_version=frame_version,
-        )
-        if set(candidate.correlation_credit) != set(expected_credit) or any(
-            not math.isclose(
-                candidate.correlation_credit[key],
-                expected_credit[key],
-                rel_tol=1e-12,
-                abs_tol=1e-12,
-            )
-            for key in expected_credit
-        ):
+        if candidate != expected:
             raise ValueError("evidence memory transition is invalid")
 
     def classify(
@@ -649,6 +760,14 @@ def _origin_for(signal: ExternalSignal) -> EpistemicOrigin:
     if source_type == "derived_summary":
         return EpistemicOrigin.DERIVED_SUMMARY
     return EpistemicOrigin.EXTERNAL_OBSERVATION
+
+
+def _has_low_reliability_cue(content: str) -> bool:
+    content_lower = content.lower()
+    return any(
+        cue in content_lower
+        for cue in ("rumor", "unverified", "hearsay", "maybe", "unclear")
+    )
 
 
 def _clean_text(value: str) -> str:
@@ -858,43 +977,68 @@ def _credit_keys(
     return keys
 
 
-def _expected_transition_credit(
-    prior_credit: dict[str, float],
-    events: list[EvidenceEvent],
-    *,
-    signals_by_id: dict[str, ExternalSignal],
-    identity_snapshot: EvidenceMemorySnapshot,
-    frame_version: int,
-) -> dict[str, float]:
-    expected = dict(prior_credit)
-    for event in events:
-        if (
-            event.discard_reason is not None
-            or not event.effective_update_weight
-        ):
+def _unique_transition_events(
+    evidence_events: list[EvidenceEvent],
+) -> list[EvidenceEvent]:
+    events_by_id: dict[str, EvidenceEvent] = {}
+    ordered_events: list[EvidenceEvent] = []
+    for event in evidence_events:
+        prior_event = events_by_id.get(event.id)
+        if prior_event is not None:
+            if prior_event != event:
+                raise ValueError("evidence memory transition is invalid")
             continue
-        signal = signals_by_id[event.derived_from_signal]
-        identity = _source_content_identity_parts(
-            identity_snapshot.source_content_fingerprints[signal.id]
-        )
-        if identity is None:
-            raise ValueError("evidence memory transition is invalid")
-        group = identity[2]
-        for key in _credit_keys(
-            group,
-            event.likelihoods,
-            unresolved_likelihood=event.unresolved_likelihood,
-            frame_version=frame_version,
+        events_by_id[event.id] = event
+        ordered_events.append(event)
+    return ordered_events
+
+
+def _transition_signal_event_groups(
+    normalized_signals: list[ExternalSignal],
+    ordered_events: list[EvidenceEvent],
+) -> list[tuple[ExternalSignal, list[EvidenceEvent]]]:
+    groups: list[tuple[ExternalSignal, list[EvidenceEvent]]] = []
+    event_index = 0
+    for signal in normalized_signals:
+        if (
+            event_index >= len(ordered_events)
+            or ordered_events[event_index].derived_from_signal != signal.id
         ):
-            expected[key] = expected.get(key, 0.0) + float(
-                event.effective_update_weight
-            )
-    return expected
+            raise ValueError("evidence memory transition is invalid")
+        primary = ordered_events[event_index]
+        events = [primary]
+        event_index += 1
+        if (
+            event_index < len(ordered_events)
+            and ordered_events[event_index].derived_from_signal == signal.id
+            and ordered_events[event_index].id == f"{primary.id}_source"
+        ):
+            events.append(ordered_events[event_index])
+            event_index += 1
+        groups.append((signal, events))
+    if event_index != len(ordered_events):
+        raise ValueError("evidence memory transition is invalid")
+    return groups
+
+
+def _matches_required_discard_semantics(
+    event_reason: str | None,
+    decision_reason: str | None,
+) -> bool:
+    policy_reasons = {"duplicate_exact", "correlation_credit_saturated"}
+    if decision_reason is not None:
+        return event_reason == decision_reason
+    if event_reason in policy_reasons:
+        return False
+    return True
 
 
 __all__ = [
     "EvidenceMemoryDecision",
     "EvidenceMemoryManager",
+    "SIGNAL_QUALITY_METRICS",
+    "SignalQuality",
+    "SignalQualityAssessor",
     "SignalProvenanceNormalizer",
     "derive_deterministic_computation_root",
 ]
