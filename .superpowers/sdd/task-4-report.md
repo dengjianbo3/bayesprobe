@@ -518,3 +518,45 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 9
+
+### Changes
+
+- Required every provider-facing lifecycle to be a recursively validated v0.2
+  `BeliefState` with a v0.2 `TaskFrame`, `FrameState`, and `EvidenceMemory`.
+- Required the legacy route to carry both `LEGACY_MIGRATION` and one exact
+  migration-writer marker. Tag-only, schema-mismatched, trace-invalid, missing,
+  and structurally incoherent envelopes now fail at lifecycle entry.
+- Extracted both recognized marker values into one migration interface consumed
+  by the two migration writers and lifecycle resolver.
+- Replaced tag-only positive fixtures with validated v0.1 states passed through
+  the real migration helper. Both markers now exercise EvidenceGate,
+  ModelBackedProbeToolGateway, and PythonAugmentedProbeToolGateway at v0.1;
+  existing native coverage remains v0.2.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_explicit_migration_route_completes_exact_legacy_shape_auditably tests/test_evidence_memory.py::test_invalid_migration_envelope_rejects_before_provider_or_memory tests/test_probe_executor.py::test_model_backed_probe_gateway_uses_v01_only_for_explicit_migration tests/test_probe_executor.py::test_model_backed_probe_gateway_rejects_invalid_migration_envelope tests/evaluation/test_python_probe.py::test_explicit_migration_uses_v01_for_every_python_model_route tests/evaluation/test_python_probe.py::test_invalid_python_migration_envelope_rejects_without_side_effects tests/evaluation/test_python_probe.py::test_unmigrated_v01_python_gateway_rejects_before_model_or_sandbox tests/test_core_cycles.py::test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append -q -p no:cacheprovider` -> `31 failed, 9 passed in 0.73s`.
+- GREEN: the same focused command -> `40 passed in 0.38s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `380 passed in 0.96s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `306 passed in 0.38s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1167 passed, 10 skipped in 9.51s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- Envelope checks and recursive reconstruction run before native/legacy route
+  selection. Every invalid fixture proves unchanged state and zero provider
+  requests; Python additionally proves no sandbox/counter activity, and core
+  proves byte-empty ledger output.
+- A legacy tag cannot select v0.1 by itself. Only the exact markers emitted by
+  `migrate_belief_state_v0_1` and `migrate_task_frame_v0_1` are accepted, and
+  the shared constants prevent resolver/writer drift.
+- Both positive marker fixtures first validate as v0.1 `BeliefState` objects,
+  then migrate to complete v0.2 runtime envelopes before reaching any gateway.
+
+### Concerns
+
+No blocking concerns.

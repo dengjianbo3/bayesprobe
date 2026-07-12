@@ -26,6 +26,16 @@ from bayesprobe.schemas import (
 )
 
 
+BELIEF_STATE_V01_TO_V02_MIGRATION_MARKER = "belief_state_v0.1_to_v0.2"
+TASK_FRAME_V01_TO_V02_MIGRATION_MARKER = "task_frame_v0.1_to_v0.2"
+RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS = frozenset(
+    {
+        BELIEF_STATE_V01_TO_V02_MIGRATION_MARKER,
+        TASK_FRAME_V01_TO_V02_MIGRATION_MARKER,
+    }
+)
+
+
 class _V01Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -252,7 +262,7 @@ def migrate_task_frame_v0_1(payload: Any) -> TaskFrame:
         framing_method=FramingMethod.LEGACY_MIGRATION,
         framing_trace={
             **legacy.framing_trace,
-            "migration": "task_frame_v0.1_to_v0.2",
+            "migration": TASK_FRAME_V01_TO_V02_MIGRATION_MARKER,
         },
     )
 
@@ -311,7 +321,9 @@ def _categorical_task_frame(legacy: _V01BeliefState) -> TaskFrame:
             ),
         ),
         framing_method=FramingMethod.LEGACY_MIGRATION,
-        framing_trace={"migration": "belief_state_v0.1_to_v0.2"},
+        framing_trace={
+            "migration": BELIEF_STATE_V01_TO_V02_MIGRATION_MARKER
+        },
     )
 
 
@@ -361,4 +373,10 @@ def migrate_belief_state_v0_1(payload: Any) -> BeliefState:
     )
 
 
-__all__ = ["migrate_belief_state_v0_1", "migrate_task_frame_v0_1"]
+__all__ = [
+    "BELIEF_STATE_V01_TO_V02_MIGRATION_MARKER",
+    "RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS",
+    "TASK_FRAME_V01_TO_V02_MIGRATION_MARKER",
+    "migrate_belief_state_v0_1",
+    "migrate_task_frame_v0_1",
+]

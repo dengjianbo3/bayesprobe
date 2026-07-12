@@ -1922,12 +1922,77 @@ def test_invalid_committed_memory_fails_before_any_cycle_ledger_append(tmp_path:
     assert ledger.read_all() == []
 
 
-def test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append(tmp_path: Path):
+@pytest.mark.parametrize(
+    "invalid_envelope",
+    [
+        "missing_task_frame",
+        "tag_only",
+        "v01_task_frame",
+        "missing_trace",
+        "fake_trace",
+        "missing_frame_state",
+        "missing_evidence_memory",
+        "incoherent_frame_state",
+    ],
+)
+def test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append(
+    tmp_path: Path,
+    invalid_envelope: str,
+):
     gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
     ledger_path = tmp_path / "invalid-lifecycle-ledger.jsonl"
     ledger_path.touch()
-    state = make_exact_belief_state().model_copy(update={"task_frame": None})
-    prior_memory = state.evidence_memory.model_dump(mode="json")
+    native = make_exact_belief_state()
+    migrated = make_explicit_legacy_belief_state(cycle_id="cycle_0")
+    if invalid_envelope == "missing_task_frame":
+        state = native.model_copy(update={"task_frame": None})
+    elif invalid_envelope == "tag_only":
+        state = native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={"framing_method": FramingMethod.LEGACY_MIGRATION}
+                )
+            }
+        )
+    elif invalid_envelope == "v01_task_frame":
+        state = migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"schema_version": "v0.1"}
+                )
+            }
+        )
+    elif invalid_envelope == "missing_trace":
+        state = migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"framing_trace": {}}
+                )
+            }
+        )
+    elif invalid_envelope == "fake_trace":
+        state = migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"framing_trace": {"migration": "caller_asserted"}}
+                )
+            }
+        )
+    elif invalid_envelope == "missing_frame_state":
+        state = migrated.model_copy(update={"frame_state": None})
+    elif invalid_envelope == "missing_evidence_memory":
+        state = migrated.model_copy(update={"evidence_memory": None})
+    elif invalid_envelope == "incoherent_frame_state":
+        state = migrated.model_copy(
+            update={
+                "frame_state": migrated.frame_state.model_copy(
+                    update={"frame_id": "mismatched_frame"}
+                )
+            }
+        )
+    else:
+        raise AssertionError(f"unknown invalid lifecycle envelope: {invalid_envelope}")
+    prior_state = state.model_dump(mode="json")
     core = BayesProbeCore(ledger=JsonlLedgerStore(ledger_path), model_gateway=gateway)
     cycle = make_cycle("cycle_invalid_lifecycle")
 
@@ -1940,7 +2005,7 @@ def test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append(tmp_path
         )
 
     assert gateway.requests == []
-    assert state.evidence_memory.model_dump(mode="json") == prior_memory
+    assert state.model_dump(mode="json") == prior_state
     assert ledger_path.read_bytes() == b""
 
 

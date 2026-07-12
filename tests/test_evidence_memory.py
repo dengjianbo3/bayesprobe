@@ -14,6 +14,7 @@ from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.schemas import (
     AnswerChoice,
+    BeliefState,
     CycleRecord,
     CycleSignalShape,
     EpistemicOrigin,
@@ -26,6 +27,23 @@ from bayesprobe.schemas import (
     ProbeSet,
     SignalKind,
     SignalProvenance,
+)
+from bayesprobe.task_framing import migrate_legacy_belief_state
+
+
+_MIGRATION_MARKERS = (
+    "belief_state_v0.1_to_v0.2",
+    "task_frame_v0.1_to_v0.2",
+)
+_INVALID_MIGRATION_ENVELOPES = (
+    "tag_only",
+    "v01_belief_state",
+    "v01_task_frame",
+    "missing_trace",
+    "fake_trace",
+    "missing_frame_state",
+    "missing_evidence_memory",
+    "incoherent_frame_state",
 )
 
 
@@ -62,6 +80,82 @@ def _state():
             ],
         )
     ).belief_state
+
+
+def _migrated_state(marker: str) -> BeliefState:
+    payload = _state().model_dump(mode="python")
+    payload.update(
+        {
+            "schema_version": "v0.1",
+            "frame_state": None,
+            "evidence_memory": None,
+        }
+    )
+    if marker == "belief_state_v0.1_to_v0.2":
+        payload["task_frame"] = None
+    else:
+        payload["task_frame"]["schema_version"] = "v0.1"
+        payload["task_frame"]["framing_method"] = FramingMethod.EXPLICIT
+        payload["task_frame"]["framing_trace"] = {"schema_version": "v0.1"}
+    legacy_state = BeliefState.model_validate(payload)
+
+    migrated = migrate_legacy_belief_state(legacy_state)
+
+    assert legacy_state.schema_version == "v0.1"
+    assert migrated.task_frame.framing_trace["migration"] == marker
+    return migrated
+
+
+def _invalid_migration_envelope(kind: str) -> BeliefState:
+    native = _state()
+    migrated = _migrated_state("belief_state_v0.1_to_v0.2")
+    if kind == "tag_only":
+        return native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={"framing_method": FramingMethod.LEGACY_MIGRATION}
+                )
+            }
+        )
+    if kind == "v01_belief_state":
+        return migrated.model_copy(update={"schema_version": "v0.1"})
+    if kind == "v01_task_frame":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"schema_version": "v0.1"}
+                )
+            }
+        )
+    if kind == "missing_trace":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"framing_trace": {}}
+                )
+            }
+        )
+    if kind == "fake_trace":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"framing_trace": {"migration": "caller_asserted"}}
+                )
+            }
+        )
+    if kind == "missing_frame_state":
+        return migrated.model_copy(update={"frame_state": None})
+    if kind == "missing_evidence_memory":
+        return migrated.model_copy(update={"evidence_memory": None})
+    if kind == "incoherent_frame_state":
+        return migrated.model_copy(
+            update={
+                "frame_state": migrated.frame_state.model_copy(
+                    update={"frame_id": "mismatched_frame"}
+                )
+            }
+        )
+    raise AssertionError(f"unknown invalid migration envelope: {kind}")
 
 
 def _cycle(index: int) -> CycleRecord:
@@ -1417,7 +1511,10 @@ def test_native_v02_route_rejects_exact_legacy_four_field_judgment():
     assert event.model_trace["metadata"]["judgment_route"] == "native_v0.2"
 
 
-def test_explicit_migration_route_completes_exact_legacy_shape_auditably():
+@pytest.mark.parametrize("migration_marker", _MIGRATION_MARKERS)
+def test_explicit_migration_route_completes_exact_legacy_shape_auditably(
+    migration_marker,
+):
     class LegacyFourFieldGateway(CountingGateway):
         def complete_structured(self, request):
             self.requests.append(request)
@@ -1432,14 +1529,7 @@ def test_explicit_migration_route_completes_exact_legacy_shape_auditably():
             }
 
     gateway = LegacyFourFieldGateway()
-    state = _state()
-    state = state.model_copy(
-        update={
-            "task_frame": state.task_frame.model_copy(
-                update={"framing_method": FramingMethod.LEGACY_MIGRATION}
-            )
-        }
-    )
+    state = _migrated_state(migration_marker)
 
     result = EvidenceIntegrationGate(model_gateway=gateway).integrate(
         cycle=_cycle(1),
@@ -1450,11 +1540,32 @@ def test_explicit_migration_route_completes_exact_legacy_shape_auditably():
 
     event = result.evidence_events[0]
     assert event.discard_reason is None
+    assert state.task_frame.framing_trace["migration"] == migration_marker
     assert gateway.requests[0].schema_version == "v0.1"
     assert gateway.requests[0].metadata["judgment_route"] == "legacy_v0.1_migration"
     assert event.model_trace["metadata"]["judgment_route"] == (
         "legacy_v0.1_migration"
     )
+
+
+@pytest.mark.parametrize("invalid_envelope", _INVALID_MIGRATION_ENVELOPES)
+def test_invalid_migration_envelope_rejects_before_provider_or_memory(
+    invalid_envelope,
+):
+    gateway = CountingGateway()
+    state = _invalid_migration_envelope(invalid_envelope)
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        EvidenceIntegrationGate(model_gateway=gateway).integrate(
+            cycle=_cycle(1),
+            belief_state=state,
+            probe_set=_probe_set(1),
+            signals=[_signal("S_invalid_migration", "Must not be judged.")],
+        )
+
+    assert gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
 
 
 def test_unmigrated_v01_direct_gate_rejects_before_provider_or_memory():

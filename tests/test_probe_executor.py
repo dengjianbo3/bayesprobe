@@ -28,12 +28,30 @@ from bayesprobe.schemas import (
     CycleSignalShape,
     EpistemicOrigin,
     ExternalSignal,
+    FramingMethod,
     Hypothesis,
     ProbeDesign,
     ProbeSet,
     SignalKind,
 )
 from bayesprobe.task_framing import migrate_legacy_belief_state
+
+
+_MIGRATION_MARKERS = (
+    "belief_state_v0.1_to_v0.2",
+    "task_frame_v0.1_to_v0.2",
+)
+_INVALID_MIGRATION_ENVELOPES = (
+    "bare_v01",
+    "tag_only",
+    "v01_belief_state",
+    "v01_task_frame",
+    "missing_trace",
+    "fake_trace",
+    "missing_frame_state",
+    "missing_evidence_memory",
+    "incoherent_frame_state",
+)
 
 
 class RecordingGateway:
@@ -107,6 +125,94 @@ def make_belief_state() -> BeliefState:
             ),
         ],
     )
+
+
+def make_native_belief_state() -> BeliefState:
+    return BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_exec",
+            problem="Which answer choice is correct?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    ).belief_state
+
+
+def make_migrated_belief_state(marker: str) -> BeliefState:
+    payload = make_native_belief_state().model_dump(mode="python")
+    payload.update(
+        {
+            "schema_version": "v0.1",
+            "frame_state": None,
+            "evidence_memory": None,
+        }
+    )
+    if marker == "belief_state_v0.1_to_v0.2":
+        payload["task_frame"] = None
+    else:
+        payload["task_frame"]["schema_version"] = "v0.1"
+        payload["task_frame"]["framing_method"] = FramingMethod.EXPLICIT
+        payload["task_frame"]["framing_trace"] = {"schema_version": "v0.1"}
+    legacy_state = BeliefState.model_validate(payload)
+
+    migrated = migrate_legacy_belief_state(legacy_state)
+
+    assert legacy_state.schema_version == "v0.1"
+    assert migrated.task_frame.framing_trace["migration"] == marker
+    return migrated
+
+
+def make_invalid_migration_envelope(kind: str) -> BeliefState:
+    native = make_native_belief_state()
+    migrated = make_migrated_belief_state("belief_state_v0.1_to_v0.2")
+    if kind == "bare_v01":
+        return make_belief_state()
+    if kind == "tag_only":
+        return native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={"framing_method": FramingMethod.LEGACY_MIGRATION}
+                )
+            }
+        )
+    if kind == "v01_belief_state":
+        return migrated.model_copy(update={"schema_version": "v0.1"})
+    if kind == "v01_task_frame":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"schema_version": "v0.1"}
+                )
+            }
+        )
+    if kind == "missing_trace":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"framing_trace": {}}
+                )
+            }
+        )
+    if kind == "fake_trace":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"framing_trace": {"migration": "caller_asserted"}}
+                )
+            }
+        )
+    if kind == "missing_frame_state":
+        return migrated.model_copy(update={"frame_state": None})
+    if kind == "missing_evidence_memory":
+        return migrated.model_copy(update={"evidence_memory": None})
+    if kind == "incoherent_frame_state":
+        return migrated.model_copy(
+            update={
+                "frame_state": migrated.frame_state.model_copy(
+                    update={"frame_id": "mismatched_frame"}
+                )
+            }
+        )
+    raise AssertionError(f"unknown invalid migration envelope: {kind}")
 
 
 def make_probe(
@@ -320,29 +426,39 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert signal.provenance.session_id == "run_exec"
 
 
-def test_model_backed_probe_gateway_rejects_unmigrated_v01_state():
-    gateway = ModelBackedProbeToolGateway(
-        ScriptedModelGateway(
-            responses={"execute_probe": {"raw_content": "Must not execute."}}
-        )
+@pytest.mark.parametrize("invalid_envelope", _INVALID_MIGRATION_ENVELOPES)
+def test_model_backed_probe_gateway_rejects_invalid_migration_envelope(
+    invalid_envelope,
+):
+    model_gateway = ScriptedModelGateway(
+        responses={"execute_probe": {"raw_content": "Must not execute."}}
     )
+    gateway = ModelBackedProbeToolGateway(model_gateway)
+    state = make_invalid_migration_envelope(invalid_envelope)
+    prior_state = state.model_dump(mode="json")
 
-    with pytest.raises(ValueError, match="explicit legacy migration"):
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
         gateway.execute_probe(
-            probe=make_probe("P_unmigrated", ["H1", "H2"]),
+            probe=make_probe("P_invalid_migration", ["H1", "H2"]),
             context=ProbeExecutionContext(
                 run_id="run_exec",
                 cycle_id="run_exec_cycle_1",
-                belief_state=make_belief_state(),
+                belief_state=state,
             ),
         )
 
+    assert model_gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
 
-def test_model_backed_probe_gateway_uses_v01_only_for_explicit_migration():
+
+@pytest.mark.parametrize("migration_marker", _MIGRATION_MARKERS)
+def test_model_backed_probe_gateway_uses_v01_only_for_explicit_migration(
+    migration_marker,
+):
     model_gateway = ScriptedModelGateway(
         responses={"execute_probe": {"raw_content": "Legacy migrated execution."}}
     )
-    migrated = migrate_legacy_belief_state(make_belief_state())
+    migrated = make_migrated_belief_state(migration_marker)
 
     ModelBackedProbeToolGateway(model_gateway).execute_probe(
         probe=make_probe("P_migrated", ["H1", "H2"]),
@@ -354,6 +470,8 @@ def test_model_backed_probe_gateway_uses_v01_only_for_explicit_migration():
     )
 
     assert migrated.task_frame.framing_method.value == "legacy_migration"
+    assert migrated.task_frame.framing_trace["migration"] == migration_marker
+    assert model_gateway.requests[0].prompt_version == "v0.1"
     assert model_gateway.requests[0].schema_version == "v0.1"
 
 

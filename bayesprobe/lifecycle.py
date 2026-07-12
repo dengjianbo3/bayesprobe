@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
+from bayesprobe.migrations import RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS
 from bayesprobe.schemas import BeliefState, FramingMethod
 
 
@@ -17,20 +18,41 @@ class BeliefLifecycle(StrEnum):
         return "v0.1"
 
 
-def resolve_belief_lifecycle(belief_state: BeliefState) -> BeliefLifecycle:
-    task_frame = belief_state.task_frame
-    if (
-        task_frame is not None
-        and task_frame.framing_method == FramingMethod.LEGACY_MIGRATION
-    ):
-        return BeliefLifecycle.LEGACY_V01_MIGRATION
-    if (
-        belief_state.schema_version == "v0.2"
-        and task_frame is not None
-        and belief_state.frame_state is not None
-        and belief_state.evidence_memory is not None
-    ):
-        return BeliefLifecycle.NATIVE_V02
-    raise ValueError(
+def _invalid_lifecycle_error() -> ValueError:
+    return ValueError(
         "invalid belief lifecycle: requires native v0.2 or explicit legacy migration"
     )
+
+
+def _validated_runtime_envelope(belief_state: BeliefState) -> BeliefState:
+    task_frame = belief_state.task_frame
+    if (
+        belief_state.schema_version != "v0.2"
+        or task_frame is None
+        or task_frame.schema_version != "v0.2"
+        or belief_state.frame_state is None
+        or belief_state.evidence_memory is None
+    ):
+        raise _invalid_lifecycle_error()
+    try:
+        return BeliefState.model_validate(
+            belief_state.model_dump(mode="python")
+        )
+    except (TypeError, ValueError):
+        raise _invalid_lifecycle_error() from None
+
+
+def resolve_belief_lifecycle(belief_state: BeliefState) -> BeliefLifecycle:
+    validated = _validated_runtime_envelope(belief_state)
+    task_frame = validated.task_frame
+    if task_frame is None:
+        raise _invalid_lifecycle_error()
+    if task_frame.framing_method != FramingMethod.LEGACY_MIGRATION:
+        return BeliefLifecycle.NATIVE_V02
+    marker = task_frame.framing_trace.get("migration")
+    if (
+        not isinstance(marker, str)
+        or marker not in RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS
+    ):
+        raise _invalid_lifecycle_error()
+    return BeliefLifecycle.LEGACY_V01_MIGRATION

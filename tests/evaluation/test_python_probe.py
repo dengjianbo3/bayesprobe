@@ -19,6 +19,7 @@ from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.evidence import SignalQualityAssessor
 from bayesprobe.probe_executor import ProbeExecutionContext
 from bayesprobe.schemas import (
+    BeliefState,
     CycleRecord,
     CycleSignalShape,
     EpistemicOrigin,
@@ -29,9 +30,24 @@ from bayesprobe.schemas import (
     ProbeSet,
     SignalKind,
 )
+from bayesprobe.task_framing import migrate_legacy_belief_state
 
 
 IMAGE_DIGEST = "sha256:" + "a" * 64
+_MIGRATION_MARKERS = (
+    "belief_state_v0.1_to_v0.2",
+    "task_frame_v0.1_to_v0.2",
+)
+_INVALID_MIGRATION_ENVELOPES = (
+    "tag_only",
+    "v01_belief_state",
+    "v01_task_frame",
+    "missing_trace",
+    "fake_trace",
+    "missing_frame_state",
+    "missing_evidence_memory",
+    "incoherent_frame_state",
+)
 POLICY_SNAPSHOT = {
     "runtime": "docker",
     "image_digest": IMAGE_DIGEST,
@@ -412,6 +428,87 @@ def probe_context():
     return probe, context
 
 
+def migrated_python_belief_state(native: BeliefState, marker: str) -> BeliefState:
+    payload = native.model_dump(mode="python")
+    payload.update(
+        {
+            "schema_version": "v0.1",
+            "frame_state": None,
+            "evidence_memory": None,
+        }
+    )
+    if marker == "belief_state_v0.1_to_v0.2":
+        payload["task_frame"] = None
+    else:
+        payload["task_frame"]["schema_version"] = "v0.1"
+        payload["task_frame"]["framing_method"] = FramingMethod.EXPLICIT
+        payload["task_frame"]["framing_trace"] = {"schema_version": "v0.1"}
+    legacy_state = BeliefState.model_validate(payload)
+
+    migrated = migrate_legacy_belief_state(legacy_state)
+
+    assert legacy_state.schema_version == "v0.1"
+    assert migrated.task_frame.framing_trace["migration"] == marker
+    return migrated
+
+
+def invalid_python_migration_envelope(
+    native: BeliefState,
+    kind: str,
+) -> BeliefState:
+    migrated = migrated_python_belief_state(
+        native,
+        "belief_state_v0.1_to_v0.2",
+    )
+    if kind == "tag_only":
+        return native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={"framing_method": FramingMethod.LEGACY_MIGRATION}
+                )
+            }
+        )
+    if kind == "v01_belief_state":
+        return migrated.model_copy(update={"schema_version": "v0.1"})
+    if kind == "v01_task_frame":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"schema_version": "v0.1"}
+                )
+            }
+        )
+    if kind == "missing_trace":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"framing_trace": {}}
+                )
+            }
+        )
+    if kind == "fake_trace":
+        return migrated.model_copy(
+            update={
+                "task_frame": migrated.task_frame.model_copy(
+                    update={"framing_trace": {"migration": "caller_asserted"}}
+                )
+            }
+        )
+    if kind == "missing_frame_state":
+        return migrated.model_copy(update={"frame_state": None})
+    if kind == "missing_evidence_memory":
+        return migrated.model_copy(update={"evidence_memory": None})
+    if kind == "incoherent_frame_state":
+        return migrated.model_copy(
+            update={
+                "frame_state": migrated.frame_state.model_copy(
+                    update={"frame_id": "mismatched_frame"}
+                )
+            }
+        )
+    raise AssertionError(f"unknown invalid migration envelope: {kind}")
+
+
 def python_plan(code="print(2 + 2)"):
     return {
         "mode": "python",
@@ -772,14 +869,14 @@ def test_invalid_plan_gets_one_plan_repair():
     assert {request.schema_version for request in model.requests} == {"v0.2"}
 
 
-def test_explicit_migration_uses_v01_for_every_python_model_route():
+@pytest.mark.parametrize("migration_marker", _MIGRATION_MARKERS)
+def test_explicit_migration_uses_v01_for_every_python_model_route(
+    migration_marker,
+):
     probe, context = probe_context()
-    migrated_state = context.belief_state.model_copy(
-        update={
-            "task_frame": context.belief_state.task_frame.model_copy(
-                update={"framing_method": FramingMethod.LEGACY_MIGRATION}
-            )
-        }
+    migrated_state = migrated_python_belief_state(
+        context.belief_state,
+        migration_marker,
     )
     migrated_context = ProbeExecutionContext(
         run_id=context.run_id,
@@ -827,8 +924,39 @@ def test_explicit_migration_uses_v01_for_every_python_model_route():
         "repair_python_probe_code",
         "execute_probe",
     }
+    assert migrated_state.task_frame.framing_trace["migration"] == migration_marker
     assert {request.prompt_version for request in requests} == {"v0.1"}
     assert {request.schema_version for request in requests} == {"v0.1"}
+
+
+@pytest.mark.parametrize("invalid_envelope", _INVALID_MIGRATION_ENVELOPES)
+def test_invalid_python_migration_envelope_rejects_without_side_effects(
+    invalid_envelope,
+):
+    probe, context = probe_context()
+    state = invalid_python_migration_envelope(
+        context.belief_state,
+        invalid_envelope,
+    )
+    invalid_context = ProbeExecutionContext(
+        run_id=context.run_id,
+        cycle_id=context.cycle_id,
+        belief_state=state,
+        metadata=dict(context.metadata),
+    )
+    model = SequenceModelGateway([python_plan()])
+    sandbox = FakeSandbox([execution_record()])
+    gateway = PythonAugmentedProbeToolGateway(model, sandbox)
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        gateway.execute_probe(probe=probe, context=invalid_context)
+
+    assert model.requests == []
+    assert sandbox.preflight_calls == 0
+    assert sandbox.requests == []
+    assert set(gateway.process_metrics.values()) == {0}
+    assert state.model_dump(mode="json") == prior_state
 
 
 def test_unmigrated_v01_python_gateway_rejects_before_model_or_sandbox():
