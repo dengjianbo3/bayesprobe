@@ -1,6 +1,7 @@
 import pytest
 
 from bayesprobe.migrations import (
+    _has_v01_migration_receipt,
     migrate_belief_state_v0_1,
     migrate_task_frame_v0_1,
 )
@@ -206,3 +207,43 @@ def test_native_public_fields_cannot_forge_legacy_migration_authority():
 
     with pytest.raises(ValueError, match="invalid belief lifecycle"):
         resolve_belief_lifecycle(forged)
+
+
+def test_migration_receipt_is_bound_to_the_exact_public_envelope():
+    migrated = migrate_belief_state_v0_1(legacy_belief_state_payload())
+
+    changed_copy = migrated.model_copy(update={"cycle_id": "changed_cycle"})
+    mutated = migrated.model_copy(deep=True)
+    mutated.cycle_id = "mutated_cycle"
+
+    for changed in (changed_copy, mutated):
+        assert _has_v01_migration_receipt(changed) is False
+        with pytest.raises(ValueError, match="invalid belief lifecycle"):
+            resolve_belief_lifecycle(changed)
+
+
+def test_authentic_receipt_cannot_be_transferred_to_another_public_envelope():
+    migrated = migrate_belief_state_v0_1(legacy_belief_state_payload())
+    native_payload = migrated.model_dump(mode="python")
+    native_payload.update(
+        {
+            "belief_state_id": "native_replacement",
+            "cycle_id": "native_cycle",
+            "cycle_index": 7,
+        }
+    )
+    replacement = BeliefState.model_validate(native_payload)
+
+    transferred = migrated.model_copy(
+        update={
+            field_name: getattr(replacement, field_name)
+            for field_name in BeliefState.model_fields
+        }
+    )
+
+    assert transferred.model_dump(mode="python") == replacement.model_dump(
+        mode="python"
+    )
+    assert _has_v01_migration_receipt(transferred) is False
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        resolve_belief_lifecycle(transferred)

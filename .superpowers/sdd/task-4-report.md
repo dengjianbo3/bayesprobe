@@ -871,3 +871,64 @@ No blocking concerns. A serialized migrated v0.2 envelope deliberately loses
 legacy downgrade authority and fails lifecycle resolution; callers that require
 the v0.1 provider contract must retain the in-memory migrated state or re-enter
 through the explicit v0.1 migration function.
+
+## Review Fix 16
+
+### Design Decision
+
+- Replaced the transferable singleton migration capability with a private,
+  non-serialized receipt containing a SHA-256 digest of the exact public
+  `BeliefState` envelope. Lifecycle resolution recomputes and compares that
+  digest; unchanged shallow/deep copies retain authority, while any public
+  mutation or field transfer invalidates it. Core issues a newly bound receipt
+  only after source authorization, solver/policy work, recursive final-state
+  validation, and the complete internal transition succeed.
+- Moved native Evidence Memory ownership into one
+  `EvidenceMemoryManager.validate_transition` transaction. It recursively
+  validates both snapshots, reconstructs exact signal identities, requires
+  append-only lifecycle/history and binding changes, preserves discovery and
+  counterevidence refs, and computes the exact cumulative directional-credit
+  result from current accepted events. The same check runs for new, replay-only,
+  existing-event-only, and no-event integration results.
+- Added a native event gate before solver/ledger work. Every native input event,
+  including replays, is recursively revalidated as v0.2, must carry effective
+  weight and provenance, must match its normalized signal origin/root, and must
+  carry the unresolved-likelihood shape required by the current frame. Authentic
+  explicit migration remains on the reviewed v0.1 compatibility route.
+
+### Verification
+
+- Receipt RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_migrations.py::test_migration_receipt_is_bound_to_the_exact_public_envelope tests/test_migrations.py::test_authentic_receipt_cannot_be_transferred_to_another_public_envelope tests/test_evidence_memory.py::test_invalid_migration_envelope_rejects_before_provider_or_memory tests/test_probe_executor.py::test_model_backed_probe_gateway_rejects_invalid_migration_envelope tests/evaluation/test_python_probe.py::test_invalid_python_migration_envelope_rejects_without_side_effects tests/test_core_cycles.py::test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append -q -p no:cacheprovider` -> `6 failed, 37 passed in 0.46s`.
+- Transition/event RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_memory_transition_validator_accepts_production_and_identity_only_replay tests/test_evidence_memory.py::test_memory_transition_validator_rejects_replay_only_credit_replacement tests/test_core_cycles.py::test_native_memory_replacement_regressions_fail_before_solver_or_ledger tests/test_core_cycles.py::test_existing_event_only_result_cannot_rewrite_directional_credit tests/test_core_cycles.py::test_native_event_contract_fails_before_solver_or_ledger -q -p no:cacheprovider` -> `16 failed in 0.71s`.
+- Credit-omission RED found during self-review: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py::test_new_directional_event_cannot_skip_its_credit_commit -q -p no:cacheprovider` -> `1 failed in 0.23s`.
+- Receipt GREEN: the receipt RED command above -> `43 passed in 0.42s`.
+- Transition/event GREEN: the transition/event RED command above -> `16 passed in 0.31s`; the expanded no-event/existing-event replacement matrix -> `28 passed in 0.35s`.
+- Credit-omission GREEN: its RED command above -> `1 passed in 0.20s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `502 passed in 1.58s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `331 passed in 0.37s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1314 passed, 10 skipped in 10.36s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check 67abac9..HEAD`, `git diff --check 67abac9`, and `git diff --check` -> clean with the complete pre-commit patch.
+
+### Self-Review
+
+- Receipt tests cover unchanged shallow/deep copies, direct and in-place public
+  mutation, all-public-field transfer, public serialization round-trip, and
+  zero-side-effect rejection in EvidenceGate, model-backed probe, Python probe,
+  and Core. Existing exact migrated replay proves Core rebinds authority after a
+  valid internal state update; both real migration markers retain v0.1 routing.
+- Transition tests use recursively valid adversarial snapshots. They drop or
+  rewrite identities, accepted/discard history, bindings, discovery refs,
+  counterevidence refs, and credit; the complete matrix runs for both no-event
+  and existing-event-only results. Real production commits and replay identity-
+  only additions remain accepted, while omitted new credit is also rejected.
+- Native event tests cover new and replayed v0.1 events plus bypass-constructed
+  v0.2 events with null effective weight. Correct bindings cannot authorize
+  either shape, and state/ledger/provider assertions prove failure precedes the
+  solver and commit. Existing authentic migration tests retain v0.1 event
+  compatibility.
+
+### Concerns
+
+No blocking concerns. Serialized migrated envelopes intentionally remain
+unauthorized for the v0.1 provider route because the receipt is runtime-only.

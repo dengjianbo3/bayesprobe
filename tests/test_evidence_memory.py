@@ -45,6 +45,7 @@ _NONLEGACY_FRAMING_METHODS = tuple(
 _INVALID_MIGRATION_ENVELOPES = (
     "tag_only",
     "forged_recognized_marker",
+    "transferred_receipt",
     "v01_belief_state",
     "v01_task_frame",
     "missing_trace",
@@ -151,6 +152,25 @@ def _invalid_migration_envelope(kind: str) -> BeliefState:
                         },
                     }
                 )
+            }
+        )
+    if kind == "transferred_receipt":
+        forged_native = native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={
+                        "framing_method": FramingMethod.LEGACY_MIGRATION,
+                        "framing_trace": {
+                            "migration": "belief_state_v0.1_to_v0.2"
+                        },
+                    }
+                )
+            }
+        )
+        return migrated.model_copy(
+            update={
+                field_name: getattr(forged_native, field_name)
+                for field_name in BeliefState.model_fields
             }
         )
     if kind == "v01_belief_state":
@@ -632,6 +652,103 @@ def test_native_event_id_and_binding_share_canonical_signal_identity_digest():
     assert result.evidence_memory.event_signal_identity_digests == {
         event.id: digest
     }
+
+
+def test_memory_transition_validator_accepts_production_and_identity_only_replay():
+    state = _state()
+    gate = EvidenceIntegrationGate(model_gateway=CountingGateway())
+    first_signal = _signal(
+        "S_transition_first",
+        "A stable transition observation.",
+        root="root-transition",
+    )
+    first = gate.integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[first_signal],
+    )
+    manager = EvidenceMemoryManager()
+
+    validated_first = manager.validate_transition(
+        state.evidence_memory,
+        first.evidence_memory,
+        evidence_events=first.evidence_events,
+        normalized_signals=first.normalized_signals,
+        existing_evidence_ids=state.ledger_refs.get("evidence_events", []),
+        frame_version=state.frame_state.frame_version,
+    )
+
+    replay_state = state.model_copy(
+        update={
+            "evidence_memory": validated_first,
+            "ledger_refs": {
+                **state.ledger_refs,
+                "evidence_events": [
+                    event.id for event in first.evidence_events
+                ],
+            },
+        }
+    )
+    replay = gate.integrate(
+        cycle=_cycle(1),
+        belief_state=replay_state,
+        probe_set=_probe_set(1),
+        signals=[
+            first_signal.model_copy(update={"id": "S_transition_replay"})
+        ],
+    )
+
+    validated_replay = manager.validate_transition(
+        validated_first,
+        replay.evidence_memory,
+        evidence_events=replay.evidence_events,
+        normalized_signals=replay.normalized_signals,
+        existing_evidence_ids=replay_state.ledger_refs["evidence_events"],
+        frame_version=replay_state.frame_state.frame_version,
+    )
+
+    assert validated_replay == replay.evidence_memory
+    assert set(validated_replay.content_fingerprints) == {
+        "S_transition_first",
+        "S_transition_replay",
+    }
+    assert validated_replay.accepted_evidence_ids == (
+        validated_first.accepted_evidence_ids
+    )
+    assert validated_replay.correlation_credit == validated_first.correlation_credit
+
+
+def test_memory_transition_validator_rejects_replay_only_credit_replacement():
+    state = _state()
+    first = EvidenceIntegrationGate(model_gateway=CountingGateway()).integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[
+            _signal(
+                "S_transition_credit",
+                "A directional transition observation.",
+                root="root-transition-credit",
+            )
+        ],
+    )
+    assert first.evidence_memory.correlation_credit
+    replaced = first.evidence_memory.model_copy(
+        update={"correlation_credit": {}}
+    )
+
+    with pytest.raises(ValueError, match="evidence memory transition"):
+        EvidenceMemoryManager().validate_transition(
+            first.evidence_memory,
+            replaced,
+            evidence_events=first.evidence_events,
+            normalized_signals=first.normalized_signals,
+            existing_evidence_ids=[
+                event.id for event in first.evidence_events
+            ],
+            frame_version=state.frame_state.frame_version,
+        )
 
 
 def test_native_event_identity_is_unique_for_duplicate_signals_in_one_batch():

@@ -31,6 +31,8 @@ from bayesprobe.schemas import (
     FrameAdequacyStatus,
     FrameFit,
     Hypothesis,
+    HypothesisCompetition,
+    HypothesisCoverage,
     HypothesisEvolution,
     HypothesisStatus,
     EvolutionOperation,
@@ -1887,6 +1889,12 @@ class StaticEventGate(EvidenceIntegrationGate):
         assert belief_state.task_frame is not None
         assert signals
         self.seen_framing_methods.append(belief_state.task_frame.framing_method)
+        if belief_state.task_frame.framing_method != FramingMethod.LEGACY_MIGRATION:
+            return self._integrate_native(
+                cycle=cycle,
+                belief_state=belief_state,
+                signals=signals,
+            )
         normalizer = evidence_memory.SignalProvenanceNormalizer()
         normalized_by_id = {}
         for event in self.events:
@@ -1952,6 +1960,103 @@ class StaticEventGate(EvidenceIntegrationGate):
             normalized_signals=list(normalized_by_id.values()),
         )
 
+    def _integrate_native(self, *, cycle, belief_state, signals):
+        normalizer = evidence_memory.SignalProvenanceNormalizer()
+        manager = evidence_memory.EvidenceMemoryManager()
+        working_memory = belief_state.evidence_memory
+        normalized_by_id = {}
+        processed_by_id = {}
+        processed_events = []
+        confirming = {
+            LikelihoodBand.WEAKLY_CONFIRMING,
+            LikelihoodBand.MODERATELY_CONFIRMING,
+            LikelihoodBand.STRONGLY_CONFIRMING,
+        }
+        for original in self.events:
+            if original.id in processed_by_id:
+                processed_events.append(processed_by_id[original.id])
+                continue
+            signal = normalizer.normalize(
+                signals[0].model_copy(
+                    update={
+                        "id": original.derived_from_signal,
+                        "provenance": SignalProvenance(
+                            epistemic_origin=(
+                                original.epistemic_origin
+                                or EpistemicOrigin.MODEL_REASONING
+                            ),
+                            source_identity=(
+                                f"static-event:{original.derived_from_signal}"
+                            ),
+                            derivation_root_id=(
+                                original.derivation_root_id
+                                or f"root:{original.derived_from_signal}"
+                            ),
+                            correlation_group=(
+                                f"static-event:{original.derived_from_signal}"
+                            ),
+                            canonical_content_fingerprint="replace-me",
+                        ),
+                    }
+                ),
+                run_id=cycle.run_id,
+            )
+            normalized_by_id[signal.id] = signal
+            unresolved_likelihood = original.unresolved_likelihood
+            requires_unresolved = (
+                belief_state.frame_state.competition
+                == HypothesisCompetition.EXCLUSIVE
+                and belief_state.frame_state.coverage
+                == HypothesisCoverage.OPEN
+            )
+            if requires_unresolved and unresolved_likelihood is None:
+                unresolved_likelihood = LikelihoodBand.NEUTRAL
+            frame_fit = original.frame_fit
+            if unresolved_likelihood in confirming:
+                frame_fit = FrameFit.SUPPORTS_UNRESOLVED
+            base_weight = original.effective_update_weight
+            if base_weight is None:
+                base_weight = (
+                    original.reliability
+                    * original.independence
+                    * original.relevance
+                    * original.novelty
+                )
+            decision = manager.classify(
+                working_memory,
+                signal,
+                likelihoods=original.likelihoods,
+                unresolved_likelihood=unresolved_likelihood,
+                frame_version=belief_state.frame_state.frame_version,
+                base_effective_weight=base_weight,
+            )
+            event = EvidenceEvent.model_validate(
+                {
+                    **original.model_dump(mode="python"),
+                    "schema_version": "v0.2",
+                    "epistemic_origin": signal.provenance.epistemic_origin,
+                    "derivation_root_id": signal.provenance.derivation_root_id,
+                    "unresolved_likelihood": unresolved_likelihood,
+                    "frame_fit": frame_fit,
+                    "correlation_status": decision.correlation_status,
+                    "effective_update_weight": decision.effective_update_weight,
+                }
+            )
+            working_memory = manager.commit(
+                working_memory,
+                signal=signal,
+                event=event,
+                decision=decision,
+            )
+            processed_by_id[event.id] = event
+            processed_events.append(event)
+        return EvidenceIntegrationResult(
+            evidence_events=processed_events,
+            probe_candidates=[],
+            evidence_memory=working_memory,
+            normalized_signals=list(normalized_by_id.values()),
+        )
+
 
 class StaticEventCore(BayesProbeCore):
     def __init__(
@@ -1982,11 +2087,236 @@ class InvalidMemoryCore(BayesProbeCore):
         return InvalidMemoryGate()
 
 
+class SuppliedIntegrationGate(EvidenceIntegrationGate):
+    def __init__(self, integration: EvidenceIntegrationResult) -> None:
+        self.integration = integration
+
+    def integrate(self, *, cycle, belief_state, probe_set, signals):
+        return self.integration
+
+
+class SuppliedIntegrationCore(BayesProbeCore):
+    def __init__(
+        self,
+        integration: EvidenceIntegrationResult,
+        *,
+        ledger: JsonlLedgerStore,
+        model_gateway=None,
+    ) -> None:
+        self.supplied_gate = SuppliedIntegrationGate(integration)
+        super().__init__(ledger=ledger, model_gateway=model_gateway)
+
+    def _create_evidence_integration_gate(self):
+        return self.supplied_gate
+
+
+def _native_transition_fixture():
+    state = make_exact_belief_state()
+    manager = evidence_memory.EvidenceMemoryManager()
+    normalizer = evidence_memory.SignalProvenanceNormalizer()
+    accepted_signal = normalizer.normalize(
+        ExternalSignal(
+            id="S_transition_accepted",
+            cycle_id="pending",
+            signal_kind=SignalKind.ACTIVE,
+            source_type="retrieved_source",
+            source="transition-fixture",
+            raw_content="A prior accepted observation supports H1.",
+            initial_target_hypotheses=["H1", "H2"],
+            provenance=SignalProvenance(
+                epistemic_origin=EpistemicOrigin.RETRIEVED_SOURCE,
+                source_identity="transition-fixture",
+                derivation_root_id="root-transition-accepted",
+                correlation_group="transition-fixture",
+                canonical_content_fingerprint="replace-me",
+            ),
+        ),
+        run_id=state.run_id,
+    )
+    accepted_decision = manager.classify(
+        EvidenceMemorySnapshot(),
+        accepted_signal,
+        likelihoods={
+            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
+            "H2": LikelihoodBand.MODERATELY_DISCONFIRMING,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=0.25,
+    )
+    accepted_event = EvidenceEvent(
+        schema_version="v0.2",
+        id="E_transition_accepted",
+        derived_from_signal=accepted_signal.id,
+        epistemic_origin=accepted_signal.provenance.epistemic_origin,
+        derivation_root_id=accepted_signal.provenance.derivation_root_id,
+        target_hypotheses=["H1", "H2"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=accepted_signal.raw_content,
+        likelihoods={
+            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
+            "H2": LikelihoodBand.MODERATELY_DISCONFIRMING,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        frame_fit=FrameFit.UNDERDETERMINED,
+        correlation_status=accepted_decision.correlation_status,
+        effective_update_weight=accepted_decision.effective_update_weight,
+    )
+    memory = manager.commit(
+        EvidenceMemorySnapshot(),
+        signal=accepted_signal,
+        event=accepted_event,
+        decision=accepted_decision,
+    )
+
+    discarded_signal = normalizer.normalize(
+        accepted_signal.model_copy(
+            update={
+                "id": "S_transition_discarded",
+                "raw_content": "A prior malformed observation was discarded.",
+                "provenance": accepted_signal.provenance.model_copy(
+                    update={"derivation_root_id": "root-transition-discarded"}
+                ),
+            }
+        ),
+        run_id=state.run_id,
+    )
+    discarded_decision = manager.classify(
+        memory,
+        discarded_signal,
+        likelihoods={
+            "H1": LikelihoodBand.NEUTRAL,
+            "H2": LikelihoodBand.NEUTRAL,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=0.0,
+    )
+    discarded_event = EvidenceEvent(
+        schema_version="v0.2",
+        id="E_transition_discarded",
+        derived_from_signal=discarded_signal.id,
+        epistemic_origin=discarded_signal.provenance.epistemic_origin,
+        derivation_root_id=discarded_signal.provenance.derivation_root_id,
+        target_hypotheses=["H1", "H2"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=discarded_signal.raw_content,
+        likelihoods={
+            "H1": LikelihoodBand.NEUTRAL,
+            "H2": LikelihoodBand.NEUTRAL,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        frame_fit=FrameFit.UNDERDETERMINED,
+        correlation_status=discarded_decision.correlation_status,
+        effective_update_weight=discarded_decision.effective_update_weight,
+        discard_reason="schema_violation:fixture",
+    )
+    memory = manager.commit(
+        memory,
+        signal=discarded_signal,
+        event=discarded_event,
+        decision=discarded_decision,
+    )
+    memory = EvidenceMemorySnapshot.model_validate(
+        {
+            **memory.model_dump(mode="python"),
+            "discovery_evidence_ids": [accepted_event.id],
+        }
+    )
+    payload = state.model_dump(mode="python")
+    payload.update(
+        {
+            "evidence_memory": memory.model_dump(mode="python"),
+            "ledger_refs": {
+                **state.ledger_refs,
+                "evidence_events": [accepted_event.id, discarded_event.id],
+            },
+        }
+    )
+    return (
+        BeliefState.model_validate(payload),
+        memory,
+        accepted_event,
+        accepted_signal,
+    )
+
+
+def _regressive_native_memory(
+    memory: EvidenceMemorySnapshot,
+    mutation: str,
+) -> EvidenceMemorySnapshot:
+    payload = memory.model_dump(mode="python")
+    if mutation == "drop_identities":
+        payload["content_fingerprints"] = {}
+        payload["source_content_fingerprints"] = {}
+        payload["derivation_roots"] = {}
+    elif mutation == "rebind_identity":
+        signal_id = next(iter(payload["content_fingerprints"]))
+        changed_fingerprint = "sha256:" + "b" * 64
+        identity = json.loads(payload["source_content_fingerprints"][signal_id])
+        identity[1] = changed_fingerprint
+        payload["content_fingerprints"][signal_id] = changed_fingerprint
+        payload["source_content_fingerprints"][signal_id] = json.dumps(
+            identity,
+            separators=(",", ":"),
+        )
+    elif mutation == "drop_accepted_history":
+        removed = payload["accepted_evidence_ids"].pop(0)
+        payload["event_signal_identity_digests"].pop(removed)
+        payload["discovery_evidence_ids"] = []
+        payload["counterevidence_ids_by_hypothesis"] = {}
+    elif mutation == "drop_discard_history":
+        removed, _ = decode_discard_history_entry(
+            payload["discard_and_schema_history"].pop(0)
+        )
+        payload["event_signal_identity_digests"].pop(removed)
+    elif mutation == "drop_binding":
+        payload["event_signal_identity_digests"].pop(
+            next(iter(payload["event_signal_identity_digests"]))
+        )
+    elif mutation == "rebind_binding":
+        key = next(iter(payload["event_signal_identity_digests"]))
+        payload["event_signal_identity_digests"][key] = "c" * 64
+    elif mutation == "rewrite_discard_history":
+        event_id, _ = decode_discard_history_entry(
+            payload["discard_and_schema_history"][0]
+        )
+        payload["discard_and_schema_history"][0] = encode_discard_history_entry(
+            event_id,
+            "schema_violation:changed",
+        )
+    elif mutation == "drop_discovery":
+        payload["discovery_evidence_ids"] = []
+    elif mutation == "rewrite_discovery":
+        discarded_id, _ = decode_discard_history_entry(
+            payload["discard_and_schema_history"][0]
+        )
+        payload["discovery_evidence_ids"] = [discarded_id]
+    elif mutation == "drop_counterevidence":
+        payload["counterevidence_ids_by_hypothesis"] = {}
+    elif mutation == "rewrite_counterevidence":
+        discarded_id, _ = decode_discard_history_entry(
+            payload["discard_and_schema_history"][0]
+        )
+        payload["counterevidence_ids_by_hypothesis"] = {
+            "H2": [discarded_id]
+        }
+    elif mutation == "empty_credit":
+        payload["correlation_credit"] = {}
+    elif mutation == "decrease_credit":
+        key = next(iter(payload["correlation_credit"]))
+        payload["correlation_credit"][key] /= 2
+    elif mutation == "increase_credit":
+        key = next(iter(payload["correlation_credit"]))
+        payload["correlation_credit"][key] += 0.1
+    else:
+        raise AssertionError(f"unknown memory mutation: {mutation}")
+    return EvidenceMemorySnapshot.model_validate(payload)
+
+
 def test_invalid_committed_memory_fails_before_any_cycle_ledger_append(tmp_path: Path):
     ledger = JsonlLedgerStore(tmp_path / "invalid-memory-ledger.jsonl")
     core = InvalidMemoryCore(ledger=ledger)
 
-    with pytest.raises(ValueError, match="final belief state failed recursive validation"):
+    with pytest.raises(ValueError, match="native evidence memory transition"):
         core.integrate_cycle(
             cycle=make_cycle("cycle_invalid_memory"),
             belief_state=make_exact_belief_state(),
@@ -2102,7 +2432,7 @@ def test_native_gate_wrong_event_signal_binding_fails_before_ledger(
 
     with pytest.raises(
         ValueError,
-        match="native evidence integration requires coherent evidence memory",
+        match="native evidence memory transition",
     ):
         core.integrate_cycle(
             cycle=cycle,
@@ -2116,11 +2446,257 @@ def test_native_gate_wrong_event_signal_binding_fails_before_ledger(
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    [
+        "drop_identities",
+        "rebind_identity",
+        "drop_accepted_history",
+        "drop_discard_history",
+        "drop_binding",
+        "rebind_binding",
+        "rewrite_discard_history",
+        "drop_discovery",
+        "rewrite_discovery",
+        "drop_counterevidence",
+        "rewrite_counterevidence",
+        "empty_credit",
+        "decrease_credit",
+        "increase_credit",
+    ],
+)
+@pytest.mark.parametrize(
+    "existing_event_only",
+    [False, True],
+    ids=["no_events", "existing_event"],
+)
+def test_native_memory_replacement_regressions_fail_before_solver_or_ledger(
+    tmp_path: Path,
+    mutation: str,
+    existing_event_only: bool,
+):
+    state, prior_memory, event, signal = _native_transition_fixture()
+    candidate = _regressive_native_memory(prior_memory, mutation)
+    integration = EvidenceIntegrationResult(
+        evidence_events=[event] if existing_event_only else [],
+        probe_candidates=[],
+        evidence_memory=candidate,
+        normalized_signals=[signal] if existing_event_only else [],
+    )
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    ledger_path = tmp_path / (
+        f"native-transition-{mutation}-{existing_event_only}.jsonl"
+    )
+    ledger_path.touch()
+    core = SuppliedIntegrationCore(
+        integration,
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="native evidence memory transition"):
+        core.integrate_cycle(
+            cycle=make_cycle(f"cycle_transition_{mutation}"),
+            belief_state=state,
+            probe_set=make_empty_probe_set(f"cycle_transition_{mutation}"),
+            signals=[make_active_signal()],
+        )
+
+    assert gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
+    assert state.evidence_memory == prior_memory
+    assert ledger_path.read_bytes() == b""
+
+
+def test_existing_event_only_result_cannot_rewrite_directional_credit(
+    tmp_path: Path,
+):
+    state, prior_memory, event, signal = _native_transition_fixture()
+    candidate = prior_memory.model_copy(update={"correlation_credit": {}})
+    integration = EvidenceIntegrationResult(
+        evidence_events=[event],
+        probe_candidates=[],
+        evidence_memory=candidate,
+        normalized_signals=[signal],
+    )
+    ledger_path = tmp_path / "native-existing-event-credit.jsonl"
+    ledger_path.touch()
+    core = SuppliedIntegrationCore(
+        integration,
+        ledger=JsonlLedgerStore(ledger_path),
+    )
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="native evidence memory transition"):
+        core.integrate_cycle(
+            cycle=make_cycle("cycle_existing_event_credit"),
+            belief_state=state,
+            probe_set=make_empty_probe_set("cycle_existing_event_credit"),
+            signals=[make_active_signal()],
+        )
+
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+def test_new_directional_event_cannot_skip_its_credit_commit(tmp_path: Path):
+    state = make_exact_belief_state()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    cycle = make_cycle("cycle_missing_new_credit")
+    production = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+    assert production.evidence_memory.correlation_credit
+    invalid_memory = production.evidence_memory.model_copy(
+        update={"correlation_credit": {}}
+    )
+    integration = EvidenceIntegrationResult(
+        evidence_events=production.evidence_events,
+        probe_candidates=production.probe_candidates,
+        evidence_memory=invalid_memory,
+        normalized_signals=production.normalized_signals,
+    )
+    ledger_path = tmp_path / "native-missing-new-credit.jsonl"
+    ledger_path.touch()
+    core = SuppliedIntegrationCore(
+        integration,
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    prior_state = state.model_dump(mode="json")
+    prior_provider_calls = len(gateway.requests)
+
+    with pytest.raises(ValueError, match="native evidence memory transition"):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[make_active_signal()],
+        )
+
+    assert len(gateway.requests) == prior_provider_calls
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+def _native_event_contract_case(*, replay: bool, malformed: str):
+    state = make_exact_belief_state()
+    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
+        make_active_signal().model_copy(update={"id": "S_native_contract"}),
+        run_id=state.run_id,
+    )
+    manager = evidence_memory.EvidenceMemoryManager()
+    decision = manager.classify(
+        EvidenceMemorySnapshot(),
+        signal,
+        likelihoods={
+            "H1": LikelihoodBand.NEUTRAL,
+            "H2": LikelihoodBand.NEUTRAL,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=0.0,
+    )
+    valid_event = EvidenceEvent(
+        schema_version="v0.2",
+        id="E_native_contract",
+        derived_from_signal=signal.id,
+        epistemic_origin=signal.provenance.epistemic_origin,
+        derivation_root_id=signal.provenance.derivation_root_id,
+        target_hypotheses=["H1", "H2"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=signal.raw_content,
+        likelihoods={
+            "H1": LikelihoodBand.NEUTRAL,
+            "H2": LikelihoodBand.NEUTRAL,
+        },
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        frame_fit=FrameFit.UNDERDETERMINED,
+        correlation_status=decision.correlation_status,
+        effective_update_weight=0.0,
+    )
+    committed = manager.commit(
+        EvidenceMemorySnapshot(),
+        signal=signal,
+        event=valid_event,
+        decision=decision,
+    )
+    if malformed == "legacy_v01":
+        event = valid_event.model_copy(update={"schema_version": "v0.1"})
+    elif malformed == "missing_effective_weight":
+        event = valid_event.model_copy(update={"effective_update_weight": None})
+    else:
+        raise AssertionError(f"unknown native event defect: {malformed}")
+
+    if replay:
+        state_payload = state.model_dump(mode="python")
+        state_payload.update(
+            {
+                "evidence_memory": committed.model_dump(mode="python"),
+                "ledger_refs": {
+                    **state.ledger_refs,
+                    "evidence_events": [valid_event.id],
+                },
+            }
+        )
+        state = BeliefState.model_validate(state_payload)
+    return state, EvidenceIntegrationResult(
+        evidence_events=[event],
+        probe_candidates=[],
+        evidence_memory=committed,
+        normalized_signals=[signal],
+    )
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["new", "replay"])
+@pytest.mark.parametrize(
+    "malformed",
+    ["legacy_v01", "missing_effective_weight"],
+)
+def test_native_event_contract_fails_before_solver_or_ledger(
+    tmp_path: Path,
+    replay: bool,
+    malformed: str,
+):
+    state, integration = _native_event_contract_case(
+        replay=replay,
+        malformed=malformed,
+    )
+    ledger_path = tmp_path / f"native-event-{malformed}-{replay}.jsonl"
+    ledger_path.touch()
+    core = SuppliedIntegrationCore(
+        integration,
+        ledger=JsonlLedgerStore(ledger_path),
+    )
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="native evidence event contract"):
+        core.integrate_cycle(
+            cycle=make_cycle(f"cycle_native_event_{malformed}_{replay}"),
+            belief_state=state,
+            probe_set=make_empty_probe_set(
+                f"cycle_native_event_{malformed}_{replay}"
+            ),
+            signals=[make_active_signal()],
+        )
+
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+@pytest.mark.parametrize(
     "invalid_envelope",
     [
         "missing_task_frame",
         "tag_only",
         "forged_recognized_marker",
+        "transferred_receipt",
         "v01_task_frame",
         "missing_trace",
         "fake_trace",
@@ -2160,6 +2736,25 @@ def test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append(
                         },
                     }
                 )
+            }
+        )
+    elif invalid_envelope == "transferred_receipt":
+        forged_native = native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={
+                        "framing_method": FramingMethod.LEGACY_MIGRATION,
+                        "framing_trace": {
+                            "migration": "belief_state_v0.1_to_v0.2"
+                        },
+                    }
+                )
+            }
+        )
+        state = migrated.model_copy(
+            update={
+                field_name: getattr(forged_native, field_name)
+                for field_name in BeliefState.model_fields
             }
         )
     elif invalid_envelope == "v01_task_frame":
@@ -3651,7 +4246,7 @@ def test_later_positional_conflict_preflights_before_novel_provider(
     prior_ledger = ledger_path.read_bytes()
     prior_provider_calls = len(gateway.requests)
 
-    with pytest.raises(ValueError, match="evidence event"):
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
         core.integrate_cycle(
             cycle=cycle.model_copy(update={"cycle_index": 2}),
             belief_state=partial_state,
@@ -4190,11 +4785,11 @@ def test_replayed_new_signal_identity_is_persisted_then_conflict_fails_atomicall
     assert ledger_path.read_bytes() == prior_ledger
 
 
-def test_historical_positional_event_without_binding_fails_with_other_identity_memory(
+def test_historical_native_event_without_binding_fails_with_other_identity_memory(
     tmp_path: Path,
 ):
     gateway = ScriptedModelGateway(
-        responses={"judge_evidence": _legacy_evidence_judgment()}
+        responses={"judge_evidence": _native_open_judgment()}
     )
     ledger_path = tmp_path / "historical-missing-binding-ledger.jsonl"
     ledger = JsonlLedgerStore(ledger_path)
@@ -4202,7 +4797,7 @@ def test_historical_positional_event_without_binding_fails_with_other_identity_m
     other_cycle = make_cycle("cycle_other_identity")
     first = core.integrate_cycle(
         cycle=other_cycle,
-        belief_state=make_belief_state(cycle_id="cycle_0"),
+        belief_state=make_exact_belief_state(),
         probe_set=make_empty_probe_set(other_cycle.cycle_id),
         signals=[
             _memory_signal(
@@ -4215,18 +4810,19 @@ def test_historical_positional_event_without_binding_fails_with_other_identity_m
     cycle = make_cycle("cycle_historical_missing_binding").model_copy(
         update={"cycle_index": 2}
     )
-    event_id = "run_1_cycle_historical_missing_binding_E1"
-    prior_event = EvidenceEvent(
-        id=event_id,
-        derived_from_signal="S_prior",
-        target_hypotheses=["H1", "H2"],
-        evidence_type=EvidenceType.SUPPORTING,
-        content="The already-recorded legacy evidence.",
-        likelihoods={
-            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
-            "H2": LikelihoodBand.MODERATELY_DISCONFIRMING,
-        },
+    historical_signal = _memory_signal(
+        "S_historical_replay",
+        "The historical event cannot be proven from unrelated memory.",
+        root="root-historical-replay",
     )
+    preview = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=cycle,
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[historical_signal],
+    )
+    prior_event = preview.evidence_events[0]
+    event_id = prior_event.id
     ledger.append("evidence_event", prior_event)
     prior_memory = first.belief_state.evidence_memory
     historical_state = first.belief_state.model_copy(
@@ -4261,11 +4857,7 @@ def test_historical_positional_event_without_binding_fails_with_other_identity_m
             belief_state=historical_state,
             probe_set=make_empty_probe_set(cycle.cycle_id),
             signals=[
-                _memory_signal(
-                    "S_historical_replay",
-                    "The historical event cannot be proven from unrelated memory.",
-                    root="root-historical-replay",
-                ),
+                historical_signal,
             ],
         )
 

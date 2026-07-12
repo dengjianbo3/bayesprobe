@@ -47,6 +47,7 @@ _NONLEGACY_FRAMING_METHODS = tuple(
 _INVALID_MIGRATION_ENVELOPES = (
     "tag_only",
     "forged_recognized_marker",
+    "transferred_receipt",
     "v01_belief_state",
     "v01_task_frame",
     "missing_trace",
@@ -525,6 +526,25 @@ def invalid_python_migration_envelope(
                         },
                     }
                 )
+            }
+        )
+    if kind == "transferred_receipt":
+        forged_native = native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={
+                        "framing_method": FramingMethod.LEGACY_MIGRATION,
+                        "framing_trace": {
+                            "migration": "belief_state_v0.1_to_v0.2"
+                        },
+                    }
+                )
+            }
+        )
+        return migrated.model_copy(
+            update={
+                field_name: getattr(forged_native, field_name)
+                for field_name in BeliefState.model_fields
             }
         )
     if kind == "v01_belief_state":

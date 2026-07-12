@@ -51,6 +51,7 @@ _INVALID_MIGRATION_ENVELOPES = (
     "bare_v01",
     "tag_only",
     "forged_recognized_marker",
+    "transferred_receipt",
     "v01_belief_state",
     "v01_task_frame",
     "missing_trace",
@@ -203,6 +204,25 @@ def make_invalid_migration_envelope(kind: str) -> BeliefState:
                 )
             }
         )
+    if kind == "transferred_receipt":
+        forged_native = native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={
+                        "framing_method": FramingMethod.LEGACY_MIGRATION,
+                        "framing_trace": {
+                            "migration": "belief_state_v0.1_to_v0.2"
+                        },
+                    }
+                )
+            }
+        )
+        return migrated.model_copy(
+            update={
+                field_name: getattr(forged_native, field_name)
+                for field_name in BeliefState.model_fields
+            }
+        )
     if kind == "v01_belief_state":
         return migrated.model_copy(update={"schema_version": "v0.1"})
     if kind == "v01_task_frame":
@@ -309,7 +329,7 @@ def test_executor_turns_probe_set_into_active_signals():
 
 
 def test_repeated_deterministic_probe_reuses_root_and_spends_no_fresh_credit():
-    state = migrate_legacy_belief_state(make_belief_state())
+    state = make_native_belief_state()
     first_probe = ProbeDesign(
         id="P_semantics_cycle_1",
         cycle_id="run_exec_cycle_1",

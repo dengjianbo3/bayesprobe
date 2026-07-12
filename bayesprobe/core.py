@@ -8,7 +8,7 @@ from bayesprobe.belief import (
     summarize_hypotheses,
 )
 from bayesprobe.evidence import EvidenceIntegrationGate, EvidenceIntegrationResult
-from bayesprobe.evidence_memory import canonical_signal_identity_digest
+from bayesprobe.evidence_memory import EvidenceMemoryManager
 from bayesprobe.frame_policy import FrameAdequacyDecision, FrameAdequacyPolicy
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.inbox import SignalInbox
@@ -34,7 +34,6 @@ from bayesprobe.schemas import (
     ProbeCandidate,
     ProbeSet,
     SignalKind,
-    decode_discard_history_entry,
     utc_now,
 )
 from bayesprobe.task_framing import migrate_legacy_belief_state
@@ -426,72 +425,70 @@ def _resolve_next_evidence_memory(
     belief_state: BeliefState,
     integration: EvidenceIntegrationResult,
 ) -> EvidenceMemorySnapshot:
-    prior_ids = belief_state.ledger_refs.get("evidence_events", [])
-    new_events = _canonical_new_evidence_events(
-        prior_ids,
-        integration.evidence_events,
-    )
     memory = integration.evidence_memory
-    if lifecycle == BeliefLifecycle.NATIVE_V02 and new_events:
-        if memory is None:
+    if lifecycle == BeliefLifecycle.NATIVE_V02:
+        _validate_native_evidence_events(
+            integration.evidence_events,
+            belief_state=belief_state,
+        )
+        prior_memory = belief_state.evidence_memory
+        if memory is None or prior_memory is None:
             raise ValueError(
                 "native evidence integration requires coherent evidence memory"
             )
         try:
-            memory = EvidenceMemorySnapshot.model_validate(
-                memory.model_dump(mode="python")
+            return EvidenceMemoryManager().validate_transition(
+                prior_memory,
+                memory,
+                evidence_events=integration.evidence_events,
+                normalized_signals=integration.normalized_signals or [],
+                existing_evidence_ids=belief_state.ledger_refs.get(
+                    "evidence_events",
+                    [],
+                ),
+                frame_version=belief_state.frame_state.frame_version,
             )
         except (TypeError, ValueError):
             raise ValueError(
-                "native evidence integration requires coherent evidence memory"
+                "native evidence memory transition is invalid"
             ) from None
-        accepted_ids = set(memory.accepted_evidence_ids)
-        discarded = {
-            event_id: reason
-            for event_id, reason in (
-                decode_discard_history_entry(entry)
-                for entry in memory.discard_and_schema_history
-            )
-        }
-        bindings = memory.event_signal_identity_digests
-        normalized_signals = {
-            signal.id: signal
-            for signal in (integration.normalized_signals or [])
-        }
-        for event in new_events:
-            accepted = event.id in accepted_ids
-            discard_reason = discarded.get(event.id)
-            lifecycle_matches = (
-                event.discard_reason is None
-                and accepted
-                and discard_reason is None
-            ) or (
-                event.discard_reason is not None
-                and not accepted
-                and discard_reason == event.discard_reason
-            )
-            signal = normalized_signals.get(event.derived_from_signal)
-            try:
-                expected_binding = (
-                    None
-                    if signal is None
-                    else canonical_signal_identity_digest(signal)
-                )
-            except (TypeError, ValueError):
-                expected_binding = None
-            if (
-                not lifecycle_matches
-                or expected_binding is None
-                or bindings.get(event.id) != expected_binding
-            ):
-                raise ValueError(
-                    "native evidence integration requires coherent evidence memory"
-                )
     if memory is None:
         memory = belief_state.evidence_memory
     if memory is None:
         raise ValueError("belief state requires evidence memory")
     return memory
+
+
+def _validate_native_evidence_events(
+    events: list[EvidenceEvent],
+    *,
+    belief_state: BeliefState,
+) -> None:
+    frame_state = belief_state.frame_state
+    requires_unresolved = (
+        frame_state is not None
+        and frame_state.competition == HypothesisCompetition.EXCLUSIVE
+        and frame_state.coverage == HypothesisCoverage.OPEN
+    )
+    for event in events:
+        if event.schema_version != "v0.2":
+            raise ValueError("native evidence event contract is invalid")
+        try:
+            validated = EvidenceEvent.model_validate(
+                event.model_dump(mode="python")
+            )
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("native evidence event contract is invalid") from None
+        if (
+            validated.schema_version != "v0.2"
+            or validated.effective_update_weight is None
+            or (requires_unresolved and validated.unresolved_likelihood is None)
+            or (
+                not requires_unresolved
+                and validated.unresolved_likelihood is not None
+            )
+        ):
+            raise ValueError("native evidence event contract is invalid")
 
 
 def _canonical_new_evidence_events(

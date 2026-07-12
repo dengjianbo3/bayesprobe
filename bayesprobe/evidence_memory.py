@@ -286,6 +286,186 @@ class EvidenceMemoryManager:
             raise ValueError("evidence event signal identity conflict")
         return digest
 
+    def validate_transition(
+        self,
+        prior_snapshot: EvidenceMemorySnapshot,
+        next_snapshot: EvidenceMemorySnapshot,
+        *,
+        evidence_events: list[EvidenceEvent],
+        normalized_signals: list[ExternalSignal],
+        existing_evidence_ids: list[str],
+        frame_version: int,
+    ) -> EvidenceMemorySnapshot:
+        """Validate one native memory commit as an append-only transaction."""
+        try:
+            prior = EvidenceMemorySnapshot.model_validate(
+                prior_snapshot.model_dump(mode="python")
+            )
+            candidate = EvidenceMemorySnapshot.model_validate(
+                next_snapshot.model_dump(mode="python")
+            )
+            _require_supported_memory_version(prior)
+            _require_supported_memory_version(candidate)
+            self._validate_transition(
+                prior,
+                candidate,
+                evidence_events=evidence_events,
+                normalized_signals=normalized_signals,
+                existing_evidence_ids=existing_evidence_ids,
+                frame_version=frame_version,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise ValueError("evidence memory transition is invalid") from None
+        return candidate
+
+    def _validate_transition(
+        self,
+        prior: EvidenceMemorySnapshot,
+        candidate: EvidenceMemorySnapshot,
+        *,
+        evidence_events: list[EvidenceEvent],
+        normalized_signals: list[ExternalSignal],
+        existing_evidence_ids: list[str],
+        frame_version: int,
+    ) -> None:
+        signals_by_id: dict[str, ExternalSignal] = {}
+        identity_shadow = prior
+        for signal in normalized_signals:
+            existing_signal = signals_by_id.get(signal.id)
+            if (
+                existing_signal is not None
+                and canonical_signal_identity_digest(existing_signal)
+                != canonical_signal_identity_digest(signal)
+            ):
+                raise ValueError("evidence memory transition is invalid")
+            signals_by_id[signal.id] = signal
+            identity_shadow = self.remember_signal_identity(
+                identity_shadow,
+                signal,
+            )
+
+        identity_fields = (
+            "content_fingerprints",
+            "source_content_fingerprints",
+            "derivation_roots",
+        )
+        if candidate.memory_version != identity_shadow.memory_version or any(
+            getattr(candidate, field_name) != getattr(identity_shadow, field_name)
+            for field_name in identity_fields
+        ):
+            raise ValueError("evidence memory transition is invalid")
+
+        events_by_id: dict[str, EvidenceEvent] = {}
+        ordered_events: list[EvidenceEvent] = []
+        for event in evidence_events:
+            prior_event = events_by_id.get(event.id)
+            if prior_event is not None:
+                if prior_event != event:
+                    raise ValueError("evidence memory transition is invalid")
+                continue
+            events_by_id[event.id] = event
+            ordered_events.append(event)
+        if set(signals_by_id) != {
+            event.derived_from_signal for event in ordered_events
+        }:
+            raise ValueError("evidence memory transition is invalid")
+        for event in ordered_events:
+            provenance = _required_provenance(
+                signals_by_id[event.derived_from_signal]
+            )
+            if (
+                event.epistemic_origin != provenance.epistemic_origin
+                or event.derivation_root_id != provenance.derivation_root_id
+            ):
+                raise ValueError("evidence memory transition is invalid")
+
+        existing_ids = set(existing_evidence_ids)
+        new_events = [
+            event for event in ordered_events if event.id not in existing_ids
+        ]
+        expected_accepted = [
+            event.id for event in new_events if event.discard_reason is None
+        ]
+        expected_discarded = [
+            encode_discard_history_entry(event.id, event.discard_reason)
+            for event in new_events
+            if event.discard_reason is not None
+        ]
+        if candidate.accepted_evidence_ids != [
+            *prior.accepted_evidence_ids,
+            *expected_accepted,
+        ]:
+            raise ValueError("evidence memory transition is invalid")
+        if candidate.discard_and_schema_history != [
+            *prior.discard_and_schema_history,
+            *expected_discarded,
+        ]:
+            raise ValueError("evidence memory transition is invalid")
+
+        for event_id, digest in prior.event_signal_identity_digests.items():
+            if candidate.event_signal_identity_digests.get(event_id) != digest:
+                raise ValueError("evidence memory transition is invalid")
+        added_binding_ids = set(
+            candidate.event_signal_identity_digests
+        ).difference(prior.event_signal_identity_digests)
+        if added_binding_ids != {event.id for event in new_events}:
+            raise ValueError("evidence memory transition is invalid")
+        for event in new_events:
+            signal = signals_by_id[event.derived_from_signal]
+            if candidate.event_signal_identity_digests.get(
+                event.id
+            ) != canonical_signal_identity_digest(signal):
+                raise ValueError("evidence memory transition is invalid")
+
+        prior_discovery_count = len(prior.discovery_evidence_ids)
+        if (
+            candidate.discovery_evidence_ids[:prior_discovery_count]
+            != prior.discovery_evidence_ids
+            or not set(
+                candidate.discovery_evidence_ids[prior_discovery_count:]
+            ).issubset(expected_accepted)
+        ):
+            raise ValueError("evidence memory transition is invalid")
+
+        expected_counterevidence = {
+            hypothesis_id: list(event_ids)
+            for hypothesis_id, event_ids in (
+                prior.counterevidence_ids_by_hypothesis.items()
+            )
+        }
+        for event in new_events:
+            if event.discard_reason is not None:
+                continue
+            for hypothesis_id, band in event.likelihoods.items():
+                if _direction_for(band) == "disconfirming":
+                    expected_counterevidence.setdefault(
+                        hypothesis_id,
+                        [],
+                    ).append(event.id)
+        if (
+            candidate.counterevidence_ids_by_hypothesis
+            != expected_counterevidence
+        ):
+            raise ValueError("evidence memory transition is invalid")
+
+        expected_credit = _expected_transition_credit(
+            prior.correlation_credit,
+            new_events,
+            signals_by_id=signals_by_id,
+            identity_snapshot=identity_shadow,
+            frame_version=frame_version,
+        )
+        if set(candidate.correlation_credit) != set(expected_credit) or any(
+            not math.isclose(
+                candidate.correlation_credit[key],
+                expected_credit[key],
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            for key in expected_credit
+        ):
+            raise ValueError("evidence memory transition is invalid")
+
     def classify(
         self,
         snapshot: EvidenceMemorySnapshot,
@@ -676,6 +856,40 @@ def _credit_keys(
                 f"{correlation_group}|frame:{frame_version}:unresolved|{direction}"
             )
     return keys
+
+
+def _expected_transition_credit(
+    prior_credit: dict[str, float],
+    events: list[EvidenceEvent],
+    *,
+    signals_by_id: dict[str, ExternalSignal],
+    identity_snapshot: EvidenceMemorySnapshot,
+    frame_version: int,
+) -> dict[str, float]:
+    expected = dict(prior_credit)
+    for event in events:
+        if (
+            event.discard_reason is not None
+            or not event.effective_update_weight
+        ):
+            continue
+        signal = signals_by_id[event.derived_from_signal]
+        identity = _source_content_identity_parts(
+            identity_snapshot.source_content_fingerprints[signal.id]
+        )
+        if identity is None:
+            raise ValueError("evidence memory transition is invalid")
+        group = identity[2]
+        for key in _credit_keys(
+            group,
+            event.likelihoods,
+            unresolved_likelihood=event.unresolved_likelihood,
+            frame_version=frame_version,
+        ):
+            expected[key] = expected.get(key, 0.0) + float(
+                event.effective_update_weight
+            )
+    return expected
 
 
 __all__ = [

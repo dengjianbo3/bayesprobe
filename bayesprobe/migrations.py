@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
+import hashlib
+import hmac
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,21 +40,41 @@ RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS = frozenset(
 )
 
 
+@dataclass(frozen=True)
 class _V01MigrationReceipt:
+    envelope_digest: str
+
     def __deepcopy__(self, memo: dict[int, Any]) -> "_V01MigrationReceipt":
         return self
 
 
-_V01_MIGRATION_RECEIPT = _V01MigrationReceipt()
+def _migration_envelope_digest(state: BeliefState) -> str:
+    payload = json.dumps(
+        state.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _mark_v01_migration(state: BeliefState) -> BeliefState:
-    state._v01_migration_receipt = _V01_MIGRATION_RECEIPT
+    state._v01_migration_receipt = _V01MigrationReceipt(
+        envelope_digest=_migration_envelope_digest(state)
+    )
     return state
 
 
 def _has_v01_migration_receipt(state: BeliefState) -> bool:
-    return state._v01_migration_receipt is _V01_MIGRATION_RECEIPT
+    receipt = state._v01_migration_receipt
+    if not isinstance(receipt, _V01MigrationReceipt):
+        return False
+    try:
+        current_digest = _migration_envelope_digest(state)
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(receipt.envelope_digest, current_digest)
 
 
 def _carry_v01_migration_receipt(
@@ -68,7 +92,7 @@ def _carry_v01_migration_receipt(
         and source_frame.framing_trace.get("migration")
         == target_frame.framing_trace.get("migration")
     ):
-        target._v01_migration_receipt = _V01_MIGRATION_RECEIPT
+        _mark_v01_migration(target)
     return target
 
 
