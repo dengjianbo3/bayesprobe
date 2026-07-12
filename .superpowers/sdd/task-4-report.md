@@ -1182,3 +1182,75 @@ Result: `18 failed, 7 passed in 0.32s`.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 20
+
+### Design Decision
+
+- Kept `_FrozenPolicyMapping.__deepcopy__` as the explicit policy serialization
+  boundary. Direct policy deep copies and `dataclasses.asdict` therefore still
+  thaw mappings/tuples into independent ordinary dictionaries/lists suitable
+  for JSON artifacts.
+- Added record-level `__copy__` and `__deepcopy__` semantics to
+  `PythonExecutionRecord`. Because every record field is immutable and the
+  policy is recursively frozen at construction, both operations safely return
+  the record itself. Deep record copying no longer traverses into the mapping's
+  serialization-oriented hook or attaches a mutable policy to a record.
+
+### Changes
+
+- Documented the distinct mapping-level serialization and record-level value
+  copy contracts beside their respective hooks.
+- Added regressions for shallow/deep record policy mutation, independent direct
+  policy deepcopy, plain JSON-compatible `asdict` output, deterministic-root
+  stability for copied trusted records, and fail-closed copied legacy records.
+
+### Verification
+
+- Focused command:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_python_probe.py::test_shallow_copied_execution_record_keeps_policy_immutable tests/evaluation/test_python_probe.py::test_deep_copied_execution_record_keeps_policy_immutable tests/evaluation/test_python_probe.py::test_deep_copied_policy_snapshot_is_independent_mutable_serialization tests/evaluation/test_python_probe.py::test_execution_record_asdict_is_independent_json_compatible_serialization tests/evaluation/test_python_probe.py::test_copied_execution_records_keep_trusted_deterministic_root tests/evaluation/test_python_probe.py::test_copied_legacy_execution_record_remains_unverified -q --tb=short -p no:cacheprovider
+```
+
+- Initial RED harness: `2 failed, 5 passed in 0.14s`; the shallow-copy behavior
+  was already immutable but emitted Python's standard read-only Mapping error,
+  so the test's unnecessary error-message match was removed.
+- Corrected RED: the same command -> `1 failed, 6 passed in 0.13s`, solely
+  because deep record copy attached a mutable dictionary.
+- GREEN/refactor: the same selection without `--tb=short` -> `7 passed in
+  0.11s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_model_gateway.py tests/test_openai_gateway.py
+  tests/test_core_cycles.py tests/test_probe_executor.py
+  tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `543 passed
+  in 1.87s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1360 passed, 10 skipped in 10.88s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before
+  report/commit; the range check is repeated after commit.
+
+### Self-Review
+
+- `copy.copy(record)` and `copy.deepcopy(record)` now preserve the same frozen
+  nested policy and cannot expose a mutation path back into the original.
+  Memoizing the deep-copy result follows the copy protocol while retaining the
+  immutable value-object identity.
+- Direct `deepcopy(record.policy_snapshot)` remains a mutable independent
+  serialization. `asdict(record)` still invokes the mapping hook directly and
+  returns only ordinary dict/list policy containers; JSON encoding and mutation
+  leave the record unchanged.
+- Both copied trusted records pass complete-policy validation and produce the
+  same deterministic derivation root as the source. Empty-policy legacy records
+  retain the compatibility constructor but still produce unverified evidence.
+
+### Concerns
+
+No blocking concerns.

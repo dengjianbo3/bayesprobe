@@ -60,6 +60,7 @@ class _FrozenPolicyMapping(Mapping[str, Any]):
         )
 
     def __deepcopy__(self, memo):
+        # Policy-only copies are serialization boundaries, including asdict().
         return _thaw_policy_value(self)
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -199,6 +200,15 @@ class PythonExecutionRecord:
             "policy_snapshot",
             _freeze_policy_value(self.policy_snapshot),
         )
+
+    def __copy__(self) -> PythonExecutionRecord:
+        return self
+
+    def __deepcopy__(self, memo) -> PythonExecutionRecord:
+        # Record copies retain the frozen policy instead of traversing its
+        # serialization-oriented deepcopy hook.
+        memo[id(self)] = self
+        return self
 
     @property
     def success(self) -> bool:

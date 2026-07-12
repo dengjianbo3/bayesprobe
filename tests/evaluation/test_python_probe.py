@@ -1,6 +1,9 @@
-from copy import deepcopy
-from types import SimpleNamespace
+import copy
+import json
 import unicodedata
+from copy import deepcopy
+from dataclasses import asdict
+from types import SimpleNamespace
 
 import pytest
 
@@ -851,6 +854,89 @@ def test_execution_policy_defensively_copies_original_nested_input():
     assert signal.provenance.derivation_root_id == (
         baseline.provenance.derivation_root_id
     )
+
+
+def test_shallow_copied_execution_record_keeps_policy_immutable():
+    record = execution_record()
+
+    copied = copy.copy(record)
+
+    with pytest.raises(TypeError):
+        copied.policy_snapshot["network"]["mode"] = "host"
+    assert copied.policy_snapshot["network"]["mode"] == "none"
+    assert record.policy_snapshot["network"]["mode"] == "none"
+
+
+def test_deep_copied_execution_record_keeps_policy_immutable():
+    record = execution_record()
+
+    copied = copy.deepcopy(record)
+
+    with pytest.raises(TypeError):
+        copied.policy_snapshot["network"]["mode"] = "host"
+    assert copied.policy_snapshot["network"]["mode"] == "none"
+    assert record.policy_snapshot["network"]["mode"] == "none"
+
+
+def test_deep_copied_policy_snapshot_is_independent_mutable_serialization():
+    record = execution_record()
+
+    serialized = copy.deepcopy(record.policy_snapshot)
+    serialized["network"]["mode"] = "host"
+    serialized["interpreter"]["argv"][0] = "pypy"
+
+    assert type(serialized) is dict
+    assert type(serialized["interpreter"]["argv"]) is list
+    assert record.policy_snapshot["network"]["mode"] == "none"
+    assert record.policy_snapshot["interpreter"]["argv"][0] == "python"
+
+
+def test_execution_record_asdict_is_independent_json_compatible_serialization():
+    record = execution_record()
+
+    serialized = asdict(record)
+    encoded = json.dumps(serialized, sort_keys=True)
+    serialized["policy_snapshot"]["resources"]["cpus"] = 99.0
+    serialized["policy_snapshot"]["filesystem"]["tmpfs"][0]["options"].append(
+        "exec"
+    )
+
+    assert type(serialized["policy_snapshot"]) is dict
+    assert type(serialized["policy_snapshot"]["filesystem"]["tmpfs"]) is list
+    assert '"policy_snapshot"' in encoded
+    assert record.policy_snapshot["resources"]["cpus"] == 1.0
+    assert record.policy_snapshot["filesystem"]["tmpfs"][0]["options"] == (
+        "rw",
+        "nosuid",
+        "nodev",
+    )
+
+
+def test_copied_execution_records_keep_trusted_deterministic_root():
+    record = execution_record()
+
+    signals = [
+        _python_signal_for_record(candidate)
+        for candidate in (record, copy.copy(record), copy.deepcopy(record))
+    ]
+
+    assert all(signal.provenance is not None for signal in signals)
+    assert len(
+        {
+            signal.provenance.derivation_root_id
+            for signal in signals
+        }
+    ) == 1
+
+
+@pytest.mark.parametrize("copy_record", [copy.copy, copy.deepcopy])
+def test_copied_legacy_execution_record_remains_unverified(copy_record):
+    copied = copy_record(legacy_execution_record())
+
+    signal = _python_signal_for_record(copied)
+
+    assert signal.provenance is None
+    assert "unverified" in signal.raw_content.lower()
 
 
 def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():

@@ -106,3 +106,7 @@
 2. The exported PythonExecutionRecord constructor must retain backward-compatible construction after adding policy metadata. Legacy construction may use an explicit safe compatibility representation, while current sandbox execution still requires the complete resolved policy before producing trusted evidence.
 3. Python execution policy metadata must be deeply immutable at the record/observer boundary. An observer or external holder cannot mutate nested network/resource/interpreter fields before deterministic provenance hashing; the hash must describe the policy actually executed.
 4. EvidenceMemorySnapshot must require accepted evidence IDs and decoded discarded-history event IDs to be disjoint. Contradictory lifecycle ownership fails recursive snapshot and BeliefState validation.
+
+## Fifteenth full-range re-review finding
+
+1. Copying a PythonExecutionRecord must preserve deep policy immutability. `copy.copy` and `copy.deepcopy` of the record cannot thaw nested policy mappings, while `dataclasses.asdict` must continue to return independent JSON-compatible dictionaries/lists for artifact serialization. Directly deep-copying the policy value may produce an independent mutable serialization but must never mutate or replace the policy attached to a record.
