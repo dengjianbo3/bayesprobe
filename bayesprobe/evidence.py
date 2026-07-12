@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -11,6 +9,7 @@ from bayesprobe.evidence_memory import (
     EvidenceMemoryDecision,
     EvidenceMemoryManager,
     SignalProvenanceNormalizer,
+    canonical_signal_identity_digest,
 )
 from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
@@ -33,7 +32,6 @@ from bayesprobe.schemas import (
     EvidenceType,
     ExternalSignal,
     FrameFit,
-    FramingMethod,
     Hypothesis,
     LikelihoodBand,
     HypothesisCompetition,
@@ -51,6 +49,12 @@ class EvidenceIntegrationResult:
     probe_candidates: list[ProbeCandidate]
     evidence_memory: EvidenceMemorySnapshot | None = None
     normalized_signals: list[ExternalSignal] | None = None
+
+
+@dataclass(frozen=True)
+class _PlannedSignalEvents:
+    signal: ExternalSignal
+    event_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -244,7 +248,8 @@ class EvidenceIntegrationGate:
         signals: list[ExternalSignal],
     ) -> EvidenceIntegrationResult:
         self._ensure_helpers()
-        resolve_belief_lifecycle(belief_state)
+        lifecycle = resolve_belief_lifecycle(belief_state)
+        native_v02 = lifecycle == BeliefLifecycle.NATIVE_V02
         evidence_events: list[EvidenceEvent] = []
         probe_candidates: list[ProbeCandidate] = []
         closed_signals: list[ExternalSignal] = []
@@ -253,12 +258,6 @@ class EvidenceIntegrationGate:
         prior_evidence_ids = set(
             belief_state.ledger_refs.get("evidence_events", [])
         )
-        _reject_unverifiable_migrated_cycle_replay(
-            cycle=cycle,
-            belief_state=belief_state,
-            prior_evidence_ids=prior_evidence_ids,
-        )
-        identity_occurrences: dict[str, int] = {}
 
         normalized_signals = [
             self._provenance_normalizer.normalize(
@@ -267,27 +266,38 @@ class EvidenceIntegrationGate:
             )
             for raw_signal in signals
         ]
+        planned_signals = self._plan_signal_events(
+            cycle=cycle,
+            signals=normalized_signals,
+            native_v02=native_v02,
+        )
+        _preflight_migrated_event_set(
+            cycle=cycle,
+            prior_evidence_ids=prior_evidence_ids,
+            planned_signals=planned_signals,
+            native_v02=native_v02,
+        )
         preflight_memory = working_memory
-        for signal in normalized_signals:
+        for planned in planned_signals:
+            signal = planned.signal
             preflight_memory = self._memory_manager.remember_signal_identity(
                 preflight_memory,
                 signal,
             )
+            for event_id in planned.event_ids:
+                if event_id in prior_evidence_ids:
+                    self._memory_manager.validate_event_signal_identity(
+                        preflight_memory,
+                        event_id=event_id,
+                        signal=signal,
+                        require_existing=True,
+                    )
 
-        for index, signal in enumerate(normalized_signals, start=1):
+        for planned in planned_signals:
+            signal = planned.signal
             self._memory_manager.validate_signal_lineage(working_memory, signal)
             closed_signals.append(signal)
-            signal_identity = _canonical_signal_identity(signal)
-            identity_occurrences[signal_identity] = (
-                identity_occurrences.get(signal_identity, 0) + 1
-            )
-            event_id = _event_id_for_signal(
-                cycle=cycle,
-                signal_identity=signal_identity,
-                index=index,
-                occurrence=identity_occurrences[signal_identity],
-                native_v02=_is_native_v02_state(belief_state),
-            )
+            event_id = planned.event_ids[0]
             if event_id in prior_evidence_ids:
                 working_memory = self._memory_manager.remember_signal_identity(
                     working_memory,
@@ -329,7 +339,7 @@ class EvidenceIntegrationGate:
                     seen_signatures=seen_signatures,
                 )
                 event_result = self._build_signal_events(
-                    event_id=event_id,
+                    event_ids=planned.event_ids,
                     signal=signal,
                     belief_state=belief_state,
                     probe_set=probe_set,
@@ -362,6 +372,40 @@ class EvidenceIntegrationGate:
             evidence_memory=working_memory,
             normalized_signals=closed_signals,
         )
+
+    def _plan_signal_events(
+        self,
+        *,
+        cycle: CycleRecord,
+        signals: list[ExternalSignal],
+        native_v02: bool,
+    ) -> list[_PlannedSignalEvents]:
+        identity_occurrences: dict[str, int] = {}
+        planned: list[_PlannedSignalEvents] = []
+        for index, signal in enumerate(signals, start=1):
+            identity_digest = canonical_signal_identity_digest(signal)
+            occurrence = identity_occurrences.get(identity_digest, 0) + 1
+            identity_occurrences[identity_digest] = occurrence
+            event_id = _event_id_for_signal(
+                cycle=cycle,
+                signal_identity_digest=identity_digest,
+                index=index,
+                occurrence=occurrence,
+                native_v02=native_v02,
+            )
+            event_ids = [event_id]
+            if (
+                signal.source_type == "external_agent_projection"
+                and self._projection_decomposer.should_decompose(signal)
+            ):
+                event_ids.append(f"{event_id}_source")
+            planned.append(
+                _PlannedSignalEvents(
+                    signal=signal,
+                    event_ids=tuple(event_ids),
+                )
+            )
+        return planned
 
     def _replayed_event(
         self,
@@ -518,7 +562,7 @@ class EvidenceIntegrationGate:
     def _build_signal_events(
         self,
         *,
-        event_id: str,
+        event_ids: tuple[str, ...],
         signal: ExternalSignal,
         belief_state: BeliefState,
         probe_set: ProbeSet,
@@ -526,6 +570,7 @@ class EvidenceIntegrationGate:
         is_duplicate: bool,
         prior_memory_decision: EvidenceMemoryDecision,
     ) -> EvidenceIntegrationResult:
+        event_id = event_ids[0]
         if signal.source_type == "external_agent_projection":
             sender_event = self._build_projection_sender_event(
                 event_id=event_id,
@@ -534,13 +579,13 @@ class EvidenceIntegrationGate:
                 probe_set=probe_set,
                 is_duplicate=is_duplicate,
             )
-            if not self._projection_decomposer.should_decompose(signal):
+            if len(event_ids) == 1:
                 return EvidenceIntegrationResult(
                     evidence_events=[sender_event],
                     probe_candidates=[],
                 )
             source_event = self._build_source_claim_event(
-                event_id=f"{event_id}_source",
+                event_id=event_ids[1],
                 signal=signal,
                 belief_state=belief_state,
                 probe_set=probe_set,
@@ -1193,7 +1238,7 @@ def _scoped_cycle_key(run_id: str, cycle_id: str) -> str:
 def _event_id_for_signal(
     *,
     cycle: CycleRecord,
-    signal_identity: str,
+    signal_identity_digest: str,
     index: int,
     occurrence: int,
     native_v02: bool,
@@ -1201,43 +1246,36 @@ def _event_id_for_signal(
     scoped_cycle = _scoped_cycle_key(cycle.run_id, cycle.cycle_id)
     if not native_v02:
         return f"{scoped_cycle}_E{index}"
-    return f"{scoped_cycle}_E_{signal_identity}_{occurrence}"
+    return f"{scoped_cycle}_E_{signal_identity_digest}_{occurrence}"
 
 
-def _canonical_signal_identity(signal: ExternalSignal) -> str:
-    provenance = signal.provenance
-    canonical_identity = json.dumps(
-        [
-            provenance.canonical_content_fingerprint,
-            provenance.derivation_root_id,
-        ],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
-
-
-def _reject_unverifiable_migrated_cycle_replay(
+def _preflight_migrated_event_set(
     *,
     cycle: CycleRecord,
-    belief_state: BeliefState,
     prior_evidence_ids: set[str],
+    planned_signals: list[_PlannedSignalEvents],
+    native_v02: bool,
 ) -> None:
-    task_frame = belief_state.task_frame
-    if (
-        task_frame is None
-        or task_frame.framing_method != FramingMethod.LEGACY_MIGRATION
-        or not prior_evidence_ids
-    ):
+    if native_v02:
         return
-    memory = belief_state.evidence_memory
-    if memory is not None and memory.source_content_fingerprints:
+    scoped_cycle = _scoped_cycle_key(cycle.run_id, cycle.cycle_id)
+    positional_pattern = re.compile(
+        rf"{re.escape(scoped_cycle)}_E[1-9][0-9]*(?:_source)?"
+    )
+    prior_cycle_ids = {
+        event_id
+        for event_id in prior_evidence_ids
+        if positional_pattern.fullmatch(event_id)
+    }
+    if not prior_cycle_ids:
         return
-    event_prefix = f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E"
-    if any(event_id.startswith(event_prefix) for event_id in prior_evidence_ids):
-        raise ValueError(
-            "cannot replay an already-used cycle without signal identity memory"
-        )
+    planned_event_ids = {
+        event_id
+        for planned in planned_signals
+        for event_id in planned.event_ids
+    }
+    if planned_event_ids != prior_cycle_ids:
+        raise ValueError("evidence event replay set conflict")
 
 
 def _is_native_v02_state(belief_state: BeliefState) -> bool:

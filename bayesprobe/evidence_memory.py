@@ -67,6 +67,19 @@ def derive_deterministic_computation_root(
     return f"deterministic-computation:sha256:{digest}"
 
 
+def canonical_signal_identity_digest(signal: ExternalSignal) -> str:
+    provenance = _required_provenance(signal)
+    canonical_identity = json.dumps(
+        [
+            provenance.canonical_content_fingerprint,
+            provenance.derivation_root_id,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
+
+
 class SignalProvenanceNormalizer:
     """Close raw signals into deterministic, secret-free provenance."""
 
@@ -230,6 +243,9 @@ class EvidenceMemoryManager:
             content_fingerprints=content_fingerprints,
             source_content_fingerprints=source_content_fingerprints,
             derivation_roots=derivation_roots,
+            event_signal_identity_digests=dict(
+                snapshot.event_signal_identity_digests
+            ),
             correlation_credit=dict(snapshot.correlation_credit),
             discovery_evidence_ids=list(snapshot.discovery_evidence_ids),
             counterevidence_ids_by_hypothesis={
@@ -238,6 +254,27 @@ class EvidenceMemoryManager:
             },
             discard_and_schema_history=list(snapshot.discard_and_schema_history),
         )
+
+    def validate_event_signal_identity(
+        self,
+        snapshot: EvidenceMemorySnapshot,
+        *,
+        event_id: str,
+        signal: ExternalSignal,
+        require_existing: bool,
+    ) -> str:
+        _require_supported_memory_version(snapshot)
+        digest = canonical_signal_identity_digest(signal)
+        existing = snapshot.event_signal_identity_digests.get(event_id)
+        if existing is None:
+            if require_existing:
+                raise ValueError(
+                    "evidence event signal identity binding is missing"
+                )
+            return digest
+        if existing != digest:
+            raise ValueError("evidence event signal identity conflict")
+        return digest
 
     def classify(
         self,
@@ -354,16 +391,20 @@ class EvidenceMemoryManager:
         event: EvidenceEvent,
         decision: EvidenceMemoryDecision,
     ) -> EvidenceMemorySnapshot:
+        event_known = _event_id_in_lifecycle(snapshot, event.id)
+        signal_identity_digest = self.validate_event_signal_identity(
+            snapshot,
+            event_id=event.id,
+            signal=signal,
+            require_existing=event_known,
+        )
         snapshot = self.remember_signal_identity(
             snapshot,
             signal,
             canonical_correlation_group=decision.canonical_correlation_group,
         )
 
-        if event.id in snapshot.accepted_evidence_ids or any(
-            decode_discard_history_entry(item)[0] == event.id
-            for item in snapshot.discard_and_schema_history
-        ):
+        if event_known:
             return snapshot
 
         accepted_ids = list(snapshot.accepted_evidence_ids)
@@ -374,6 +415,10 @@ class EvidenceMemoryManager:
             discard_history.append(
                 encode_discard_history_entry(event.id, event.discard_reason)
             )
+        event_signal_identity_digests = dict(
+            snapshot.event_signal_identity_digests
+        )
+        event_signal_identity_digests[event.id] = signal_identity_digest
 
         cap = self._policy.max_cumulative_effective_weight_per_direction
         correlation_credit = dict(snapshot.correlation_credit)
@@ -396,6 +441,7 @@ class EvidenceMemoryManager:
             content_fingerprints=dict(snapshot.content_fingerprints),
             source_content_fingerprints=dict(snapshot.source_content_fingerprints),
             derivation_roots=dict(snapshot.derivation_roots),
+            event_signal_identity_digests=event_signal_identity_digests,
             correlation_credit=correlation_credit,
             discovery_evidence_ids=list(snapshot.discovery_evidence_ids),
             counterevidence_ids_by_hypothesis=counterevidence,
@@ -530,6 +576,16 @@ def _require_supported_memory_version(snapshot: EvidenceMemorySnapshot) -> None:
         or snapshot.memory_version not in _SUPPORTED_MEMORY_VERSIONS
     ):
         raise ValueError("unsupported evidence memory version")
+
+
+def _event_id_in_lifecycle(
+    snapshot: EvidenceMemorySnapshot,
+    event_id: str,
+) -> bool:
+    return event_id in snapshot.accepted_evidence_ids or any(
+        decode_discard_history_entry(entry)[0] == event_id
+        for entry in snapshot.discard_and_schema_history
+    )
 
 
 def _supplied_correlation_group(provenance: SignalProvenance) -> str:

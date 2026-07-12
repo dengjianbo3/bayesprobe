@@ -571,6 +571,9 @@ class FrameState(StrictTaskModel):
 
 
 _CANONICAL_FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_CANONICAL_SIGNAL_IDENTITY_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
 def _is_canonical_content_fingerprint(value: str) -> bool:
     return bool(_CANONICAL_FINGERPRINT_PATTERN.fullmatch(value))
 
@@ -635,6 +638,7 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     content_fingerprints: dict[str, str] = Field(default_factory=dict)
     source_content_fingerprints: dict[str, str] = Field(default_factory=dict)
     derivation_roots: dict[str, str] = Field(default_factory=dict)
+    event_signal_identity_digests: dict[str, str] = Field(default_factory=dict)
     correlation_credit: dict[str, float] = Field(default_factory=dict)
     discovery_evidence_ids: list[str] = Field(default_factory=list)
     counterevidence_ids_by_hypothesis: dict[str, list[str]] = Field(default_factory=dict)
@@ -706,6 +710,33 @@ class EvidenceMemorySnapshot(StrictTaskModel):
             result[clean_key] = clean_value
         return result
 
+    @field_validator("event_signal_identity_digests")
+    @classmethod
+    def validate_event_signal_identity_digests(
+        cls,
+        value: dict[str, str],
+    ) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for event_id, digest in value.items():
+            clean_event_id = _required_text(event_id, "event binding id")
+            if (
+                clean_event_id != event_id
+                or _contains_secret_material(event_id)
+            ):
+                raise ValueError(
+                    "event_signal_identity_digests requires exact non-secret event ids"
+                )
+            if (
+                not isinstance(digest, str)
+                or _CANONICAL_SIGNAL_IDENTITY_DIGEST_PATTERN.fullmatch(digest)
+                is None
+            ):
+                raise ValueError(
+                    "event_signal_identity_digests requires a canonical signal identity digest"
+                )
+            result[event_id] = digest
+        return result
+
     @field_validator("correlation_credit")
     @classmethod
     def validate_correlation_credit(cls, value: dict[str, float]) -> dict[str, float]:
@@ -729,6 +760,10 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     def validate_snapshot_coherence(self) -> "EvidenceMemorySnapshot":
         if _contains_secret_material(self.model_dump(mode="python")):
             raise ValueError("evidence memory must not contain secret material")
+        if self.memory_version != 2 and self.event_signal_identity_digests:
+            raise ValueError(
+                "event signal identity bindings require memory version 2"
+            )
         identity_key_sets = {
             frozenset(self.content_fingerprints),
             frozenset(self.source_content_fingerprints),
@@ -736,6 +771,17 @@ class EvidenceMemorySnapshot(StrictTaskModel):
         }
         if len(identity_key_sets) != 1:
             raise ValueError("evidence memory identity map keys must match exactly")
+        lifecycle_event_ids = set(self.accepted_evidence_ids)
+        lifecycle_event_ids.update(
+            decode_discard_history_entry(entry)[0]
+            for entry in self.discard_and_schema_history
+        )
+        if set(self.event_signal_identity_digests).difference(
+            lifecycle_event_ids
+        ):
+            raise ValueError(
+                "event signal identity bindings require lifecycle history"
+            )
         groups_by_source: dict[str, set[str]] = {}
         groups_by_root: dict[str, set[str]] = {}
         for signal_id, fingerprint in self.content_fingerprints.items():

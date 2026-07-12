@@ -560,3 +560,51 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 10
+
+### Changes
+
+- Added a compact v2 evidence-memory map from each accepted or discarded event
+  id to the canonical signal-identity digest used by native event-id generation.
+  Existing v2 snapshots load with an empty map; v1 cannot claim new bindings.
+- Made first commit write lifecycle history and its binding in one snapshot, and
+  made known-event commit require a matching persisted binding before identity
+  writes or idempotent return. Projection sender/source events bind separately
+  to the same signal digest.
+- Planned the complete normalized batch before integration. Migration replay
+  validates its exact positional event set and every referenced binding against
+  an identity-only shadow before provider access or committed state work.
+- Replaced the coarse non-empty identity-memory replay guard with per-event
+  proof. Historical native or migrated lifecycle ids without a binding now fail
+  closed; exact native and migrated replays remain idempotent.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py::test_v2_evidence_memory_defaults_missing_event_signal_bindings tests/test_schemas.py::test_evidence_memory_rejects_invalid_event_signal_binding_grammar tests/test_schemas.py::test_evidence_memory_event_bindings_require_lifecycle_history tests/test_schemas.py::test_evidence_memory_event_bindings_cover_accepted_and_discarded_events tests/test_schemas.py::test_belief_state_recursively_rejects_unowned_event_signal_binding tests/test_evidence_memory.py::test_native_event_id_and_binding_share_canonical_signal_identity_digest tests/test_evidence_memory.py::test_accepted_neutral_event_preserves_existing_directional_credit tests/test_evidence_memory.py::test_discard_history_uses_exact_event_id_with_colons_for_idempotency tests/test_evidence_memory.py::test_direct_commit_rejects_known_event_with_different_signal_binding tests/test_evidence_memory.py::test_direct_commit_rejects_known_event_without_historical_binding tests/test_evidence_memory.py::test_identity_only_write_preserves_event_signal_bindings tests/test_core_cycles.py::test_migrated_positional_replay_conflicts_fail_atomically tests/test_core_cycles.py::test_later_positional_conflict_preflights_before_novel_provider tests/test_core_cycles.py::test_exact_migrated_positional_replay_is_idempotent tests/test_core_cycles.py::test_historical_positional_event_without_binding_fails_with_other_identity_memory tests/test_core_cycles.py::test_external_projection_decomposes_source_claim_and_generates_verification_probe tests/test_core_cycles.py::test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record -q -p no:cacheprovider` -> `25 failed in 0.78s`.
+- Version-boundary RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py::test_v1_evidence_memory_rejects_event_signal_bindings -q -p no:cacheprovider` -> `1 failed in 0.13s`.
+- GREEN: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py::test_v2_evidence_memory_defaults_missing_event_signal_bindings tests/test_schemas.py::test_v1_evidence_memory_rejects_event_signal_bindings tests/test_schemas.py::test_evidence_memory_rejects_invalid_event_signal_binding_grammar tests/test_schemas.py::test_evidence_memory_event_bindings_require_lifecycle_history tests/test_schemas.py::test_evidence_memory_event_bindings_cover_accepted_and_discarded_events tests/test_schemas.py::test_belief_state_recursively_rejects_unowned_event_signal_binding tests/test_evidence_memory.py::test_native_event_id_and_binding_share_canonical_signal_identity_digest tests/test_evidence_memory.py::test_accepted_neutral_event_preserves_existing_directional_credit tests/test_evidence_memory.py::test_discard_history_uses_exact_event_id_with_colons_for_idempotency tests/test_evidence_memory.py::test_direct_commit_rejects_known_event_with_different_signal_binding tests/test_evidence_memory.py::test_direct_commit_rejects_known_event_without_historical_binding tests/test_evidence_memory.py::test_identity_only_write_preserves_event_signal_bindings tests/test_core_cycles.py::test_migrated_positional_replay_conflicts_fail_atomically tests/test_core_cycles.py::test_later_positional_conflict_preflights_before_novel_provider tests/test_core_cycles.py::test_exact_migrated_positional_replay_is_idempotent tests/test_core_cycles.py::test_historical_positional_event_without_binding_fails_with_other_identity_memory tests/test_core_cycles.py::test_external_projection_decomposes_source_claim_and_generates_verification_probe tests/test_core_cycles.py::test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record -q -p no:cacheprovider` -> `26 passed in 0.35s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `391 passed in 1.04s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `316 passed in 0.38s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1188 passed, 10 skipped in 9.52s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- Reordered, inserted, deleted, first-changed, and later-changed positional
+  batches fail during full-batch preflight with unchanged provider count,
+  ledger bytes, and belief memory. Exact replay proves binding equality and
+  performs no provider, event-history, directional-credit, or ledger write.
+- The shared digest is the sole input to native event-id construction and to
+  persisted replay bindings. Accepted, discarded, colon-bearing, and projection
+  secondary ids are covered; binding grammar and lifecycle ownership are also
+  enforced through recursive `BeliefState` validation.
+- All real evidence-memory reconstructions preserve bindings. Missing historical
+  proof is never inferred from unrelated source identity memory, while v2
+  snapshots without bindings remain loadable and fail only if such an event is
+  replayed.
+
+### Concerns
+
+No blocking concerns.

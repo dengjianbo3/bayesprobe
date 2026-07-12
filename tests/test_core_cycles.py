@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import bayesprobe.evidence_memory as evidence_memory
 from bayesprobe.core import BayesProbeCore, EvidenceIntegrationGate
 from bayesprobe.evidence import EvidenceIntegrationResult
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
@@ -2639,6 +2640,11 @@ def test_external_projection_decomposes_source_claim_and_generates_verification_
     ]
     assert sender_event.id == "run_1_cycle_projection_E1"
     assert source_event.id == "run_1_cycle_projection_E1_source"
+    projection_bindings = (
+        result.belief_state.evidence_memory.event_signal_identity_digests
+    )
+    assert set(projection_bindings) == {sender_event.id, source_event.id}
+    assert len(set(projection_bindings.values())) == 1
     assert sender_event.likelihoods["H2"] == LikelihoodBand.WEAKLY_CONFIRMING
     assert sender_event.likelihoods["H1"] == LikelihoodBand.NEUTRAL
     assert set(source_event.likelihoods.values()) == {LikelihoodBand.NEUTRAL}
@@ -2993,6 +2999,223 @@ def _native_open_judgment():
     }
 
 
+def _legacy_evidence_judgment():
+    return {
+        "evidence_type": "supporting",
+        "likelihoods": {
+            "H1": "moderately_confirming",
+            "H2": "moderately_disconfirming",
+        },
+        "interpretation": "The audit favors H1.",
+        "quality_overrides": {},
+    }
+
+
+def _migrated_replay_fixture(tmp_path: Path, name: str):
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _legacy_evidence_judgment()}
+    )
+    ledger_path = tmp_path / f"{name}.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    cycle = make_cycle(f"cycle_{name}")
+    first_signal = _memory_signal(
+        f"S_{name}_A",
+        "The first positional audit favors H1.",
+        root=f"root-{name}-A",
+    )
+    second_signal = _memory_signal(
+        f"S_{name}_B",
+        "The second positional audit also favors H1.",
+        root=f"root-{name}-B",
+    )
+    first = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[first_signal, second_signal],
+    )
+    normalized = [
+        evidence_memory.SignalProvenanceNormalizer().normalize(
+            signal,
+            run_id=cycle.run_id,
+        )
+        for signal in (first_signal, second_signal)
+    ]
+    expected_bindings = {
+        first.evidence_events[index].id:
+        evidence_memory.canonical_signal_identity_digest(signal)
+        for index, signal in enumerate(normalized)
+    }
+
+    assert first.belief_state.evidence_memory.event_signal_identity_digests == (
+        expected_bindings
+    )
+    return (
+        gateway,
+        ledger_path,
+        ledger,
+        core,
+        cycle,
+        first_signal,
+        second_signal,
+        first,
+    )
+
+
+@pytest.mark.parametrize(
+    "replay_shape",
+    [
+        "reordered",
+        "inserted",
+        "deleted",
+        "changed_first",
+        "changed_later",
+    ],
+)
+def test_migrated_positional_replay_conflicts_fail_atomically(
+    tmp_path: Path,
+    replay_shape: str,
+):
+    (
+        gateway,
+        ledger_path,
+        _,
+        core,
+        cycle,
+        first_signal,
+        second_signal,
+        first,
+    ) = _migrated_replay_fixture(tmp_path, f"migrated_{replay_shape}")
+    inserted = _memory_signal(
+        f"S_{replay_shape}_inserted",
+        "An inserted positional observation.",
+        root=f"root-{replay_shape}-inserted",
+    )
+    changed = _memory_signal(
+        f"S_{replay_shape}_changed",
+        "A materially changed positional observation.",
+        root=f"root-{replay_shape}-changed",
+    )
+    replay_signals = {
+        "reordered": [second_signal, first_signal],
+        "inserted": [inserted, first_signal, second_signal],
+        "deleted": [first_signal],
+        "changed_first": [changed, second_signal],
+        "changed_later": [first_signal, changed],
+    }[replay_shape]
+    prior_memory = first.belief_state.evidence_memory.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+    prior_provider_calls = len(gateway.requests)
+
+    with pytest.raises(ValueError, match="evidence event"):
+        core.integrate_cycle(
+            cycle=cycle.model_copy(update={"cycle_index": 2}),
+            belief_state=first.belief_state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=replay_signals,
+        )
+
+    assert len(gateway.requests) == prior_provider_calls
+    assert first.belief_state.evidence_memory.model_dump(mode="json") == prior_memory
+    assert ledger_path.read_bytes() == prior_ledger
+
+
+def test_later_positional_conflict_preflights_before_novel_provider(
+    tmp_path: Path,
+):
+    (
+        gateway,
+        ledger_path,
+        _,
+        core,
+        cycle,
+        _,
+        _,
+        first,
+    ) = _migrated_replay_fixture(tmp_path, "migrated_late_preflight")
+    first_event_id, second_event_id = [
+        event.id for event in first.evidence_events
+    ]
+    prior_memory = first.belief_state.evidence_memory
+    partial_memory = EvidenceMemorySnapshot.model_validate(
+        {
+            **prior_memory.model_dump(mode="python"),
+            "accepted_evidence_ids": [second_event_id],
+            "event_signal_identity_digests": {
+                second_event_id:
+                prior_memory.event_signal_identity_digests[second_event_id]
+            },
+        }
+    )
+    partial_state = first.belief_state.model_copy(
+        update={
+            "evidence_memory": partial_memory,
+            "ledger_refs": {"evidence_events": [second_event_id]},
+        }
+    )
+    partial_state = BeliefState.model_validate(
+        partial_state.model_dump(mode="python")
+    )
+    novel = _memory_signal(
+        "S_late_preflight_novel",
+        "A novel first event must not reach the provider.",
+        root="root-late-preflight-novel",
+    )
+    conflicting = _memory_signal(
+        "S_late_preflight_conflict",
+        "A changed second event conflicts with the E2 binding.",
+        root="root-late-preflight-conflict",
+    )
+    prior_state = partial_state.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+    prior_provider_calls = len(gateway.requests)
+
+    with pytest.raises(ValueError, match="evidence event"):
+        core.integrate_cycle(
+            cycle=cycle.model_copy(update={"cycle_index": 2}),
+            belief_state=partial_state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[novel, conflicting],
+        )
+
+    assert first_event_id not in partial_state.ledger_refs["evidence_events"]
+    assert len(gateway.requests) == prior_provider_calls
+    assert partial_state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == prior_ledger
+
+
+def test_exact_migrated_positional_replay_is_idempotent(tmp_path: Path):
+    (
+        gateway,
+        _,
+        ledger,
+        core,
+        cycle,
+        first_signal,
+        second_signal,
+        first,
+    ) = _migrated_replay_fixture(tmp_path, "migrated_exact_replay")
+    prior_memory = first.belief_state.evidence_memory
+    prior_provider_calls = len(gateway.requests)
+    prior_event_records = ledger.read_all("evidence_event")
+
+    replayed = core.integrate_cycle(
+        cycle=cycle.model_copy(update={"cycle_index": 2}),
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[first_signal, second_signal],
+    )
+
+    assert len(gateway.requests) == prior_provider_calls
+    assert [event.discard_reason for event in replayed.evidence_events] == [
+        "duplicate evidence event id",
+        "duplicate evidence event id",
+    ]
+    assert replayed.belief_state.evidence_memory == prior_memory
+    assert ledger.read_all("evidence_event") == prior_event_records
+
+
 def test_core_commits_memory_once_and_ledgers_normalized_cross_cycle_duplicate(
     tmp_path: Path,
 ):
@@ -3225,6 +3448,9 @@ def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
     assert replayed_memory.accepted_evidence_ids == prior_memory.accepted_evidence_ids
     assert replayed_memory.discard_and_schema_history == prior_memory.discard_and_schema_history
     assert replayed_memory.correlation_credit == prior_memory.correlation_credit
+    assert replayed_memory.event_signal_identity_digests == (
+        prior_memory.event_signal_identity_digests
+    )
     assert replayed.belief_updates == []
     assert [
         record["payload"]["id"] for record in ledger.read_all("evidence_event")
@@ -3331,13 +3557,32 @@ def test_replayed_new_signal_identity_is_persisted_then_conflict_fails_atomicall
     assert ledger_path.read_bytes() == prior_ledger
 
 
-def test_migrated_v01_reordered_inserted_replay_fails_before_provider_or_memory(
+def test_historical_positional_event_without_binding_fails_with_other_identity_memory(
     tmp_path: Path,
 ):
-    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
-    ledger = JsonlLedgerStore(tmp_path / "migrated-memory-replay-ledger.jsonl")
-    cycle = make_cycle("cycle_migrated_memory_replay")
-    event_id = "run_1_cycle_migrated_memory_replay_E1"
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _legacy_evidence_judgment()}
+    )
+    ledger_path = tmp_path / "historical-missing-binding-ledger.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    other_cycle = make_cycle("cycle_other_identity")
+    first = core.integrate_cycle(
+        cycle=other_cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set(other_cycle.cycle_id),
+        signals=[
+            _memory_signal(
+                "S_other_identity",
+                "An unrelated earlier positional event.",
+                root="root-other-identity",
+            )
+        ],
+    )
+    cycle = make_cycle("cycle_historical_missing_binding").model_copy(
+        update={"cycle_index": 2}
+    )
+    event_id = "run_1_cycle_historical_missing_binding_E1"
     prior_event = EvidenceEvent(
         id=event_id,
         derived_from_signal="S_prior",
@@ -3350,40 +3595,54 @@ def test_migrated_v01_reordered_inserted_replay_fails_before_provider_or_memory(
         },
     )
     ledger.append("evidence_event", prior_event)
-    legacy_state = make_belief_state(cycle_id="cycle_0").model_copy(
+    prior_memory = first.belief_state.evidence_memory
+    memory_with_historical_lifecycle = EvidenceMemorySnapshot.model_validate(
+        {
+            **prior_memory.model_dump(mode="python"),
+            "accepted_evidence_ids": [
+                *prior_memory.accepted_evidence_ids,
+                event_id,
+            ],
+        }
+    )
+    historical_state = first.belief_state.model_copy(
         update={"ledger_refs": {"evidence_events": [event_id]}}
     )
+    historical_state = historical_state.model_copy(
+        update={"evidence_memory": memory_with_historical_lifecycle}
+    )
+    historical_state = BeliefState.model_validate(
+        historical_state.model_dump(mode="python")
+    )
+    prior_state_payload = historical_state.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+    prior_provider_calls = len(gateway.requests)
 
-    prior_state_payload = legacy_state.model_dump(mode="python")
-    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    assert historical_state.evidence_memory.source_content_fingerprints
+    assert event_id not in (
+        historical_state.evidence_memory.event_signal_identity_digests
+    )
 
     with pytest.raises(
         ValueError,
-        match="cannot replay an already-used cycle without signal identity memory",
+        match="event signal identity binding is missing",
     ):
         core.integrate_cycle(
             cycle=cycle,
-            belief_state=legacy_state,
+            belief_state=historical_state,
             probe_set=make_empty_probe_set(cycle.cycle_id),
             signals=[
                 _memory_signal(
-                    "S_inserted_before_replay",
-                    "An inserted payload that shifts the old positional event.",
-                    root="root-inserted-before-replay",
-                ),
-                _memory_signal(
-                    "S_migrated_replay",
-                    "A different payload under an already-recorded evidence id.",
-                    root="root-migrated-replay",
+                    "S_historical_replay",
+                    "The historical event cannot be proven from unrelated memory.",
+                    root="root-historical-replay",
                 ),
             ],
         )
 
-    assert gateway.requests == []
-    assert legacy_state.model_dump(mode="python") == prior_state_payload
-    assert [
-        record["payload"]["id"] for record in ledger.read_all("evidence_event")
-    ] == [event_id]
+    assert len(gateway.requests) == prior_provider_calls
+    assert historical_state.model_dump(mode="json") == prior_state_payload
+    assert ledger_path.read_bytes() == prior_ledger
 
 
 def test_saturated_correlation_event_is_ledger_visible_without_mass_update(

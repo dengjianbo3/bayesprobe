@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+import bayesprobe.evidence_memory as evidence_memory
 from bayesprobe.evidence import EvidenceIntegrationGate
 from bayesprobe.evidence_memory import (
     EvidenceMemoryManager,
@@ -535,6 +536,32 @@ def test_native_event_identity_survives_reordered_and_inserted_signals():
     assert reordered_ids["S_second"] == original_ids["S_second"]
 
 
+def test_native_event_id_and_binding_share_canonical_signal_identity_digest():
+    signal = _signal(
+        "S_native_binding",
+        "A native event identity binding.",
+        root="root-native-binding",
+    )
+    normalized = SignalProvenanceNormalizer().normalize(
+        signal,
+        run_id="run_memory",
+    )
+
+    result = EvidenceIntegrationGate(model_gateway=CountingGateway()).integrate(
+        cycle=_cycle(1),
+        belief_state=_state(),
+        probe_set=_probe_set(1),
+        signals=[signal],
+    )
+
+    event = result.evidence_events[0]
+    digest = evidence_memory.canonical_signal_identity_digest(normalized)
+    assert event.id.endswith(f"_E_{digest}_1")
+    assert result.evidence_memory.event_signal_identity_digests == {
+        event.id: digest
+    }
+
+
 def test_native_event_identity_is_unique_for_duplicate_signals_in_one_batch():
     gateway = CountingGateway()
     duplicate = _signal("S_duplicate_1", "The same audited observation.")
@@ -730,6 +757,9 @@ def test_accepted_neutral_event_preserves_existing_directional_credit():
     assert decision.remaining_credit == {}
     assert committed.accepted_evidence_ids == [event.id]
     assert committed.correlation_credit == original_credit
+    assert committed.event_signal_identity_digests == {
+        event.id: evidence_memory.canonical_signal_identity_digest(signal)
+    }
 
 
 def test_correlation_credit_saturation_stays_visible_with_zero_weight():
@@ -810,6 +840,9 @@ def test_discard_history_uses_exact_event_id_with_colons_for_idempotency():
     assert committed.discard_and_schema_history == [
         '["run:cycle:event:1","schema_violation:invalid judgment"]'
     ]
+    assert committed.event_signal_identity_digests == {
+        event.id: evidence_memory.canonical_signal_identity_digest(signal)
+    }
     assert recommitted == committed
 
 
@@ -904,6 +937,89 @@ def test_identical_signal_id_reuse_is_idempotent():
     )
 
     assert recommitted == snapshot
+
+
+def test_direct_commit_rejects_known_event_with_different_signal_binding():
+    manager, snapshot, _, _ = _committed_signal_identity()
+    conflicting_signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_rebound",
+            "Different content must not rebind E_reused_1.",
+            root="root-rebound",
+        ),
+        run_id="run_memory",
+    )
+    decision = manager.classify(
+        snapshot,
+        conflicting_signal,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+        base_effective_weight=0.4,
+    )
+    event = EvidenceEvent(
+        id="E_reused_1",
+        derived_from_signal=conflicting_signal.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=conflicting_signal.raw_content,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+    prior = snapshot.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="event signal identity conflict"):
+        manager.commit(
+            snapshot,
+            signal=conflicting_signal,
+            event=event,
+            decision=decision,
+        )
+
+    assert snapshot.model_dump(mode="json") == prior
+    assert conflicting_signal.id not in snapshot.content_fingerprints
+
+
+def test_direct_commit_rejects_known_event_without_historical_binding():
+    manager, snapshot, signal, decision = _committed_signal_identity()
+    historical = EvidenceMemorySnapshot(
+        memory_version=snapshot.memory_version,
+        accepted_evidence_ids=list(snapshot.accepted_evidence_ids),
+        content_fingerprints=dict(snapshot.content_fingerprints),
+        source_content_fingerprints=dict(snapshot.source_content_fingerprints),
+        derivation_roots=dict(snapshot.derivation_roots),
+        correlation_credit=dict(snapshot.correlation_credit),
+        discovery_evidence_ids=list(snapshot.discovery_evidence_ids),
+        counterevidence_ids_by_hypothesis={
+            key: list(value)
+            for key, value in snapshot.counterevidence_ids_by_hypothesis.items()
+        },
+        discard_and_schema_history=list(snapshot.discard_and_schema_history),
+    )
+    event = EvidenceEvent(
+        id="E_reused_1",
+        derived_from_signal=signal.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=signal.raw_content,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+
+    with pytest.raises(ValueError, match="event signal identity binding is missing"):
+        manager.commit(
+            historical,
+            signal=signal,
+            event=event,
+            decision=decision,
+        )
+
+
+def test_identity_only_write_preserves_event_signal_bindings():
+    manager, snapshot, signal, _ = _committed_signal_identity()
+    replay_signal = signal.model_copy(update={"id": "S_reused_alias"})
+
+    remembered = manager.remember_signal_identity(snapshot, replay_signal)
+
+    assert remembered.event_signal_identity_digests == (
+        snapshot.event_signal_identity_digests
+    )
 
 
 def test_neutral_event_still_correlates_later_model_reasoning_from_same_session():

@@ -498,6 +498,114 @@ def test_evidence_memory_discard_history_has_canonical_round_trip():
     assert restored.discard_and_schema_history == [entry]
 
 
+def test_v2_evidence_memory_defaults_missing_event_signal_bindings():
+    snapshot = EvidenceMemorySnapshot.model_validate({"memory_version": 2})
+
+    assert snapshot.event_signal_identity_digests == {}
+
+
+def test_v1_evidence_memory_rejects_event_signal_bindings():
+    with pytest.raises(ValueError, match="version 2"):
+        EvidenceMemorySnapshot(
+            memory_version=1,
+            accepted_evidence_ids=["E1"],
+            event_signal_identity_digests={"E1": "a" * 64},
+        )
+
+
+@pytest.mark.parametrize(
+    ("bindings", "message"),
+    [
+        ({" E1 ": "a" * 64}, "exact non-secret event ids"),
+        (
+            {"password=provider-value-123": "a" * 64},
+            "exact non-secret event ids",
+        ),
+        ({"E1": "a" * 63}, "canonical signal identity digest"),
+        ({"E1": "A" * 64}, "canonical signal identity digest"),
+        ({"E1": "sha256:" + "a" * 64}, "canonical signal identity digest"),
+    ],
+)
+def test_evidence_memory_rejects_invalid_event_signal_binding_grammar(
+    bindings,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        EvidenceMemorySnapshot(
+            memory_version=2,
+            accepted_evidence_ids=["E1"],
+            event_signal_identity_digests=bindings,
+        )
+
+
+def test_evidence_memory_event_bindings_require_lifecycle_history():
+    with pytest.raises(ValueError, match="lifecycle history"):
+        EvidenceMemorySnapshot(
+            memory_version=2,
+            event_signal_identity_digests={"E_unowned": "a" * 64},
+        )
+
+
+def test_evidence_memory_event_bindings_cover_accepted_and_discarded_events():
+    snapshot = EvidenceMemorySnapshot(
+        memory_version=2,
+        accepted_evidence_ids=["E_accepted"],
+        discard_and_schema_history=[
+            '["E_discarded","schema_violation:invalid judgment"]'
+        ],
+        event_signal_identity_digests={
+            "E_accepted": "a" * 64,
+            "E_discarded": "b" * 64,
+        },
+    )
+
+    restored = EvidenceMemorySnapshot.model_validate(
+        snapshot.model_dump(mode="python")
+    )
+
+    assert restored == snapshot
+
+
+def test_belief_state_recursively_rejects_unowned_event_signal_binding():
+    task_frame = make_v02_task_frame()
+    hypotheses = [
+        Hypothesis(
+            id=item.id,
+            statement=item.statement,
+            type=item.type,
+            scope=item.scope,
+            prior=item.initial_prior,
+            posterior=item.initial_prior,
+            rivals=list(task_frame.hypothesis_frame.rival_sets[item.id]),
+            falsifiers=list(item.falsifiers),
+            predictions=list(item.predictions),
+        )
+        for item in task_frame.hypothesis_frame.hypotheses
+    ]
+
+    with pytest.raises(ValueError, match="lifecycle history"):
+        BeliefState(
+            schema_version="v0.2",
+            belief_state_id="bs_binding_validation",
+            run_id="run_binding_validation",
+            cycle_id="cycle_0",
+            hypotheses=hypotheses,
+            task_frame=task_frame,
+            frame_state=FrameState(
+                frame_id=task_frame.hypothesis_frame.frame_id,
+                competition=task_frame.hypothesis_frame.competition,
+                coverage=task_frame.hypothesis_frame.coverage,
+                active_hypothesis_ids=[item.id for item in hypotheses],
+                unresolved_alternative_mass=0.5,
+                adequacy_status=FrameAdequacyStatus.PROVISIONAL,
+            ),
+            evidence_memory={
+                "memory_version": 2,
+                "event_signal_identity_digests": {"E_unowned": "a" * 64},
+            },
+        )
+
+
 def test_v2_evidence_memory_preserves_canonical_and_supplied_groups():
     fingerprint = "sha256:" + "a" * 64
     identity = (
