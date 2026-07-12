@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
@@ -226,19 +227,18 @@ class ModelHypothesisExpansionAdapter:
         request: StructuredModelRequest,
         *,
         stage: str,
-    ) -> dict[str, Any]:
+    ) -> Any:
         try:
-            response = self._model_gateway.complete_structured(request)
+            return self._model_gateway.complete_structured(request)
         except Exception:
-            response = None
-        if not isinstance(response, dict):
-            raise HypothesisExpansionError(f"{stage} model gateway call failed")
-        return response
+            raise HypothesisExpansionError(f"{stage} model gateway call failed") from None
 
     @staticmethod
     def _validate_response(
-        response: dict[str, Any],
+        response: Any,
     ) -> list[HypothesisExpansionProposal]:
+        if not isinstance(response, Mapping):
+            raise HypothesisExpansionError("hypothesis expansion response invalid")
         try:
             parsed = _HypothesisExpansionResponse.model_validate(response)
         except Exception:

@@ -449,3 +449,47 @@ def test_model_adapter_raises_fixed_error_after_one_invalid_repair():
         ModelHypothesisExpansionAdapter(gateway).propose(
             expansion_request(task_frame, frame_state, hypotheses)
         )
+
+
+def test_model_adapter_repairs_non_object_initial_response():
+    task_frame, frame_state, hypotheses = make_state()
+    gateway = ScriptedModelGateway(
+        {
+            "expand_hypotheses": ["not an object"],
+            "repair_hypothesis_expansion": {
+                "candidates": [raw_proposal(answer_value=4)]
+            },
+        }
+    )
+
+    proposals = ModelHypothesisExpansionAdapter(gateway).propose(
+        expansion_request(task_frame, frame_state, hypotheses)
+    )
+
+    assert [item.answer_value for item in proposals] == [4]
+    assert [request.task for request in gateway.requests] == [
+        "expand_hypotheses",
+        "repair_hypothesis_expansion",
+    ]
+    assert gateway.requests[1].input["validation_error"] == "hypothesis expansion response invalid"
+
+
+def test_model_adapter_raises_fixed_error_after_non_object_repair_response():
+    task_frame, frame_state, hypotheses = make_state()
+    gateway = ScriptedModelGateway(
+        {
+            "expand_hypotheses": {"candidates": []},
+            "repair_hypothesis_expansion": ["not an object"],
+        }
+    )
+
+    with pytest.raises(HypothesisExpansionError) as captured:
+        ModelHypothesisExpansionAdapter(gateway).propose(
+            expansion_request(task_frame, frame_state, hypotheses)
+        )
+
+    assert str(captured.value) == "hypothesis expansion invalid after 1 repair attempt"
+    assert [request.task for request in gateway.requests] == [
+        "expand_hypotheses",
+        "repair_hypothesis_expansion",
+    ]
