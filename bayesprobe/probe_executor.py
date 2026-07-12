@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from bayesprobe.evidence_memory import derive_deterministic_computation_root
+from bayesprobe.evidence_memory import (
+    derive_deterministic_computation_root,
+    derive_model_provenance_keys,
+)
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.lifecycle import resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
@@ -120,6 +123,22 @@ class ModelBackedProbeToolGateway:
             context.belief_state
         ).provider_version
         model_identity = model_gateway_identity(self._model_gateway)
+        model_keys = derive_model_provenance_keys(
+            provider_identity=model_identity,
+            session_id=context.run_id,
+        )
+        adapter_kind = model_gateway_adapter_kind(self._model_gateway)
+        provenance = SignalProvenance(
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+            source_identity=model_keys.source_identity,
+            provider_model_or_tool_identity=model_identity,
+            session_id=context.run_id,
+            derivation_root_id=(
+                f"model-probe:{context.run_id}:{context.cycle_id}:{probe.id}"
+            ),
+            correlation_group=model_keys.correlation_group,
+            canonical_content_fingerprint="pending-normalization",
+        )
         request = StructuredModelRequest(
             task="execute_probe",
             input={
@@ -157,7 +176,6 @@ class ModelBackedProbeToolGateway:
         )
         payload = self._model_gateway.complete_structured(request)
         raw_content = _probe_raw_content(payload)
-        adapter_kind = model_gateway_adapter_kind(self._model_gateway)
         return [
             ExternalSignal(
                 id=f"S_{context.cycle_id}_{probe.id}",
@@ -168,17 +186,7 @@ class ModelBackedProbeToolGateway:
                 raw_content=raw_content,
                 generated_by_probe=probe.id,
                 initial_target_hypotheses=list(probe.target_hypotheses),
-                provenance=SignalProvenance(
-                    epistemic_origin=EpistemicOrigin.MODEL_REASONING,
-                    source_identity=f"model_gateway:{model_identity}",
-                    provider_model_or_tool_identity=model_identity,
-                    session_id=context.run_id,
-                    derivation_root_id=(
-                        f"model-probe:{context.run_id}:{context.cycle_id}:{probe.id}"
-                    ),
-                    correlation_group=f"model:{model_identity}:{context.run_id}",
-                    canonical_content_fingerprint="pending-normalization",
-                ),
+                provenance=provenance,
             )
         ]
 

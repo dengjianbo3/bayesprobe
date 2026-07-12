@@ -76,6 +76,7 @@ _SECRET_MODEL_IDENTITIES = (
         "provider-secret-value-123"
     ),
 )
+_NFKC_SENSITIVE_NAME = "\uff41\uff50\uff49\uff3f\uff4b\uff45\uff59"
 _OPENAI_MODEL_IDENTITY_PREFIX = "openai_model_identity:v1:"
 
 
@@ -541,6 +542,32 @@ def test_model_backed_probe_rejects_secret_identity_before_provider_call(
     assert model_gateway.requests == []
 
 
+def test_model_backed_probe_rejects_sensitive_session_before_provider_call():
+    model_gateway = ScriptedModelGateway(
+        responses={
+            "execute_probe": {"raw_content": "This must not be requested."}
+        }
+    )
+    state = make_native_belief_state()
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="model provenance") as exc_info:
+        ModelBackedProbeToolGateway(model_gateway).execute_probe(
+            probe=make_probe("P_sensitive_session", ["H1", "H2"]),
+            context=ProbeExecutionContext(
+                run_id=_NFKC_SENSITIVE_NAME,
+                cycle_id="run_exec_cycle_1",
+                belief_state=state,
+            ),
+        )
+
+    error_text = str(exc_info.value)
+    assert _NFKC_SENSITIVE_NAME not in error_text
+    assert "api_key" not in error_text
+    assert model_gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
+
+
 @pytest.mark.parametrize("invalid_envelope", _INVALID_MIGRATION_ENVELOPES)
 def test_model_backed_probe_gateway_rejects_invalid_migration_envelope(
     invalid_envelope,
@@ -764,6 +791,83 @@ def test_model_probe_provenance_uses_injective_openai_component_identity(
     )
     assert first.provenance.correlation_group != (
         different_provider.provenance.correlation_group
+    )
+
+
+@pytest.mark.parametrize(
+    ("gateway_type", "adapter_kind"),
+    [
+        (OpenAIResponsesModelGateway, "openai"),
+        (
+            OpenAIChatCompletionsModelGateway,
+            "openai_chat_completions",
+        ),
+    ],
+)
+def test_pipe_bearing_openai_model_uses_preflight_machine_provenance(
+    gateway_type,
+    adapter_kind,
+):
+    class StubOpenAICompatibleGateway(gateway_type):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.requests = []
+
+        def complete_structured(self, request):
+            self.requests.append(request)
+            return {"raw_content": "One pipe-bearing model observation."}
+
+    initialized = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_pipe_model",
+            problem="Which pipe-bearing model observation is supported?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    )
+    gateway = StubOpenAICompatibleGateway(
+        config=OpenAIModelGatewayConfig(
+            model="provider|model",
+            base_url="https://provider.example/v1",
+        )
+    )
+    signal = ModelBackedProbeToolGateway(gateway).execute_probe(
+        probe=make_probe("P_pipe_model", ["H1", "H2"]),
+        context=ProbeExecutionContext(
+            run_id="run_pipe_model",
+            cycle_id="run_pipe_model_cycle_1",
+            belief_state=initialized.belief_state,
+        ),
+    )[0]
+
+    audit_identity = signal.provenance.provider_model_or_tool_identity
+    assert len(gateway.requests) == 1
+    assert parse_openai_model_identity(audit_identity) == {
+        "adapter_kind": adapter_kind,
+        "model": "provider|model",
+        "provider_origin": "https://provider.example",
+    }
+    assert_sha256_identity(
+        signal.provenance.source_identity,
+        prefix="model-source:sha256:",
+    )
+    assert_sha256_identity(
+        signal.provenance.correlation_group,
+        prefix="model:sha256:",
+    )
+    assert audit_identity not in signal.provenance.source_identity
+    assert audit_identity not in signal.provenance.correlation_group
+    assert "|" not in signal.provenance.source_identity
+    assert "|" not in signal.provenance.correlation_group
+
+    normalized = SignalProvenanceNormalizer().normalize(
+        signal,
+        run_id="run_pipe_model",
+    )
+
+    assert normalized.provenance.provider_model_or_tool_identity == audit_identity
+    assert normalized.provenance.source_identity == signal.provenance.source_identity
+    assert normalized.provenance.correlation_group == (
+        signal.provenance.correlation_group
     )
 
 

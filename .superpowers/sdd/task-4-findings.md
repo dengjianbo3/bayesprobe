@@ -131,3 +131,7 @@
 ## Twentieth full-range re-review finding
 
 1. Exact provider/model identity must remain distinct through provenance normalization and Evidence Memory correlation. Model-origin `source_identity` and canonical correlation keys cannot apply NFKC or whitespace folding to the opaque provider identity, because exact model identifiers such as `K` and `K` (or distinct internal whitespace) would collapse. Continue recursive exact-and-normalized sensitive-data checks, but derive model-origin source/correlation keys from an injective exact-byte representation or digest of the already validated provider identity and session.
+
+## Twenty-first full-range re-review finding
+
+1. Every model-backed execution path must derive and validate the complete model-origin machine provenance keys before its first provider call. Do not interpolate the raw audit identity into a provisional `correlation_group`: an otherwise valid exact model identifier containing the reserved `|` delimiter must use the same digest-based source/group keys as final normalization and must not fail only after provider work. Cover direct probe execution and Python planning/reasoning/repair call order with zero-call preflight regressions.

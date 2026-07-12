@@ -59,6 +59,7 @@ _NFKC_SECRET_VALUE = (
     "\uff49\uff4f\uff4e\uff1a \uff22\uff45\uff41\uff52\uff45\uff52 "
     "provider-secret-value-123"
 )
+_NFKC_SENSITIVE_NAME = "\uff41\uff50\uff49\uff3f\uff4b\uff45\uff59"
 
 
 class CountingGateway:
@@ -446,6 +447,73 @@ def test_model_origin_without_provider_identity_uses_exact_safe_fallback():
     assert normalized.provenance.canonical_content_fingerprint != (
         normalized_distinct.provenance.canonical_content_fingerprint
     )
+
+
+def test_shared_model_provenance_keys_are_exact_pipe_safe_and_normalizer_owned():
+    provider_identity = "provider|model  K"
+    session_id = "session|one"
+
+    keys = evidence_memory.derive_model_provenance_keys(
+        provider_identity=provider_identity,
+        session_id=session_id,
+    )
+
+    assert isinstance(keys, evidence_memory.ModelProvenanceKeys)
+    assert re.fullmatch(r"model-source:sha256:[0-9a-f]{64}", keys.source_identity)
+    assert re.fullmatch(r"model:sha256:[0-9a-f]{64}", keys.correlation_group)
+    assert "|" not in keys.source_identity
+    assert "|" not in keys.correlation_group
+    assert provider_identity not in keys.source_identity
+    assert provider_identity not in keys.correlation_group
+    supplied = ExternalSignal(
+        id="S_shared_model_keys",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="custom_model_adapter",
+        source="model-provider",
+        raw_content="One shared-key model observation.",
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+            source_identity="temporary-source",
+            provider_model_or_tool_identity=provider_identity,
+            session_id=session_id,
+            derivation_root_id="root-shared-model-keys",
+            correlation_group="temporary-group",
+            canonical_content_fingerprint="replace-me",
+        ),
+    )
+
+    normalized = SignalProvenanceNormalizer().normalize(
+        supplied,
+        run_id="unused-run",
+    )
+
+    assert normalized.provenance.provider_model_or_tool_identity == provider_identity
+    assert normalized.provenance.source_identity == keys.source_identity
+    assert normalized.provenance.correlation_group == keys.correlation_group
+
+
+def test_shared_model_provenance_keys_reject_nfkc_sensitive_session_before_hash(
+    monkeypatch,
+):
+    digest_calls = []
+    original_sha256 = evidence_memory.hashlib.sha256
+
+    def recording_sha256(value=b""):
+        digest_calls.append(value)
+        return original_sha256(value)
+
+    monkeypatch.setattr(evidence_memory.hashlib, "sha256", recording_sha256)
+
+    with pytest.raises(ValueError, match="model provenance") as exc_info:
+        evidence_memory.derive_model_provenance_keys(
+            provider_identity="provider|model",
+            session_id=_NFKC_SENSITIVE_NAME,
+        )
+
+    assert _NFKC_SENSITIVE_NAME not in str(exc_info.value)
+    assert "api_key" not in str(exc_info.value)
+    assert digest_calls == []
 
 
 def test_model_correlation_group_uses_exact_session_identity():

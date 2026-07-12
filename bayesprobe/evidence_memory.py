@@ -210,6 +210,36 @@ class EvidenceMemoryDecision:
     canonical_correlation_group: str
 
 
+@dataclass(frozen=True)
+class ModelProvenanceKeys:
+    source_identity: str
+    correlation_group: str
+
+
+def derive_model_provenance_keys(
+    *,
+    provider_identity: str,
+    session_id: str,
+) -> ModelProvenanceKeys:
+    exact_provider_identity = _validated_exact_model_identity_text(
+        provider_identity
+    )
+    exact_session_id = _validated_exact_model_identity_text(session_id)
+    source_digest = _exact_identity_digest(
+        {"provider_identity": exact_provider_identity}
+    )
+    correlation_digest = _exact_identity_digest(
+        {
+            "provider_identity": exact_provider_identity,
+            "session_id": exact_session_id,
+        }
+    )
+    return ModelProvenanceKeys(
+        source_identity=f"model-source:sha256:{source_digest}",
+        correlation_group=f"model:sha256:{correlation_digest}",
+    )
+
+
 def derive_deterministic_computation_root(
     *,
     tool_identity: str,
@@ -273,13 +303,12 @@ class SignalProvenanceNormalizer:
             )
             if session_id is None:
                 session_id = run_id
-            _reject_secret_hash_text(provider_identity)
-            _reject_secret_hash_text(session_id)
-            source_identity = _model_source_identity(provider_identity)
-            correlation_group = _model_correlation_group(
-                provider_identity,
-                session_id,
+            model_keys = derive_model_provenance_keys(
+                provider_identity=provider_identity,
+                session_id=session_id,
             )
+            source_identity = model_keys.source_identity
+            correlation_group = model_keys.correlation_group
         else:
             raw_source_identity = (
                 supplied.source_identity
@@ -832,22 +861,14 @@ def _model_provider_audit_identity(
     return fallback_identity
 
 
-def _model_source_identity(provider_identity: str) -> str:
-    _reject_secret_hash_text(provider_identity)
-    digest = _exact_identity_digest({"provider_identity": provider_identity})
-    return f"model-source:sha256:{digest}"
-
-
-def _model_correlation_group(provider_identity: str, session_id: str) -> str:
-    _reject_secret_hash_text(provider_identity)
-    _reject_secret_hash_text(session_id)
-    digest = _exact_identity_digest(
-        {
-            "provider_identity": provider_identity,
-            "session_id": session_id,
-        }
-    )
-    return f"model:sha256:{digest}"
+def _validated_exact_model_identity_text(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("model provenance inputs must be non-empty text")
+    if contains_secret_material({value: None}) or contains_secret_material(
+        {"value": value}
+    ):
+        raise ValueError("model provenance inputs contain secret material")
+    return value
 
 
 def _exact_identity_digest(components: Mapping[str, str]) -> str:
@@ -1122,11 +1143,13 @@ def _matches_required_discard_semantics(
 __all__ = [
     "EvidenceMemoryDecision",
     "EvidenceMemoryManager",
+    "ModelProvenanceKeys",
     "SIGNAL_QUALITY_METRICS",
     "SignalQuality",
     "SignalQualityAssessor",
     "SignalProvenanceNormalizer",
     "cycle_signal_source_content_signature",
     "derive_deterministic_computation_root",
+    "derive_model_provenance_keys",
     "observe_cycle_signal_duplicate",
 ]

@@ -12,7 +12,10 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Callable, Literal, Protocol
 
-from bayesprobe.evidence_memory import derive_deterministic_computation_root
+from bayesprobe.evidence_memory import (
+    derive_deterministic_computation_root,
+    derive_model_provenance_keys,
+)
 from bayesprobe.lifecycle import resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
     ModelGateway,
@@ -519,6 +522,22 @@ class PythonAugmentedProbeToolGateway:
             context.belief_state
         ).provider_version
         model_identity = model_gateway_identity(self._model_gateway)
+        model_keys = derive_model_provenance_keys(
+            provider_identity=model_identity,
+            session_id=context.run_id,
+        )
+        adapter_kind = model_gateway_adapter_kind(self._model_gateway)
+        reasoning_provenance = SignalProvenance(
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+            source_identity=model_keys.source_identity,
+            provider_model_or_tool_identity=model_identity,
+            session_id=context.run_id,
+            derivation_root_id=(
+                f"model-probe:{context.run_id}:{context.cycle_id}:{probe.id}"
+            ),
+            correlation_group=model_keys.correlation_group,
+            canonical_content_fingerprint="pending-normalization",
+        )
         try:
             plan = self._plan_probe(
                 probe=probe,
@@ -543,7 +562,8 @@ class PythonAugmentedProbeToolGateway:
                         probe=probe,
                         context=context,
                         provider_version=provider_version,
-                        model_identity=model_identity,
+                        adapter_kind=adapter_kind,
+                        provenance=reasoning_provenance,
                     )
                 ]
             except Exception:
@@ -677,7 +697,8 @@ class PythonAugmentedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
         provider_version: Literal["v0.1", "v0.2"],
-        model_identity: str,
+        adapter_kind: str,
+        provenance: SignalProvenance,
     ) -> ExternalSignal:
         payload = self._model_gateway.complete_structured(
             StructuredModelRequest(
@@ -697,7 +718,6 @@ class PythonAugmentedProbeToolGateway:
             raise ModelGatewayValidationError(
                 "reasoning probe signal raw_content must not be empty"
             )
-        adapter_kind = model_gateway_adapter_kind(self._model_gateway)
         return ExternalSignal(
             id=f"S_{context.cycle_id}_{probe.id}",
             cycle_id=context.cycle_id,
@@ -707,17 +727,7 @@ class PythonAugmentedProbeToolGateway:
             raw_content=raw_content.strip(),
             generated_by_probe=probe.id,
             initial_target_hypotheses=list(plan.target_hypotheses),
-            provenance=SignalProvenance(
-                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
-                source_identity=f"model_gateway:{model_identity}",
-                provider_model_or_tool_identity=model_identity,
-                session_id=context.run_id,
-                derivation_root_id=(
-                    f"model-probe:{context.run_id}:{context.cycle_id}:{probe.id}"
-                ),
-                correlation_group=f"model:{model_identity}:{context.run_id}",
-                canonical_content_fingerprint="pending-normalization",
-            ),
+            provenance=provenance,
         )
 
     def _execute_code(

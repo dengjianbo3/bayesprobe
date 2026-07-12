@@ -1702,3 +1702,102 @@ The non-model normalization control passed.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 26
+
+### Design Decision
+
+- Exposed `derive_model_provenance_keys(provider_identity, session_id)` and its
+  frozen `ModelProvenanceKeys` result from Evidence Memory. The function
+  validates both exact strings, their NFKC forms, sensitive value patterns, and
+  sensitive key-name forms before either digest, then returns the sole
+  `model-source:sha256:<digest>` and `model:sha256:<digest>` implementation.
+- `SignalProvenanceNormalizer` now consumes that public function after resolving
+  its exact supplied or fallback audit identity. The old private source/group
+  digest functions were removed, leaving no duplicate model-key algorithm.
+- `ModelBackedProbeToolGateway` resolves model identity, derives keys, and
+  constructs its complete static `SignalProvenance` before building or sending
+  the provider request. The exact frozen provenance object is attached to the
+  returned signal.
+- `PythonAugmentedProbeToolGateway` performs the same derivation and static
+  provenance construction before its first planning request. The preflight is
+  shared by planning, plan repair, reasoning, and code repair; reasoning reuses
+  the exact precomputed provenance rather than reconstructing it after provider
+  work.
+
+### Changed Files
+
+- `bayesprobe/evidence_memory.py`
+- `bayesprobe/probe_executor.py`
+- `bayesprobe/evaluation/python_probe.py`
+- `tests/test_evidence_memory.py`
+- `tests/test_probe_executor.py`
+- `tests/evaluation/test_python_probe.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_shared_model_provenance_keys_are_exact_pipe_safe_and_normalizer_owned tests/test_evidence_memory.py::test_shared_model_provenance_keys_reject_nfkc_sensitive_session_before_hash tests/test_probe_executor.py::test_model_backed_probe_rejects_sensitive_session_before_provider_call tests/test_probe_executor.py::test_pipe_bearing_openai_model_uses_preflight_machine_provenance tests/evaluation/test_python_probe.py::test_python_gateway_rejects_sensitive_session_before_first_provider_call tests/evaluation/test_python_probe.py::test_reasoning_mode_pipe_identity_reuses_preflight_machine_provenance -q --tb=short -p no:cacheprovider
+```
+
+Result: `10 failed in 0.33s`. The shared API was absent; both OpenAI adapters
+made a provider call before rejecting pipe-bearing identities in raw
+correlation groups; direct sensitive-session validation failed after provider
+work; all four Python routes performed provider/sandbox work; and Python
+reasoning returned an unverified signal after two provider calls.
+
+- GREEN/refactor: the same focused command -> `10 passed in 0.24s`.
+- Direct provenance/gateway suites:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_probe_executor.py
+  tests/evaluation/test_python_probe.py tests/test_evidence_memory.py
+  tests/test_openai_gateway.py tests/test_model_gateway.py -q --tb=short -p
+  no:cacheprovider` -> `394 passed in 0.91s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_probe_executor.py tests/evaluation/test_python_probe.py
+  tests/test_evidence_memory.py tests/test_core_cycles.py -q -p
+  no:cacheprovider` -> `506 passed in 2.08s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1400 passed, 10 skipped in 11.40s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before
+  report/commit; both checks are repeated after report and the range check after
+  commit.
+
+### Self-Review
+
+- Public key derivation validates provider and session completely before its
+  first SHA-256 call. An NFKC `api_key` session test instruments
+  `hashlib.sha256`, observes zero calls, and receives generic secret-free error
+  text. Pipe characters remain valid input because only digest outputs enter
+  reserved correlation-key grammar.
+- Responses and Chat Completions both execute a real pipe-bearing OpenAI model
+  identity successfully. Each makes exactly one provider call, retains the
+  complete canonical JSON identity only in
+  `provider_model_or_tool_identity`, and uses digest-only source/group fields
+  before and after normalization.
+- Direct probe provenance is fully constructed before `complete_structured`.
+  A sensitive session produces zero provider requests and leaves the belief
+  state unchanged.
+- Python computes one key pair and static reasoning provenance before
+  `plan_python_probe`. Parameterized plan, plan-repair, reasoning, and
+  code-repair regressions prove a sensitive session yields zero provider calls,
+  zero sandbox/preflight/process activity, unchanged metrics, and unchanged
+  belief state. Pipe-bearing reasoning reuses those keys through normalization.
+- A production scan finds model key formats only in the shared Evidence Memory
+  function and all three callers invoke that function. Existing exact
+  K/Kelvin-sign, internal-whitespace, fallback identity, non-model source,
+  replay/lineage, recorded gateway, and successful provider tests remain green.
+
+### Concerns
+
+No blocking concerns.

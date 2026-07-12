@@ -9,6 +9,7 @@ import pytest
 
 import bayesprobe.evaluation.python_probe as python_probe_module
 from bayesprobe.evidence import EvidenceIntegrationGate
+from bayesprobe.evidence_memory import SignalProvenanceNormalizer
 from bayesprobe.evaluation.python_probe import (
     DockerPythonSandbox,
     DockerPythonSandboxConfig,
@@ -68,6 +69,7 @@ _SECRET_MODEL_IDENTITIES = (
         "provider-secret-value-123"
     ),
 )
+_NFKC_SENSITIVE_NAME = "\uff41\uff50\uff49\uff3f\uff4b\uff45\uff59"
 _OPAQUE_CODE_PAIRS = (
     pytest.param("    print('value')", "print('value')", id="leading-indentation"),
     pytest.param("print('value')\n", "print('value')", id="trailing-newline"),
@@ -728,6 +730,62 @@ def test_python_gateway_rejects_secret_identity_before_every_route(
     assert context.belief_state.model_dump(mode="json") == prior_state
 
 
+@pytest.mark.parametrize(
+    "route",
+    ["plan", "plan_repair", "reasoning", "code_repair"],
+)
+def test_python_gateway_rejects_sensitive_session_before_first_provider_call(
+    route,
+):
+    if route == "plan":
+        outcomes = [python_plan()]
+        records = [execution_record()]
+    elif route == "plan_repair":
+        outcomes = [python_plan(""), python_plan()]
+        records = [execution_record()]
+    elif route == "reasoning":
+        outcomes = [
+            {
+                "mode": "reasoning",
+                "purpose": "Use a conceptual argument.",
+                "target_hypotheses": ["A", "B", "C"],
+                "expected_observation": "One option follows logically.",
+                "code": None,
+            },
+            {"raw_content": "This must not be requested."},
+        ]
+        records = []
+    else:
+        outcomes = [python_plan("bad()"), {"code": "print(4)"}]
+        records = [
+            execution_record(exit_code=1, stdout="", stderr="NameError"),
+            execution_record(repair_attempt_index=1),
+        ]
+    model = SequenceModelGateway(outcomes)
+    sandbox = FakeSandbox(records)
+    gateway = PythonAugmentedProbeToolGateway(model, sandbox)
+    probe, context = probe_context()
+    context = ProbeExecutionContext(
+        run_id=_NFKC_SENSITIVE_NAME,
+        cycle_id=context.cycle_id,
+        belief_state=context.belief_state,
+        metadata=dict(context.metadata),
+    )
+    prior_state = context.belief_state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="model provenance") as exc_info:
+        gateway.execute_probe(probe=probe, context=context)
+
+    error_text = str(exc_info.value)
+    assert _NFKC_SENSITIVE_NAME not in error_text
+    assert "api_key" not in error_text
+    assert model.requests == []
+    assert sandbox.preflight_calls == 0
+    assert sandbox.requests == []
+    assert set(gateway.process_metrics.values()) == {0}
+    assert context.belief_state.model_dump(mode="json") == prior_state
+
+
 def test_python_augmented_gateway_converts_successful_execution_to_active_signal():
     model = SequenceModelGateway([python_plan()])
     sandbox = FakeSandbox([execution_record()])
@@ -1160,6 +1218,50 @@ def test_reasoning_mode_uses_model_signal_without_starting_sandbox():
     ]
     assert {request.prompt_version for request in model.requests} == {"v0.2"}
     assert {request.schema_version for request in model.requests} == {"v0.2"}
+
+
+def test_reasoning_mode_pipe_identity_reuses_preflight_machine_provenance():
+    model = SequenceModelGateway(
+        [
+            {
+                "mode": "reasoning",
+                "purpose": "Use a conceptual argument.",
+                "target_hypotheses": ["A", "B", "C"],
+                "expected_observation": "One option follows logically.",
+                "code": None,
+            },
+            {"raw_content": "A pipe-bearing model supports answer choice B."},
+        ]
+    )
+    model.model_identity = "provider|model"
+    sandbox = FakeSandbox([])
+    gateway = PythonAugmentedProbeToolGateway(model, sandbox)
+    probe, context = probe_context()
+
+    signal = gateway.execute_probe(probe=probe, context=context)[0]
+
+    assert signal.provenance.epistemic_origin == EpistemicOrigin.MODEL_REASONING
+    assert signal.provenance.provider_model_or_tool_identity == "provider|model"
+    assert signal.provenance.source_identity.startswith("model-source:sha256:")
+    assert signal.provenance.correlation_group.startswith("model:sha256:")
+    assert "provider|model" not in signal.provenance.source_identity
+    assert "provider|model" not in signal.provenance.correlation_group
+    assert "|" not in signal.provenance.source_identity
+    assert "|" not in signal.provenance.correlation_group
+    normalized = SignalProvenanceNormalizer().normalize(
+        signal,
+        run_id=context.run_id,
+    )
+    assert normalized.provenance.source_identity == signal.provenance.source_identity
+    assert normalized.provenance.correlation_group == (
+        signal.provenance.correlation_group
+    )
+    assert sandbox.preflight_calls == 0
+    assert sandbox.requests == []
+    assert [request.task for request in model.requests] == [
+        "plan_python_probe",
+        "execute_probe",
+    ]
 
 
 def test_reasoning_mode_provider_failure_becomes_unverified_signal():
