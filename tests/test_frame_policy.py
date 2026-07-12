@@ -260,29 +260,20 @@ def test_none_effective_weight_uses_legacy_quality_product():
     assert result.hypotheses[0].posterior > 0.25
 
 
-def test_retirement_returns_named_mass_to_unresolved_before_normalization():
+def test_solver_fails_closed_when_retirement_transfer_has_no_audit_context():
     state = _exact_state(
         named={"H1": 0.37655, "H2": 0.12345},
         unresolved=0.50,
         statuses={"H2": HypothesisStatus.RETIRED},
     )
 
-    result = CoverageAwareBeliefSolver().solve(
-        state,
-        [],
-        run_id="run_exact",
-        cycle_id="cycle_1",
-    )
-
-    assert result.hypotheses[0].posterior == 0.37655
-    assert result.hypotheses[1].posterior == 0.12345
-    assert result.frame_state.unresolved_alternative_mass == pytest.approx(0.62345)
-    assert (
-        result.hypotheses[0].posterior
-        + result.frame_state.unresolved_alternative_mass
-    ) == 1.0
-    assert result.frame_state.active_hypothesis_ids == ["H1"]
-    assert result.frame_mass_updates == []
+    with pytest.raises(ValueError, match="retirement transfer requires audit context"):
+        CoverageAwareBeliefSolver().solve(
+            state,
+            [],
+            run_id="run_exact",
+            cycle_id="cycle_1",
+        )
 
 
 def test_open_solver_preserves_minimum_unresolved_reserve():
@@ -304,6 +295,33 @@ def test_open_solver_preserves_minimum_unresolved_reserve():
 
     assert result.frame_state.unresolved_alternative_mass == 0.05
     assert sum(hypothesis.posterior for hypothesis in result.hypotheses) == 0.95
+
+
+def test_open_solver_preserves_non_grid_reserve_after_rounding():
+    reserve = 0.05001
+    state = _exact_state(named={"H1": 0.475, "H2": 0.475}, unresolved=0.05)
+    event = _event(
+        likelihoods={
+            "H1": LikelihoodBand.STRONGLY_CONFIRMING,
+            "H2": LikelihoodBand.STRONGLY_CONFIRMING,
+        },
+        unresolved_likelihood=LikelihoodBand.STRONGLY_DISCONFIRMING,
+    )
+
+    result = CoverageAwareBeliefSolver(
+        open_coverage_policy=OpenCoveragePolicy(
+            minimum_unresolved_reserve=reserve,
+        )
+    ).solve(
+        state,
+        [event],
+        run_id="run_exact",
+        cycle_id="cycle_1",
+    )
+
+    unresolved = result.frame_state.unresolved_alternative_mass
+    assert unresolved >= reserve
+    assert sum(hypothesis.posterior for hypothesis in result.hypotheses) + unresolved == 1.0
 
 
 def test_discarded_event_does_not_change_named_or_unresolved_mass():
@@ -413,6 +431,38 @@ def test_one_high_verifiability_external_root_marks_open_frame_inadequate():
 
     assert decision.frame_state.adequacy_status == FrameAdequacyStatus.INADEQUATE
     assert decision.should_expand is True
+
+
+def test_inadequate_decision_records_only_qualifying_unresolved_support_events():
+    state = _exact_state(named={"H1": 0.25, "H2": 0.25}, unresolved=0.50)
+    non_qualifying = _event(
+        event_id="E_low_verifiability",
+        likelihoods={"H1": LikelihoodBand.STRONGLY_DISCONFIRMING},
+        unresolved_likelihood=LikelihoodBand.STRONGLY_CONFIRMING,
+        frame_fit=FrameFit.SUPPORTS_UNRESOLVED,
+        verifiability=0.20,
+        origin="tool_result",
+        derivation_root_id="low-root",
+    )
+    qualifying = _event(
+        event_id="E_qualifying",
+        likelihoods={"H2": LikelihoodBand.STRONGLY_DISCONFIRMING},
+        unresolved_likelihood=LikelihoodBand.STRONGLY_CONFIRMING,
+        frame_fit=FrameFit.SUPPORTS_UNRESOLVED,
+        verifiability=0.75,
+        origin="tool_result",
+        derivation_root_id="qualifying-root",
+    )
+
+    decision = FrameAdequacyPolicy().assess(
+        previous=state.frame_state,
+        events=[non_qualifying, qualifying],
+        hypotheses=state.hypotheses,
+    )
+
+    assert decision.frame_state.adequacy_status == FrameAdequacyStatus.INADEQUATE
+    assert decision.trigger_event_ids == [qualifying.id]
+    assert decision.frame_state.trigger_event_ids == [qualifying.id]
 
 
 def test_two_moderate_external_events_require_distinct_derivation_roots():

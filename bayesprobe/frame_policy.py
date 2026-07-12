@@ -119,6 +119,11 @@ class FrameAdequacyPolicy:
             >= self.config.required_distinct_moderate_roots
             and roots_have_external_support
         ):
+            qualifying_trigger_event_ids = (
+                [high_event.id]
+                if high_event is not None
+                else _unique_ids(event.id for event in moderate_events)
+            )
             reason = (
                 "A strongly confirming, externally verifiable event supports an "
                 "unresolved alternative."
@@ -129,7 +134,7 @@ class FrameAdequacyPolicy:
                 previous,
                 status=FrameAdequacyStatus.INADEQUATE,
                 should_expand=True,
-                trigger_event_ids=trigger_event_ids,
+                trigger_event_ids=qualifying_trigger_event_ids,
                 reason=reason,
             )
 

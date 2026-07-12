@@ -119,3 +119,55 @@ expansion but cannot establish externally verified frame inadequacy. Legacy
 hypothesis evolution remains bypassed for exclusive-open frames because it
 normalizes named hypotheses without the private unresolved slot; bounded open
 frame expansion belongs to the later expansion task.
+
+## Review Fix 1
+
+Reviewed base: `0c60121f37a453ebd7a003ba6b1cb9320d0a8b08`.
+This section supersedes the earlier exclusive-open retirement concern.
+
+### Changes
+
+- Exclusive-open public cycles now run the existing evolution engine's
+  retirement rule against accepted current-cycle evidence. The open path does
+  not run anomaly spawning, reframing, or candidate creation.
+- Added coverage-aware retirement reconciliation after evolution determines a
+  retirement. The retired hypothesis retains its solver posterior and retired
+  audit state, leaves `active_hypothesis_ids`, and transfers that posterior to
+  unresolved mass in the same returned `BeliefState` without named-only
+  renormalization.
+- Every retirement transfer creates a stable per-hypothesis `FrameMassUpdate`
+  with sequential prior/posterior unresolved values and the final accepted
+  retirement-triggering evidence id. Available derivation-root context is
+  retained in the reason. A transfer without evolution/evidence audit context
+  fails closed.
+- Retirement frame-mass records remain after event belief/frame updates and
+  before frame adequacy, hypothesis evolution, candidates, and final state.
+  The public-cycle regression asserts the complete relevant ledger order.
+- Distribution rounding now applies configured minimums on the same decimal
+  grid as the final distribution and assigns the residual only to an eligible
+  slot. A custom reserve of `0.05001` finishes at or above reserve while named
+  plus unresolved mass remains exactly one.
+- Inadequacy decisions now report only the unresolved-support events that
+  satisfy the qualifying high-verifiability or distinct-root rule. Mixed
+  qualifying/non-qualifying coverage is asserted precisely.
+
+### RED Evidence
+
+`PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_frame_policy.py tests/test_belief.py tests/test_core_cycles.py tests/test_initialization.py -q -p no:cacheprovider`
+produced `4 failed, 126 passed in 0.36s`. The failures were the unaudited
+synthetic retirement transfer, non-grid reserve rounding down to `0.05`, mixed
+trigger ids including a non-qualifying event, and production open-cycle
+retirement remaining unreachable.
+
+### GREEN Evidence
+
+- Exact Task 3 focused suite: `130 passed in 0.32s`.
+- Full offline Python suite: `974 passed, 10 skipped in 7.82s`.
+- Node stream regression: `15 passed, 0 failed`.
+- `git diff --check`: clean.
+
+### Concerns
+
+No blocking concerns. Open-cycle evolution intentionally reaches only the
+existing retirement rule in Task 3; semantic expansion, reframing, anomaly
+spawning, and new probe candidates remain deferred to Task 6.

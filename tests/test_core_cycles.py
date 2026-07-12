@@ -26,6 +26,7 @@ from bayesprobe.schemas import (
     FrameFit,
     Hypothesis,
     HypothesisEvolution,
+    HypothesisStatus,
     EvolutionOperation,
     LikelihoodBand,
     ProbeDesign,
@@ -1879,6 +1880,98 @@ def test_core_integrates_named_and_unresolved_mass_atomically(tmp_path: Path):
         "belief_update",
         "frame_mass_update",
         "frame_adequacy_decision",
+        "belief_state",
+    ]
+
+
+def test_core_retires_open_hypothesis_with_audited_mass_transfer(tmp_path: Path):
+    events = [
+        EvidenceEvent(
+            id=f"E_open_retire_{index}",
+            derived_from_signal=f"S_open_retire_{index}",
+            target_hypotheses=["H2"],
+            evidence_type=EvidenceType.COUNTEREVIDENCE,
+            content=f"Independent constraint {index} excludes H2.",
+            reliability=1.0,
+            independence=1.0,
+            relevance=1.0,
+            novelty=1.0,
+            likelihoods={"H2": LikelihoodBand.STRONGLY_DISCONFIRMING},
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            effective_update_weight=1.0,
+            epistemic_origin="tool_result",
+            derivation_root_id=f"retirement-root-{index}",
+        )
+        for index in (1, 2)
+    ]
+    ledger = JsonlLedgerStore(tmp_path / "open-retirement-ledger.jsonl")
+    core = StaticEventCore(events, ledger=ledger)
+
+    result = core.integrate_cycle(
+        cycle=make_cycle("cycle_open_retirement"),
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set("cycle_open_retirement"),
+        signals=[make_active_signal("pending")],
+    )
+
+    hypotheses = result.belief_state.hypotheses_by_id()
+    frame_state = result.belief_state.frame_state
+    retired = hypotheses["H2"]
+    assert retired.status == HypothesisStatus.RETIRED
+    assert "H2" not in frame_state.active_hypothesis_ids
+    named_active_mass = sum(
+        hypotheses[hypothesis_id].posterior
+        for hypothesis_id in frame_state.active_hypothesis_ids
+    )
+    assert named_active_mass + frame_state.unresolved_alternative_mass == 1.0
+
+    retirement_updates = [
+        update
+        for update in result.frame_mass_updates
+        if update.update_id
+        == "run_1_cycle_open_retirement_FM_retire_H2"
+    ]
+    assert len(retirement_updates) == 1
+    retirement_update = retirement_updates[0]
+    assert retirement_update.evidence_id == events[-1].id
+    assert retirement_update.posterior - retirement_update.prior == pytest.approx(
+        retired.posterior
+    )
+    assert "retirement-root-2" in retirement_update.reason
+    assert all(update.hypothesis_id != "unresolved" for update in result.belief_updates)
+    assert result.frame_adequacy_decision.frame_state == frame_state
+    assert [evolution.operation for evolution in result.hypothesis_evolutions] == [
+        EvolutionOperation.RETIRE
+    ]
+
+    ordered_types = [
+        record["record_type"]
+        for record in ledger.read_all()
+        if record["record_type"]
+        in {
+            "external_signal",
+            "evidence_event",
+            "belief_update",
+            "frame_mass_update",
+            "frame_adequacy_decision",
+            "hypothesis_evolution",
+            "probe_candidate",
+            "belief_state",
+        }
+    ]
+    assert ordered_types == [
+        "external_signal",
+        "evidence_event",
+        "evidence_event",
+        "belief_update",
+        "belief_update",
+        "belief_update",
+        "belief_update",
+        "frame_mass_update",
+        "frame_mass_update",
+        "frame_mass_update",
+        "frame_adequacy_decision",
+        "hypothesis_evolution",
         "belief_state",
     ]
 

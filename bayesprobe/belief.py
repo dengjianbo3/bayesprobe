@@ -15,9 +15,11 @@ from bayesprobe.schemas import (
     Hypothesis,
     HypothesisCompetition,
     HypothesisCoverage,
+    HypothesisEvolution,
     HypothesisRelation,
     HypothesisStatus,
     LikelihoodBand,
+    EvolutionOperation,
     UpdateDirection,
 )
 
@@ -81,15 +83,35 @@ def _softmax(scores: dict[str, float]) -> dict[str, float]:
     }
 
 
-def _round_distribution(distribution: dict[str, float]) -> dict[str, float]:
+def _round_distribution(
+    distribution: dict[str, float],
+    *,
+    minimums: dict[str, float] | None = None,
+) -> dict[str, float]:
     if not distribution:
         return {}
+    minimums = minimums or {}
+    scale = 10**_DISTRIBUTION_PRECISION
+    minimum_units = {
+        hypothesis_id: math.ceil(minimum * scale - 1e-12)
+        for hypothesis_id, minimum in minimums.items()
+    }
     rounded = {
         hypothesis_id: round(value, _DISTRIBUTION_PRECISION)
         for hypothesis_id, value in distribution.items()
     }
+    for hypothesis_id, units in minimum_units.items():
+        rounded[hypothesis_id] = max(rounded[hypothesis_id], units / scale)
     residual = round(1.0 - sum(rounded.values()), _DISTRIBUTION_PRECISION)
-    anchor = max(distribution, key=lambda hypothesis_id: distribution[hypothesis_id])
+    anchors = [
+        hypothesis_id
+        for hypothesis_id in distribution
+        if rounded[hypothesis_id] + residual
+        >= minimum_units.get(hypothesis_id, 0) / scale
+    ]
+    if not anchors:
+        raise ValueError("rounded distribution cannot satisfy configured minimums")
+    anchor = max(anchors, key=lambda hypothesis_id: distribution[hypothesis_id])
     rounded[anchor] = round(
         rounded[anchor] + residual,
         _DISTRIBUTION_PRECISION,
@@ -394,11 +416,8 @@ class CoverageAwareBeliefSolver:
             if unresolved_mass is None:
                 raise ValueError("exclusive-open frame requires unresolved mass")
             retired_ids = set(frame_state.active_hypothesis_ids).difference(active_ids)
-            unresolved_mass = unresolved_mass + sum(
-                hypothesis.posterior
-                for hypothesis in working_hypotheses
-                if hypothesis.id in retired_ids
-            )
+            if retired_ids:
+                raise ValueError("retirement transfer requires audit context")
         working_frame_state = frame_state.model_copy(
             update={
                 "active_hypothesis_ids": active_ids,
@@ -443,6 +462,108 @@ class CoverageAwareBeliefSolver:
             frame_state=working_frame_state,
             belief_updates=belief_updates,
             frame_mass_updates=frame_mass_updates,
+        )
+
+    def reconcile_retirements(
+        self,
+        solve_result: BeliefSolveResult,
+        *,
+        evolved_hypotheses: list[Hypothesis],
+        evolutions: list[HypothesisEvolution],
+        events: list[EvidenceEvent],
+        run_id: str,
+        cycle_id: str,
+    ) -> BeliefSolveResult:
+        frame_state = solve_result.frame_state
+        if not (
+            frame_state.competition == HypothesisCompetition.EXCLUSIVE
+            and frame_state.coverage == HypothesisCoverage.OPEN
+        ):
+            raise ValueError("retirement reconciliation requires an exclusive-open frame")
+        unresolved_mass = frame_state.unresolved_alternative_mass
+        if unresolved_mass is None:
+            raise ValueError("exclusive-open frame requires unresolved mass")
+
+        solved_by_id = {
+            hypothesis.id: hypothesis for hypothesis in solve_result.hypotheses
+        }
+        events_by_id = {
+            event.id: event for event in events if event.discard_reason is None
+        }
+        retirement_evolutions = {
+            evolution.from_hypothesis: evolution
+            for evolution in evolutions
+            if evolution.operation == EvolutionOperation.RETIRE
+            and evolution.from_hypothesis is not None
+        }
+        newly_retired = [
+            hypothesis
+            for hypothesis in evolved_hypotheses
+            if hypothesis.status == HypothesisStatus.RETIRED
+            and hypothesis.id in frame_state.active_hypothesis_ids
+        ]
+        retirement_updates: list[FrameMassUpdate] = []
+        for hypothesis in newly_retired:
+            solved = solved_by_id.get(hypothesis.id)
+            evolution = retirement_evolutions.get(hypothesis.id)
+            if solved is None or evolution is None:
+                raise ValueError(
+                    f"retirement transfer for {hypothesis.id} requires an evolution audit"
+                )
+            trigger_event = next(
+                (
+                    events_by_id[event_id]
+                    for event_id in reversed(evolution.triggered_by)
+                    if event_id in events_by_id
+                ),
+                None,
+            )
+            if trigger_event is None:
+                raise ValueError(
+                    f"retirement transfer for {hypothesis.id} requires triggering evidence"
+                )
+            prior = unresolved_mass
+            unresolved_mass = prior + solved.posterior
+            root_context = (
+                f" with derivation root {trigger_event.derivation_root_id}"
+                if trigger_event.derivation_root_id is not None
+                else ""
+            )
+            retirement_updates.append(
+                FrameMassUpdate(
+                    update_id=(
+                        f"{run_id}_{cycle_id}_FM_retire_{hypothesis.id}"
+                    ),
+                    cycle_id=cycle_id,
+                    evidence_id=trigger_event.id,
+                    prior=prior,
+                    posterior=unresolved_mass,
+                    direction=_direction(prior, unresolved_mass),
+                    reason=(
+                        f"Retiring {hypothesis.id} transfers its posterior mass to "
+                        f"unresolved alternatives after {trigger_event.id}{root_context}."
+                    ),
+                )
+            )
+
+        active_ids = [
+            hypothesis.id
+            for hypothesis in evolved_hypotheses
+            if _participates_in_distribution(hypothesis)
+        ]
+        return BeliefSolveResult(
+            hypotheses=evolved_hypotheses,
+            frame_state=frame_state.model_copy(
+                update={
+                    "active_hypothesis_ids": active_ids,
+                    "unresolved_alternative_mass": unresolved_mass,
+                }
+            ),
+            belief_updates=solve_result.belief_updates,
+            frame_mass_updates=[
+                *solve_result.frame_mass_updates,
+                *retirement_updates,
+            ],
         )
 
     def _solve_exclusive_event(
@@ -499,7 +620,17 @@ class CoverageAwareBeliefSolver:
                 distribution,
                 reserve=self.open_coverage_policy.minimum_unresolved_reserve,
             )
-        event_posteriors = _round_distribution(distribution)
+        event_posteriors = _round_distribution(
+            distribution,
+            minimums=(
+                {
+                    _UNRESOLVED_SLOT:
+                    self.open_coverage_policy.minimum_unresolved_reserve,
+                }
+                if frame_state.coverage == HypothesisCoverage.OPEN
+                else None
+            ),
+        )
         replacements: dict[str, Hypothesis] = {}
         updates: list[BeliefUpdate] = []
         for hypothesis in participants:
