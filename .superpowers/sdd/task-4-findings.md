@@ -143,3 +143,8 @@
 ## Twenty-third full-range re-review finding
 
 1. Every Evidence Memory snapshot accepted by a manager must satisfy that manager's configured correlation-credit cap before replay, identity-only work, classification, commit, or transition reconstruction. Schema-level non-negativity is insufficient because it cannot know a custom policy. Reject over-cap prior and candidate snapshots atomically; replay or unrelated transitions cannot preserve policy-invalid credit, and production must fail before provider work where a policy-invalid prior could otherwise reach a model call.
+
+## Twenty-fourth full-range re-review findings
+
+1. Native event effective weight must equal the authoritative reconstructed decision exactly. One-ULP inflation cannot pass through `math.isclose`, and commit cannot tolerate then clamp an over-cap sum: solver-applied weight and persisted credit must describe the same exact accepted amount. Production decision arithmetic may deliberately choose a representable at-or-below-cap value, but validation never repairs submitted state.
+2. Core must validate its isolated authoritative prior Evidence Memory against its configured policy before invoking any EvidenceGate, including a custom gate. A policy-invalid prior cannot reach provider calls or any other gate side effect merely because the production gate normally validates itself.

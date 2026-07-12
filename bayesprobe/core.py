@@ -105,6 +105,9 @@ class BayesProbeCore:
         authoritative_belief_state = migrated_belief_state.model_copy(deep=True)
         if resolve_belief_lifecycle(authoritative_belief_state) != lifecycle:
             raise ValueError("belief lifecycle isolation is invalid")
+        self._evidence_memory_manager.validate_policy_snapshot(
+            authoritative_belief_state.evidence_memory
+        )
         authoritative_cycle = cycle.model_copy(deep=True)
         authoritative_probe_set = probe_set.model_copy(deep=True)
         self._validate_cycle_boundary(

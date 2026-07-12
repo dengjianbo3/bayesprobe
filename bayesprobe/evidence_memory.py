@@ -660,12 +660,8 @@ class EvidenceMemoryManager:
                 if (
                     event.correlation_status != decision.correlation_status
                     or event.effective_update_weight is None
-                    or not math.isclose(
-                        event.effective_update_weight,
-                        decision.effective_update_weight,
-                        rel_tol=1e-12,
-                        abs_tol=1e-12,
-                    )
+                    or event.effective_update_weight
+                    != decision.effective_update_weight
                     or not _matches_required_discard_semantics(
                         event.discard_reason,
                         decision.discard_reason,
@@ -751,15 +747,20 @@ class EvidenceMemoryManager:
         )
         if credit_keys:
             remaining_before = {
-                key: max(
-                    cap - credit_snapshot.correlation_credit.get(key, 0.0),
-                    0.0,
+                key: _safe_credit_increment(
+                    cap=cap,
+                    prior_used=credit_snapshot.correlation_credit.get(key, 0.0),
+                    requested_weight=cap,
                 )
                 for key in credit_keys
             }
         elif likelihoods is None and unresolved_likelihood is None:
             remaining_before = {
-                key: max(cap - used, 0.0)
+                key: _safe_credit_increment(
+                    cap=cap,
+                    prior_used=used,
+                    requested_weight=cap,
+                )
                 for key, used in credit_snapshot.correlation_credit.items()
                 if key.startswith(group_prefix)
             }
@@ -769,15 +770,23 @@ class EvidenceMemoryManager:
             effective_weight = 0.0
         elif credit_keys:
             effective_weight = min(
-                max(float(base_effective_weight), 0.0),
-                min(remaining_before.values()),
+                _safe_credit_increment(
+                    cap=cap,
+                    prior_used=credit_snapshot.correlation_credit.get(key, 0.0),
+                    requested_weight=base_effective_weight,
+                )
+                for key in credit_keys
             )
         else:
             effective_weight = max(float(base_effective_weight), 0.0)
-        remaining_after = {
-            key: max(remaining - effective_weight, 0.0)
-            for key, remaining in remaining_before.items()
-        }
+        remaining_after = {}
+        for key in remaining_before:
+            _, remaining = _credit_state_after_increment(
+                cap=cap,
+                prior_used=credit_snapshot.correlation_credit.get(key, 0.0),
+                increment=effective_weight,
+            )
+            remaining_after[key] = remaining
         discard_reason = None
         if status == "duplicate_exact":
             discard_reason = "duplicate_exact"
@@ -876,28 +885,12 @@ class EvidenceMemoryManager:
         weight = decision.effective_update_weight
         for key, remaining in decision.remaining_credit.items():
             prior_used = correlation_credit.get(key, 0.0)
-            used_after = prior_used + weight
-            if used_after > cap and not math.isclose(
-                used_after,
-                cap,
-                rel_tol=1e-12,
-                abs_tol=1e-12,
-            ):
-                raise ValueError(
-                    "directional correlation credit decision is inconsistent"
-                )
-            used_after = min(used_after, cap)
-            expected_remaining = max(cap - used_after, 0.0)
-            if not math.isclose(
-                remaining,
-                expected_remaining,
-                rel_tol=1e-12,
-                abs_tol=1e-12,
-            ):
-                raise ValueError(
-                    "directional correlation credit decision is inconsistent"
-                )
-            if used_after < prior_used:
+            used_after, expected_remaining = _credit_state_after_increment(
+                cap=cap,
+                prior_used=prior_used,
+                increment=weight,
+            )
+            if remaining != expected_remaining:
                 raise ValueError(
                     "directional correlation credit decision is inconsistent"
                 )
@@ -1178,6 +1171,44 @@ def _credit_keys(
                 f"{correlation_group}|frame:{frame_version}:unresolved|{direction}"
             )
     return keys
+
+
+def _credit_state_after_increment(
+    *,
+    cap: float,
+    prior_used: float,
+    increment: float,
+) -> tuple[float, float]:
+    if not math.isfinite(increment) or increment < 0:
+        raise ValueError(
+            "directional correlation credit decision is inconsistent"
+        )
+    used_after = prior_used + increment
+    if used_after > cap or used_after < prior_used:
+        raise ValueError(
+            "directional correlation credit decision is inconsistent"
+        )
+    return used_after, cap - used_after
+
+
+def _safe_credit_increment(
+    *,
+    cap: float,
+    prior_used: float,
+    requested_weight: float,
+) -> float:
+    requested = float(requested_weight)
+    if not math.isfinite(requested):
+        raise ValueError("base effective weight must be finite")
+    increment = min(max(requested, 0.0), max(cap - prior_used, 0.0))
+    while prior_used + increment > cap:
+        adjusted = math.nextafter(increment, 0.0)
+        if adjusted == increment:
+            raise ValueError(
+                "directional correlation credit decision is inconsistent"
+            )
+        increment = adjusted
+    return increment
 
 
 def _unique_transition_events(

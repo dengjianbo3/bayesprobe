@@ -1691,6 +1691,229 @@ def test_transition_rejects_overcap_candidate_before_reconstruction(monkeypatch)
     assert reconstruction_calls == []
 
 
+def test_commit_rejects_one_ulp_above_cap_without_clamping():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_one_ulp_commit",
+            "A submitted event claims one ULP too much weight.",
+            root="root-one-ulp-commit",
+        ),
+        run_id="run_memory",
+    )
+    snapshot = EvidenceMemorySnapshot()
+    canonical = manager.classify(snapshot, signal)
+    credit_key = (
+        f"{canonical.canonical_correlation_group}|A|confirming"
+    )
+    inflated_weight = math.nextafter(0.2, math.inf)
+    decision = evidence_memory.EvidenceMemoryDecision(
+        correlation_status="novel",
+        effective_update_weight=inflated_weight,
+        discard_reason=None,
+        remaining_credit={credit_key: 0.0},
+        canonical_correlation_group=canonical.canonical_correlation_group,
+    )
+    event = _directional_memory_event(
+        signal=signal,
+        event_id="E_one_ulp_commit",
+        decision=decision,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="directional correlation credit decision is inconsistent",
+    ):
+        manager.commit(
+            snapshot,
+            signal=signal,
+            event=event,
+            decision=decision,
+        )
+
+    assert snapshot.correlation_credit == {}
+    assert snapshot.accepted_evidence_ids == []
+
+
+def test_commit_rejects_one_ulp_remaining_credit_mismatch():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_one_ulp_remaining",
+            "A submitted decision misstates its remaining credit.",
+            root="root-one-ulp-remaining",
+        ),
+        run_id="run_memory",
+    )
+    snapshot = EvidenceMemorySnapshot()
+    likelihoods = {"A": LikelihoodBand.MODERATELY_CONFIRMING}
+    decision = manager.classify(
+        snapshot,
+        signal,
+        likelihoods=likelihoods,
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=0.2,
+    )
+    credit_key = next(iter(decision.remaining_credit))
+    forged_decision = replace(
+        decision,
+        remaining_credit={credit_key: math.nextafter(0.0, math.inf)},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="directional correlation credit decision is inconsistent",
+    ):
+        manager.commit(
+            snapshot,
+            signal=signal,
+            event=_directional_memory_event(
+                signal=signal,
+                event_id="E_one_ulp_remaining",
+                decision=forged_decision,
+                likelihoods=likelihoods,
+            ),
+            decision=forged_decision,
+        )
+
+
+def test_classification_rounds_credit_increment_down_before_commit():
+    cap = 0.15
+    prior_used = 0.015
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=cap
+        )
+    )
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_safe_credit_increment",
+            "A production decision consumes the representable remainder.",
+            root="root-safe-credit-increment",
+        ),
+        run_id="run_memory",
+    )
+    credit_key = f"{signal.provenance.correlation_group}|A|confirming"
+    snapshot = EvidenceMemorySnapshot(
+        correlation_credit={credit_key: prior_used}
+    )
+    decision = manager.classify(
+        snapshot,
+        signal,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=1.0,
+    )
+    raw_subtraction = cap - prior_used
+    expected_weight = math.nextafter(raw_subtraction, 0.0)
+
+    assert prior_used + raw_subtraction > cap
+    assert decision.effective_update_weight == expected_weight
+    assert prior_used + decision.effective_update_weight <= cap
+    event = _directional_memory_event(
+        signal=signal,
+        event_id="E_safe_credit_increment",
+        decision=decision,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+    committed = manager.commit(
+        snapshot,
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+    persisted_used = committed.correlation_credit[credit_key]
+
+    assert persisted_used == prior_used + decision.effective_update_weight
+    assert decision.remaining_credit[credit_key] == cap - persisted_used
+
+
+def test_transition_rejects_one_ulp_native_event_weight_mismatch():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    prior = EvidenceMemorySnapshot()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_one_ulp_transition",
+            "A native event claims one ULP above its decision.",
+            root="root-one-ulp-transition",
+        ),
+        run_id="run_memory",
+    )
+    likelihoods = {"A": LikelihoodBand.MODERATELY_CONFIRMING}
+    quality = {
+        "reliability": 0.8,
+        "independence": 0.8,
+        "relevance": 0.9,
+        "novelty": 0.8,
+        "specificity": 0.7,
+        "verifiability": 0.7,
+    }
+    decision = manager.classify(
+        prior,
+        signal,
+        likelihoods=likelihoods,
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=(
+            quality["reliability"]
+            * quality["independence"]
+            * quality["relevance"]
+            * quality["novelty"]
+        ),
+    )
+    event = _directional_memory_event(
+        signal=signal,
+        event_id="E_one_ulp_transition",
+        decision=decision,
+        likelihoods=likelihoods,
+        quality=quality,
+    )
+    candidate = manager.commit(
+        prior,
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+    assert manager.validate_transition(
+        prior,
+        candidate,
+        evidence_events=[event],
+        normalized_signals=[signal],
+        existing_evidence_ids=[],
+        frame_version=1,
+    ) == candidate
+    inflated_event = event.model_copy(
+        update={
+            "effective_update_weight": math.nextafter(
+                event.effective_update_weight,
+                math.inf,
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="evidence memory transition is invalid"):
+        manager.validate_transition(
+            prior,
+            candidate,
+            evidence_events=[inflated_event],
+            normalized_signals=[signal],
+            existing_evidence_ids=[],
+            frame_version=1,
+        )
+
+
 def test_gate_rejects_overcap_prior_before_normalizing_or_calling_provider():
     manager = EvidenceMemoryManager(
         CorrelationCreditPolicy(

@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 import unicodedata
 
@@ -2285,6 +2286,7 @@ def _assert_supplied_transition_rejected_atomically(
     state: BeliefState,
     integration: EvidenceIntegrationResult,
     correlation_credit_policy: CorrelationCreditPolicy | None = None,
+    expected_error: str = "native evidence memory transition",
 ) -> None:
     ledger_path = tmp_path / f"{name}.jsonl"
     ledger_path.touch()
@@ -2309,7 +2311,7 @@ def _assert_supplied_transition_rejected_atomically(
     core._belief_solver = recording_solver
     prior_state = state.model_dump(mode="json")
 
-    with pytest.raises(ValueError, match="native evidence memory transition"):
+    with pytest.raises(ValueError, match=expected_error):
         core.integrate_cycle(
             cycle=make_cycle(f"cycle_{name}"),
             belief_state=state,
@@ -3069,6 +3071,179 @@ def test_core_default_credit_policy_behavior_is_unchanged():
     )
 
 
+class _CountingPolicyPreflightGate:
+    def __init__(self, inner) -> None:
+        self.inner = inner
+        self.calls = 0
+
+    def integrate(self, **kwargs):
+        self.calls += 1
+        return self.inner.integrate(**kwargs)
+
+
+class _PolicyPreflightCore(BayesProbeCore):
+    def _create_evidence_integration_gate(self):
+        self.counting_policy_gate = _CountingPolicyPreflightGate(
+            super()._create_evidence_integration_gate()
+        )
+        return self.counting_policy_gate
+
+
+def test_core_rejects_overcap_prior_before_custom_gate_call(tmp_path: Path):
+    policy = CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=0.2
+    )
+    ledger_path = tmp_path / "pregate-overcap-prior.jsonl"
+    ledger_path.touch()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = _PolicyPreflightCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+        correlation_credit_policy=policy,
+    )
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    invalid_memory = state.evidence_memory.model_copy(
+        update={
+            "correlation_credit": {
+                "unrelated-policy-group|H1|confirming": 0.3
+            }
+        }
+    )
+    state = BeliefState.model_validate(
+        state.model_copy(
+            update={"evidence_memory": invalid_memory}
+        ).model_dump(mode="python")
+    )
+    prior_state = state.model_dump(mode="json")
+    cycle = make_cycle("cycle_pregate_overcap_prior")
+
+    with pytest.raises(ValueError, match="correlation credit policy"):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[make_active_signal()],
+        )
+
+    assert core.counting_policy_gate.calls == 0
+    assert gateway.requests == []
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+def test_core_valid_exact_cap_prior_reaches_custom_gate_once():
+    policy = CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=0.2
+    )
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = _PolicyPreflightCore(
+        model_gateway=gateway,
+        correlation_credit_policy=policy,
+    )
+    state = make_exact_belief_state()
+    valid_memory = state.evidence_memory.model_copy(
+        update={
+            "correlation_credit": {
+                "unrelated-policy-group|H1|confirming": 0.2
+            }
+        }
+    )
+    state = BeliefState.model_validate(
+        state.model_copy(
+            update={"evidence_memory": valid_memory}
+        ).model_dump(mode="python")
+    )
+    cycle = make_cycle("cycle_pregate_exact_cap")
+
+    core.integrate_cycle(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+
+    assert core.counting_policy_gate.calls == 1
+    assert len(gateway.requests) == 1
+
+
+def test_core_authentic_migration_reaches_custom_gate_once():
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _legacy_evidence_judgment()}
+    )
+    core = _PolicyPreflightCore(
+        model_gateway=gateway,
+        correlation_credit_policy=CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        ),
+    )
+    state = make_explicit_legacy_belief_state(cycle_id="cycle_0")
+    cycle = make_cycle("cycle_pregate_migration")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+
+    assert core.counting_policy_gate.calls == 1
+    assert len(gateway.requests) == 1
+    assert resolve_belief_lifecycle(result.belief_state) == (
+        BeliefLifecycle.LEGACY_V01_MIGRATION
+    )
+
+
+def test_core_rejects_one_ulp_native_event_weight_before_solver_or_ledger(
+    tmp_path: Path,
+):
+    policy = CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=0.2
+    )
+    state = make_exact_belief_state()
+    cycle = make_cycle("cycle_one_ulp_native_weight")
+    production = EvidenceIntegrationGate(
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        ),
+        memory_manager=evidence_memory.EvidenceMemoryManager(policy),
+    ).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+    event = production.evidence_events[0]
+    assert event.effective_update_weight == 0.2
+    inflated_event = event.model_copy(
+        update={
+            "effective_update_weight": math.nextafter(
+                event.effective_update_weight,
+                math.inf,
+            )
+        }
+    )
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name="one_ulp_native_event_weight",
+        state=state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[inflated_event],
+            probe_candidates=[],
+            evidence_memory=production.evidence_memory,
+            normalized_signals=production.normalized_signals,
+        ),
+        correlation_credit_policy=policy,
+    )
+
+
 def _policy_snapshot_replay_fixture():
     policy = CorrelationCreditPolicy(
         max_cumulative_effective_weight_per_direction=0.2
@@ -3146,6 +3321,7 @@ def test_core_replay_rejects_same_overcap_prior_and_candidate_atomically(
             normalized_signals=[signal],
         ),
         correlation_credit_policy=policy,
+        expected_error="correlation credit policy",
     )
 
 

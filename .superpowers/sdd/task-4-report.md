@@ -2043,3 +2043,99 @@ candidate-only Core rejection were the three passing controls.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 29
+
+### Design Decision
+
+- Native transition reconstruction now requires exact equality between the
+  submitted `EvidenceEvent.effective_update_weight` and the authoritative
+  `EvidenceMemoryDecision`. The authority field no longer uses `math.isclose`.
+- Added one shared exact credit-state calculation for `used_after = prior +
+  increment` and `remaining = cap - used_after`. Commit rejects any represented
+  sum above cap and any non-identical remaining balance; it never applies a
+  tolerance, `min`, clamp, or submitted-state repair.
+- Production classification uses a separate production-only safe-increment
+  selector. It bounds the requested weight, then uses `math.nextafter` toward
+  zero only while ordinary float addition would exceed the cap. The resulting
+  decision is representable under the same exact state calculation commit uses.
+- Immediately after lifecycle resolution, authoritative deep copy, and receipt
+  revalidation, Core validates prior Evidence Memory through its isolated
+  authoritative manager. A policy-invalid prior therefore cannot invoke even a
+  wrapped/custom gate; valid native and authentic migrated states proceed once.
+
+### Changed Files
+
+- `bayesprobe/evidence_memory.py`
+- `bayesprobe/core.py`
+- `tests/test_evidence_memory.py`
+- `tests/test_core_cycles.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_commit_rejects_one_ulp_above_cap_without_clamping tests/test_evidence_memory.py::test_commit_rejects_one_ulp_remaining_credit_mismatch tests/test_evidence_memory.py::test_classification_rounds_credit_increment_down_before_commit tests/test_evidence_memory.py::test_transition_rejects_one_ulp_native_event_weight_mismatch tests/test_core_cycles.py::test_core_rejects_overcap_prior_before_custom_gate_call tests/test_core_cycles.py::test_core_valid_exact_cap_prior_reaches_custom_gate_once tests/test_core_cycles.py::test_core_authentic_migration_reaches_custom_gate_once tests/test_core_cycles.py::test_core_rejects_one_ulp_native_event_weight_before_solver_or_ledger -q --tb=short -p no:cacheprovider
+```
+
+Result: `6 failed, 2 passed in 0.54s`. Direct commit accepted and clamped
+`math.nextafter(0.2, +inf)`, accepted a one-ULP remaining-credit mismatch,
+classification emitted unsafe weight `0.135` for cap `0.15` with prior `0.015`,
+transition/Core accepted a one-ULP inflated native event, and Core invoked the
+custom wrapper gate once before the production gate rejected an over-cap prior.
+Valid exact-cap native and authentic migration controls passed.
+
+- GREEN/refactor: the same focused command -> `8 passed in 0.35s`.
+- The first directly affected suite run produced `1 failed, 460 passed in
+  2.19s`: the earlier same-prior/candidate over-cap replay test still expected
+  the old post-gate transition wrapper. Its atomicity helper now accepts an
+  expected message, and only that test selects the new pre-gate policy error.
+- Final directly affected suites:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_core_cycles.py tests/test_model_gateway.py
+  tests/test_probe_executor.py -q --tb=short -p no:cacheprovider` -> `461
+  passed in 2.03s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_probe_executor.py tests/evaluation/test_python_probe.py
+  tests/test_evidence_memory.py tests/test_core_cycles.py -q -p
+  no:cacheprovider` -> `544 passed in 2.33s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.42s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1438 passed, 10 skipped in 11.94s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before the
+  report; both are repeated after the report and the range check after commit.
+
+### Self-Review
+
+- With cap `0.15` and prior `0.015`, raw subtraction produces unsafe increment
+  `0.135` because their float sum is `0.15000000000000002`. Production selects
+  `0.13499999999999998`; persisted used credit equals the exact float sum of
+  prior plus solver-visible weight, and remaining credit equals exact cap minus
+  that persisted value.
+- Direct commit rejects a one-ULP above-cap decision and a one-ULP remaining
+  mismatch without adding lifecycle identity, history, binding, or credit.
+  Native transition and Core reject a one-ULP event-weight mismatch before
+  solver, state construction, or ledger mutation.
+- Exact cap, default/custom caps, prior custom usage, multi-key shared minimum,
+  cumulative projection, saturation, replay, and neutral evidence remain green
+  in the directly affected and Task 4 suites.
+- An observable custom wrapper gate receives zero calls for an over-cap native
+  prior. Valid exact-cap native input and authentic explicit migration each
+  reach the gate exactly once; migration retains its private receipt and legacy
+  lifecycle.
+- Core continues to own an isolated manager distinct from the gate manager; the
+  new prior check uses only Core's authoritative manager and authoritative deep
+  state copy.
+
+### Concerns
+
+No blocking concerns.
