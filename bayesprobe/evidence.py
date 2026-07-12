@@ -146,10 +146,7 @@ class SignalQualityAssessor:
                 verifiability=quality.verifiability,
             )
 
-        if (
-            signal.provenance is not None
-            and event_type != EvidenceType.SOURCE_CLAIM
-        ):
+        if signal.provenance is not None:
             quality = _cap_quality_for_origin(
                 quality,
                 signal.provenance.epistemic_origin,
@@ -249,6 +246,9 @@ class EvidenceIntegrationGate:
         closed_signals: list[ExternalSignal] = []
         seen_signatures: set[tuple[str, str]] = set()
         working_memory = belief_state.evidence_memory or EvidenceMemorySnapshot()
+        prior_evidence_ids = set(
+            belief_state.ledger_refs.get("evidence_events", [])
+        )
 
         for index, raw_signal in enumerate(signals, start=1):
             signal = self._provenance_normalizer.normalize(
@@ -256,6 +256,17 @@ class EvidenceIntegrationGate:
                 run_id=cycle.run_id,
             )
             closed_signals.append(signal)
+            event_id = f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}"
+            if event_id in prior_evidence_ids:
+                evidence_events.append(
+                    self._replayed_event(
+                        event_id=event_id,
+                        signal=signal,
+                        belief_state=belief_state,
+                        probe_set=probe_set,
+                    )
+                )
+                continue
             prior_decision = self._memory_manager.classify(
                 working_memory,
                 signal,
@@ -316,6 +327,54 @@ class EvidenceIntegrationGate:
             probe_candidates=probe_candidates,
             evidence_memory=working_memory,
             normalized_signals=closed_signals,
+        )
+
+    def _replayed_event(
+        self,
+        *,
+        event_id: str,
+        signal: ExternalSignal,
+        belief_state: BeliefState,
+        probe_set: ProbeSet,
+    ) -> EvidenceEvent:
+        hypothesis_ids = self._resolve_target_hypotheses(
+            signal=signal,
+            belief_state=belief_state,
+            probe_set=probe_set,
+        )
+        unresolved_likelihood = None
+        frame_state = belief_state.frame_state
+        if frame_state is not None and (
+            frame_state.competition == HypothesisCompetition.EXCLUSIVE
+            and frame_state.coverage == HypothesisCoverage.OPEN
+        ):
+            unresolved_likelihood = LikelihoodBand.NEUTRAL
+        event = self._event(
+            event_id=event_id,
+            signal=signal,
+            hypothesis_ids=hypothesis_ids,
+            evidence_type=EvidenceType.NEUTRAL,
+            likelihoods={
+                hypothesis_id: LikelihoodBand.NEUTRAL
+                for hypothesis_id in hypothesis_ids
+            },
+            unresolved_likelihood=unresolved_likelihood,
+            interpretation="Evidence event identity already exists in the belief ledger.",
+            is_duplicate=True,
+            discard_reason="duplicate evidence event id",
+        )
+        provenance = signal.provenance
+        return EvidenceEvent.model_validate(
+            {
+                **event.model_dump(mode="python"),
+                "schema_version": (
+                    "v0.2" if _is_native_v02_state(belief_state) else "v0.1"
+                ),
+                "epistemic_origin": provenance.epistemic_origin,
+                "derivation_root_id": provenance.derivation_root_id,
+                "correlation_status": "duplicate_exact",
+                "effective_update_weight": 0.0,
+            }
         )
 
     def _ensure_helpers(self) -> None:

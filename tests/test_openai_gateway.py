@@ -519,6 +519,10 @@ def test_v02_judgment_schema_aligns_responses_and_chat_transports():
     ]
     assert required_output["required_keys"] == expected_keys
     assert required_output["json_schema"] == EVIDENCE_JUDGMENT_JSON_SCHEMA
+    assert EVIDENCE_JUDGMENT_JSON_SCHEMA["properties"]["interpretation"] == {
+        "type": "string",
+        "minLength": 1,
+    }
 
 
 def test_v02_repair_request_uses_v02_judgment_schema():

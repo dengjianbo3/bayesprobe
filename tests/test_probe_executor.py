@@ -4,9 +4,14 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore
+from bayesprobe.evidence_memory import SignalProvenanceNormalizer
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ScriptedModelGateway
+from bayesprobe.openai_gateway import (
+    OpenAIChatCompletionsModelGateway,
+    OpenAIModelGatewayConfig,
+)
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
     ModelBackedProbeToolGateway,
@@ -216,7 +221,8 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert signal.source_type == "model_probe_gateway"
     assert signal.source == "model_gateway:scripted"
     assert signal.raw_content.startswith("A direct comparison")
-    assert signal.provenance is None
+    assert signal.provenance.provider_model_or_tool_identity == "scripted"
+    assert signal.provenance.session_id == "run_exec"
 
 
 def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_empty():
@@ -251,7 +257,46 @@ def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_emp
     )
     assert model_gateway.requests[0].prompt_version == "v0.2"
     assert model_gateway.requests[0].schema_version == "v0.2"
-    assert result.signals[0].provenance is None
+    assert result.signals[0].provenance.provider_model_or_tool_identity == "scripted"
+
+
+def test_model_probe_provenance_distinguishes_openai_compatible_models():
+    class StubOpenAICompatibleGateway(OpenAIChatCompletionsModelGateway):
+        def complete_structured(self, request):
+            return {"raw_content": "A model-backed probe observation."}
+
+    probe = make_probe("P_model_identity", ["H1", "H2"])
+    probe_set = make_probe_set([probe])
+    context = make_context()
+
+    def execute(model: str):
+        gateway = StubOpenAICompatibleGateway(
+            config=OpenAIModelGatewayConfig(model=model)
+        )
+        return ProbeExecutor(
+            ModelBackedProbeToolGateway(gateway)
+        ).execute_probe_set(
+            probe_set=probe_set,
+            context=context,
+        ).signals[0]
+
+    first = execute("provider/model-a")
+    same_model = execute("provider/model-a")
+    second = execute("provider/model-b")
+    normalizer = SignalProvenanceNormalizer()
+    first = normalizer.normalize(first, run_id=context.run_id)
+    same_model = normalizer.normalize(same_model, run_id=context.run_id)
+    second = normalizer.normalize(second, run_id=context.run_id)
+
+    assert first.source == second.source == "model_gateway:openai_chat_completions"
+    assert first.provenance.provider_model_or_tool_identity == (
+        "openai_chat_completions:provider/model-a"
+    )
+    assert second.provenance.provider_model_or_tool_identity == (
+        "openai_chat_completions:provider/model-b"
+    )
+    assert first.provenance.correlation_group == same_model.provenance.correlation_group
+    assert first.provenance.correlation_group != second.provenance.correlation_group
 
 
 def test_executor_preserves_probe_and_signal_order():

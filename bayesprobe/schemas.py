@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -524,6 +525,61 @@ class FrameState(StrictTaskModel):
         return self
 
 
+_CANONICAL_FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_UNRESOLVED_CREDIT_SUBJECT_PATTERN = re.compile(
+    r"frame:(?P<version>[1-9][0-9]*):unresolved"
+)
+
+
+def _is_canonical_content_fingerprint(value: str) -> bool:
+    return bool(_CANONICAL_FINGERPRINT_PATTERN.fullmatch(value))
+
+
+def _canonical_source_content_identity_parts(
+    value: str,
+) -> tuple[str, str, str] | None:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 3
+        or not all(
+            isinstance(item, str) and item.strip() == item and item
+            for item in parsed
+        )
+    ):
+        return None
+    source_identity, fingerprint, correlation_group = parsed
+    if (
+        not _is_canonical_content_fingerprint(fingerprint)
+        or "|" in correlation_group
+        or json.dumps(parsed, ensure_ascii=False, separators=(",", ":")) != value
+    ):
+        return None
+    return source_identity, fingerprint, correlation_group
+
+
+def _valid_correlation_credit_key(value: str) -> bool:
+    parts = value.split("|")
+    if len(parts) != 3:
+        return False
+    group, subject, direction = parts
+    if (
+        not group
+        or group.strip() != group
+        or not subject
+        or direction not in {"confirming", "disconfirming"}
+    ):
+        return False
+    if subject.casefold() == "h_other":
+        return False
+    if subject.startswith("frame:"):
+        return _UNRESOLVED_CREDIT_SUBJECT_PATTERN.fullmatch(subject) is not None
+    return subject.strip() == subject
+
+
 class EvidenceMemorySnapshot(StrictTaskModel):
     memory_version: int = 1
     accepted_evidence_ids: list[str] = Field(default_factory=list)
@@ -581,6 +637,8 @@ class EvidenceMemorySnapshot(StrictTaskModel):
         for key, item in value.items():
             clean_key = _required_text(key, f"{info.field_name} key")
             clean_value = _required_text(item, info.field_name)
+            if clean_key != key or clean_value != item:
+                raise ValueError(f"{info.field_name} must use exact canonical text")
             if _contains_secret_material({clean_key: clean_value}):
                 raise ValueError("evidence memory must not contain secret material")
             result[clean_key] = clean_value
@@ -592,8 +650,8 @@ class EvidenceMemorySnapshot(StrictTaskModel):
         result: dict[str, float] = {}
         for key, credit in value.items():
             clean_key = _required_text(key, "correlation credit key")
-            if "|h_other|" in clean_key.casefold():
-                raise ValueError("correlation credit must not use an H_other subject")
+            if clean_key != key or not _valid_correlation_credit_key(clean_key):
+                raise ValueError("correlation credit key has invalid grammar")
             if _contains_secret_material(clean_key):
                 raise ValueError("evidence memory must not contain secret material")
             if (
@@ -606,9 +664,27 @@ class EvidenceMemorySnapshot(StrictTaskModel):
         return result
 
     @model_validator(mode="after")
-    def reject_secret_material(self) -> "EvidenceMemorySnapshot":
+    def validate_snapshot_coherence(self) -> "EvidenceMemorySnapshot":
         if _contains_secret_material(self.model_dump(mode="python")):
             raise ValueError("evidence memory must not contain secret material")
+        identity_key_sets = {
+            frozenset(self.content_fingerprints),
+            frozenset(self.source_content_fingerprints),
+            frozenset(self.derivation_roots),
+        }
+        if len(identity_key_sets) != 1:
+            raise ValueError("evidence memory identity map keys must match exactly")
+        for signal_id, fingerprint in self.content_fingerprints.items():
+            if not _is_canonical_content_fingerprint(fingerprint):
+                raise ValueError(
+                    "content_fingerprints must use canonical SHA-256 identities"
+                )
+            identity = self.source_content_fingerprints[signal_id]
+            parts = _canonical_source_content_identity_parts(identity)
+            if parts is None or parts[1] != fingerprint:
+                raise ValueError(
+                    "source_content_fingerprints must use exact canonical identities"
+                )
         return self
 
 
@@ -1066,6 +1142,15 @@ class BeliefState(BaseModel):
             )
             if unknown_active_ids:
                 raise ValueError("frame state contains unknown active hypothesis ids")
+            credit_subjects = {
+                key.split("|")[1]
+                for key in self.evidence_memory.correlation_credit
+                if not key.split("|")[1].startswith("frame:")
+            }
+            if credit_subjects.difference(hypotheses_by_id):
+                raise ValueError(
+                    "evidence memory correlation credit contains unknown hypothesis ids"
+                )
             if (
                 frame_state.competition == HypothesisCompetition.EXCLUSIVE
                 and task_frame.framing_method != FramingMethod.LEGACY_MIGRATION

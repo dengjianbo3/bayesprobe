@@ -33,6 +33,7 @@ class EvidenceMemoryDecision:
     effective_update_weight: float
     discard_reason: str | None
     remaining_credit: dict[str, float]
+    canonical_correlation_group: str
 
 
 class SignalProvenanceNormalizer:
@@ -133,12 +134,16 @@ class EvidenceMemoryManager:
             for parent_root in known_parent_roots
         ):
             raise ValueError("derived signals must preserve parent derivation root")
-        parent_root = bool(known_parent_roots)
-        group_prefix = f"{provenance.correlation_group}|"
+        canonical_group = _canonical_correlation_group(
+            snapshot=snapshot,
+            provenance=provenance,
+            prior_identities=prior_identities,
+        )
+        group_prefix = f"{canonical_group}|"
         same_group = any(
             key.startswith(group_prefix) for key in snapshot.correlation_credit
         ) or any(
-            prior_identity[2] == provenance.correlation_group
+            prior_identity[2] == canonical_group
             for prior_identity in prior_identities.values()
         )
         same_source = any(
@@ -148,7 +153,7 @@ class EvidenceMemoryManager:
 
         if exact:
             status: CorrelationStatus = "duplicate_exact"
-        elif same_root or parent_root:
+        elif same_root or provenance.parent_signal_ids:
             status = "correlated_restatement"
         elif same_group or same_source:
             status = "correlated_novel"
@@ -157,7 +162,7 @@ class EvidenceMemoryManager:
 
         cap = self._policy.max_cumulative_effective_weight_per_direction
         credit_keys = _credit_keys(
-            provenance.correlation_group,
+            canonical_group,
             likelihoods or {},
             unresolved_likelihood=unresolved_likelihood,
             frame_version=frame_version,
@@ -196,6 +201,7 @@ class EvidenceMemoryManager:
             effective_update_weight=effective_weight,
             discard_reason=discard_reason,
             remaining_credit=remaining_after,
+            canonical_correlation_group=canonical_group,
         )
 
     def commit(
@@ -224,12 +230,15 @@ class EvidenceMemoryManager:
         source_content_fingerprints = dict(snapshot.source_content_fingerprints)
         derivation_roots = dict(snapshot.derivation_roots)
         content_fingerprints[signal.id] = provenance.canonical_content_fingerprint
-        source_content_fingerprints[signal.id] = _source_content_identity(provenance)
+        source_content_fingerprints[signal.id] = _source_content_identity(
+            provenance,
+            correlation_group=decision.canonical_correlation_group,
+        )
         derivation_roots[signal.id] = provenance.derivation_root_id
 
         cap = self._policy.max_cumulative_effective_weight_per_direction
         correlation_credit = dict(snapshot.correlation_credit)
-        if event.discard_reason is None:
+        if event.discard_reason is None and decision.effective_update_weight > 0:
             for key, remaining in decision.remaining_credit.items():
                 correlation_credit[key] = cap - remaining
 
@@ -311,12 +320,16 @@ def _required_provenance(signal: ExternalSignal) -> SignalProvenance:
     return signal.provenance
 
 
-def _source_content_identity(provenance: SignalProvenance) -> str:
+def _source_content_identity(
+    provenance: SignalProvenance,
+    *,
+    correlation_group: str | None = None,
+) -> str:
     return json.dumps(
         [
             provenance.source_identity,
             provenance.canonical_content_fingerprint,
-            provenance.correlation_group,
+            correlation_group or provenance.correlation_group,
         ],
         ensure_ascii=False,
         separators=(",", ":"),
@@ -335,6 +348,24 @@ def _source_content_identity_parts(value: str) -> tuple[str, str, str] | None:
     ):
         return None
     return parsed[0], parsed[1], parsed[2]
+
+
+def _canonical_correlation_group(
+    *,
+    snapshot: EvidenceMemorySnapshot,
+    provenance: SignalProvenance,
+    prior_identities: dict[str, tuple[str, str, str]],
+) -> str:
+    for signal_id, root in snapshot.derivation_roots.items():
+        if root == provenance.derivation_root_id and signal_id in prior_identities:
+            return prior_identities[signal_id][2]
+    for parent_id in provenance.parent_signal_ids:
+        if parent_id in prior_identities:
+            return prior_identities[parent_id][2]
+    for prior_identity in prior_identities.values():
+        if prior_identity[0] == provenance.source_identity:
+            return prior_identity[2]
+    return provenance.correlation_group
 
 
 def _direction_for(band: LikelihoodBand) -> Literal["confirming", "disconfirming"] | None:

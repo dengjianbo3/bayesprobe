@@ -9,14 +9,17 @@ from bayesprobe.model_gateway import (
     ModelGatewayValidationError,
     StructuredModelRequest,
     model_gateway_adapter_kind,
+    model_gateway_identity,
 )
 from bayesprobe.schemas import (
     BeliefState,
+    EpistemicOrigin,
     ExternalSignal,
     FramingMethod,
     ProbeDesign,
     ProbeSet,
     SignalKind,
+    SignalProvenance,
 )
 
 
@@ -127,6 +130,7 @@ class ModelBackedProbeToolGateway:
         payload = self._model_gateway.complete_structured(request)
         raw_content = _probe_raw_content(payload)
         adapter_kind = model_gateway_adapter_kind(self._model_gateway)
+        model_identity = model_gateway_identity(self._model_gateway)
         return [
             ExternalSignal(
                 id=f"S_{context.cycle_id}_{probe.id}",
@@ -137,6 +141,17 @@ class ModelBackedProbeToolGateway:
                 raw_content=raw_content,
                 generated_by_probe=probe.id,
                 initial_target_hypotheses=list(probe.target_hypotheses),
+                provenance=SignalProvenance(
+                    epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                    source_identity=f"model_gateway:{model_identity}",
+                    provider_model_or_tool_identity=model_identity,
+                    session_id=context.run_id,
+                    derivation_root_id=(
+                        f"model-probe:{context.run_id}:{context.cycle_id}:{probe.id}"
+                    ),
+                    correlation_group=f"model:{model_identity}:{context.run_id}",
+                    canonical_content_fingerprint="pending-normalization",
+                ),
             )
         ]
 

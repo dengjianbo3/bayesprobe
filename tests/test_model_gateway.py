@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import bayesprobe.model_gateway as model_gateway_module
 from bayesprobe.openai_gateway import (
     OpenAIChatCompletionsModelGateway,
     OpenAIResponsesModelGateway,
@@ -367,6 +368,41 @@ def test_model_gateway_adapter_kind_uses_stable_adapter_identities():
     assert model_gateway_adapter_kind(CustomGateway()) == "CustomGateway"
 
 
+def test_model_gateway_identity_distinguishes_models_with_the_same_adapter():
+    first = build_model_gateway(
+        {"kind": "openai_chat_completions", "model": "provider/model-a"}
+    )
+    second = build_model_gateway(
+        {"kind": "openai_chat_completions", "model": "provider/model-b"}
+    )
+
+    assert model_gateway_adapter_kind(first) == model_gateway_adapter_kind(second)
+    assert model_gateway_module.model_gateway_identity(first) == (
+        "openai_chat_completions:provider/model-a"
+    )
+    assert model_gateway_module.model_gateway_identity(second) == (
+        "openai_chat_completions:provider/model-b"
+    )
+    assert model_gateway_module.model_gateway_identity(first) != (
+        model_gateway_module.model_gateway_identity(second)
+    )
+
+
+def test_model_gateway_identity_has_stable_custom_fallback():
+    class CustomGateway:
+        adapter_kind = "custom-safe-adapter"
+
+        def complete_structured(self, request):
+            return {}
+
+    assert model_gateway_module.model_gateway_identity(
+        DeterministicModelGateway()
+    ) == "deterministic"
+    assert model_gateway_module.model_gateway_identity(CustomGateway()) == (
+        "custom-safe-adapter"
+    )
+
+
 def test_scripted_gateway_rejects_missing_task():
     gateway = ScriptedModelGateway(responses={})
 
@@ -633,6 +669,36 @@ def test_native_evidence_judgment_requires_all_v02_fields():
                 "unexplained_observation": None,
                 "interpretation": "Incomplete native judgment.",
                 "quality_overrides": {},
+            },
+            competition=HypothesisCompetition.INDEPENDENT,
+            coverage=HypothesisCoverage.OPEN,
+        )
+
+
+@pytest.mark.parametrize(
+    ("interpretation", "quality_overrides", "message"),
+    [
+        (True, {}, "interpretation must be a non-empty string"),
+        ("   ", {}, "interpretation must be a non-empty string"),
+        ("Valid interpretation.", {"reliability": True}, "real finite number"),
+        ("Valid interpretation.", {"reliability": "0.5"}, "real finite number"),
+    ],
+)
+def test_native_evidence_judgment_rejects_coerced_text_and_quality_values(
+    interpretation,
+    quality_overrides,
+    message,
+):
+    with pytest.raises(ModelGatewayValidationError, match=message):
+        evidence_judgment_from_mapping(
+            {
+                "evidence_type": "neutral",
+                "likelihoods": {"H1": "neutral"},
+                "unresolved_likelihood": None,
+                "frame_fit": "underdetermined",
+                "unexplained_observation": None,
+                "interpretation": interpretation,
+                "quality_overrides": quality_overrides,
             },
             competition=HypothesisCompetition.INDEPENDENT,
             coverage=HypothesisCoverage.OPEN,

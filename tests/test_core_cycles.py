@@ -2482,7 +2482,8 @@ def test_external_projection_decomposes_source_claim_and_generates_verification_
     assert sender_event.reliability == 0.55
     assert sender_event.independence == 0.45
     assert source_event.reliability == 0.5
-    assert source_event.verifiability == 0.65
+    assert source_event.independence == 0.45
+    assert source_event.verifiability == 0.4
     assert candidate.candidate_id == "pc_run_1_cycle_projection_E1_source_verify_source"
     assert candidate.source == "passive_signal"
     assert candidate.candidate_probe.id == "P_run_1_cycle_projection_E1_source_verify_source"
@@ -2756,13 +2757,59 @@ def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
         signals=[_memory_signal("S_replay_2", "Second audit result.", root="root-2")],
     )
 
-    assert len(gateway.requests) == 2
+    assert len(gateway.requests) == 1
     assert replayed.evidence_events[0].discard_reason == "duplicate evidence event id"
     assert replayed.belief_state.evidence_memory == prior_memory
     assert replayed.belief_updates == []
     assert [
         record["payload"]["id"] for record in ledger.read_all("evidence_event")
     ] == ["run_1_cycle_memory_replay_E1"]
+
+
+def test_migrated_v01_ledger_replay_is_neutralized_before_provider_and_memory(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger = JsonlLedgerStore(tmp_path / "migrated-memory-replay-ledger.jsonl")
+    cycle = make_cycle("cycle_migrated_memory_replay")
+    event_id = "run_1_cycle_migrated_memory_replay_E1"
+    prior_event = EvidenceEvent(
+        id=event_id,
+        derived_from_signal="S_prior",
+        target_hypotheses=["H1", "H2"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content="The already-recorded legacy evidence.",
+        likelihoods={
+            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
+            "H2": LikelihoodBand.MODERATELY_DISCONFIRMING,
+        },
+    )
+    ledger.append("evidence_event", prior_event)
+    legacy_state = make_belief_state(cycle_id="cycle_0").model_copy(
+        update={"ledger_refs": {"evidence_events": [event_id]}}
+    )
+
+    result = BayesProbeCore(ledger=ledger, model_gateway=gateway).integrate_cycle(
+        cycle=cycle,
+        belief_state=legacy_state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[
+            _memory_signal(
+                "S_migrated_replay",
+                "A different payload under an already-recorded evidence id.",
+                root="root-migrated-replay",
+            )
+        ],
+    )
+
+    assert gateway.requests == []
+    assert result.evidence_events[0].discard_reason == "duplicate evidence event id"
+    assert result.belief_updates == []
+    assert result.belief_state.evidence_memory == EvidenceMemorySnapshot()
+    assert result.belief_state.ledger_refs["evidence_events"] == [event_id]
+    assert [
+        record["payload"]["id"] for record in ledger.read_all("evidence_event")
+    ] == [event_id]
 
 
 def test_saturated_correlation_event_is_ledger_visible_without_mass_update(

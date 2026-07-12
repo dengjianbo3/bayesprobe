@@ -377,17 +377,29 @@ def evidence_judgment_from_mapping(
             raise ModelGatewayValidationError(
                 f"unsupported quality override metric: {metric_name}"
             )
-        try:
-            parsed_value = float(value)
-        except (TypeError, ValueError) as error:
+        if type(value) not in (int, float):
             raise ModelGatewayValidationError(
-                f"invalid quality override for {metric}: {value}"
-            ) from error
-        if not math.isfinite(parsed_value) or not 0 <= parsed_value <= 1:
+                f"invalid quality override for {metric_name}: "
+                "must be a real finite number"
+            )
+        if not math.isfinite(value):
+            raise ModelGatewayValidationError(
+                f"quality override {metric_name} must be finite and between 0 and 1"
+            )
+        parsed_value = float(value)
+        if not 0 <= parsed_value <= 1:
             raise ModelGatewayValidationError(
                 f"quality override {metric_name} must be finite and between 0 and 1"
             )
         quality_overrides[metric_name] = parsed_value
+
+    interpretation = payload.get("interpretation", "")
+    if native_v02 and (
+        not isinstance(interpretation, str) or not interpretation.strip()
+    ):
+        raise ModelGatewayValidationError(
+            "evidence judgment interpretation must be a non-empty string"
+        )
 
     if native_v02:
         exclusive_open = (
@@ -429,7 +441,11 @@ def evidence_judgment_from_mapping(
         unresolved_likelihood=unresolved_likelihood,
         frame_fit=frame_fit,
         unexplained_observation=unexplained_observation,
-        interpretation=str(payload.get("interpretation", "")),
+        interpretation=(
+            interpretation.strip()
+            if isinstance(interpretation, str)
+            else str(interpretation)
+        ),
         quality_overrides=quality_overrides,
     )
 
@@ -457,6 +473,7 @@ def _contains_secret_material(value: Any) -> bool:
 
 class DeterministicModelGateway:
     adapter_kind = "deterministic"
+    model_identity = "deterministic"
 
     def complete_structured(self, request: StructuredModelRequest) -> dict[str, Any]:
         if request.task != "judge_evidence":
@@ -548,6 +565,7 @@ def _deterministic_target_hypothesis(
 
 class ScriptedModelGateway:
     adapter_kind = "scripted"
+    model_identity = "scripted"
 
     def __init__(self, responses: dict[str, dict[str, Any]]) -> None:
         self.responses = responses
@@ -626,6 +644,16 @@ def model_gateway_adapter_kind(gateway: object) -> str:
     return gateway.__class__.__name__
 
 
+def model_gateway_identity(gateway: object) -> str:
+    identity = getattr(gateway, "model_identity", None)
+    if isinstance(identity, str) and identity.strip():
+        cleaned = identity.strip()
+        if is_secret_like_value(cleaned):
+            raise ValueError("model gateway identity must not contain secret material")
+        return cleaned
+    return model_gateway_adapter_kind(gateway)
+
+
 def _model_gateway_config_from_input(
     config: ModelGatewayConfig | Mapping[str, Any] | None,
 ) -> ModelGatewayConfig:
@@ -685,4 +713,5 @@ __all__ = [
     "build_model_gateway",
     "evidence_judgment_from_mapping",
     "model_gateway_adapter_kind",
+    "model_gateway_identity",
 ]

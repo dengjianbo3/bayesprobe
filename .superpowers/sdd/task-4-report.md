@@ -125,3 +125,55 @@ expansion, WebUI, dependency, search, or retrieval files were changed.
 No blocking concerns. The v0.1 provider compatibility completion is
 intentionally limited to payloads containing only the reviewed legacy evidence
 fields; any partial or incoherent v0.2 payload still fails closed.
+
+## Review Fix 1
+
+### Status
+
+Complete. All seven Task 4 review findings were addressed as one
+memory/provenance hardening wave from reviewed HEAD `d6032b2`.
+
+### Changes
+
+- Canonicalized correlation groups from the first observed source lineage and
+  used that group for both classification credit and committed identities, so
+  later same-source group relabeling cannot reset directional credit.
+- Classified every signal with declared parents as correlated. Unknown parents
+  remain ledger-visible with zero independent weight, while known parents still
+  enforce derivation-root preservation.
+- Neutralized evidence ids already present in `ledger_refs` before memory
+  classification, provider judgment, or commit. Explicit migrated v0.1 states
+  with empty memory neither call the provider nor create accepted memory ids or
+  duplicate evidence records.
+- Applied epistemic-origin caps to every evidence type, including provider-
+  labeled `source_claim`, while retaining reduce-only quality overrides.
+- Tightened memory snapshots to require coherent identity-map keys, canonical
+  SHA-256 source/content identities, exact directional credit-key grammar, and
+  hypothesis subjects that exist in the enclosing belief state.
+- Added a safe model identity seam. Probe provenance records the adapter and
+  configured model identity without credentials, endpoints, or headers;
+  deterministic and custom gateways use stable adapter fallbacks.
+- Made native judgment parsing reject empty/non-string interpretations and
+  boolean, string, non-finite, or out-of-range quality overrides before solver
+  use. The native OpenAI schema now requires a non-empty interpretation.
+
+### RED Evidence
+
+- Combined review regression command: `30 failed, 239 passed`. Failures covered
+  all seven findings, including cumulative same-source saturation, unknown
+  parents, migrated replay, source-claim origin caps, strict snapshot grammar,
+  two models behind one adapter, and strict native judgment values.
+
+### GREEN Evidence
+
+- Exact Task 4 focused suite: `269 passed`.
+- Schema and migration suite: `113 passed`.
+- Full offline Python suite: `1056 passed, 10 skipped`.
+- Node WebUI stream regression: `15 passed, 0 failed`.
+- `git diff --check`: clean.
+
+### Concerns
+
+No blocking concerns. Model identity deliberately excludes base URLs, API-key
+environment names, request headers, and credentials; custom gateways without an
+explicit safe identity fall back to their stable adapter identity.

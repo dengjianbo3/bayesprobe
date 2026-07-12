@@ -101,7 +101,7 @@ EVIDENCE_JUDGMENT_JSON_SCHEMA: dict[str, Any] = {
             "enum": [frame_fit.value for frame_fit in FrameFit],
         },
         "unexplained_observation": {"type": ["string", "null"]},
-        "interpretation": {"type": "string"},
+        "interpretation": {"type": "string", "minLength": 1},
         "quality_overrides": {
             "type": "object",
             "additionalProperties": {"type": "number"},
@@ -466,6 +466,10 @@ class OpenAIResponsesModelGateway:
         )
 
     @property
+    def model_identity(self) -> str:
+        return f"{self.adapter_kind}:{self.config.model}"
+
+    @property
     def invocation_observer(self) -> ProviderInvocationObserver | None:
         return self._invocation_observer
 
@@ -518,6 +522,10 @@ class OpenAIChatCompletionsModelGateway:
             sleep=self._sleep,
             random_value=self._random_value,
         )
+
+    @property
+    def model_identity(self) -> str:
+        return f"{self.adapter_kind}:{self.config.model}"
 
     @property
     def invocation_observer(self) -> ProviderInvocationObserver | None:
