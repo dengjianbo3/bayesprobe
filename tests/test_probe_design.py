@@ -225,6 +225,53 @@ def test_model_probe_designer_rejects_secret_material(open_state):
         ModelProbeDesigner(gateway).propose(open_context(open_state))
 
 
+def test_model_probe_designer_redacts_extra_api_key_from_repair_failure(
+    open_state,
+):
+    secret = "sk-abcdefghijklmnopqrstuv"
+    invalid = proposal(api_key=secret)
+    gateway = ScriptedModelGateway(
+        {
+            "design_probes": {"proposals": [invalid]},
+            "repair_probe_design": {"proposals": [invalid]},
+        }
+    )
+
+    with pytest.raises(ProbeDesignError) as captured:
+        ModelProbeDesigner(gateway).propose(open_context(open_state))
+
+    assert str(captured.value) == "probe design repair response invalid"
+    assert secret not in str(captured.value)
+    assert [request.task for request in gateway.requests] == [
+        "design_probes",
+        "repair_probe_design",
+    ]
+    repair_request = gateway.requests[1]
+    assert "api_key" not in repair_request.input["invalid_payload"]
+    assert secret not in repr(repair_request.input)
+    assert secret not in repair_request.input["validation_error"]
+
+
+def test_model_probe_designer_redacts_extra_api_key_from_repair_request(
+    open_state,
+):
+    secret = "sk-abcdefghijklmnopqrstuv"
+    gateway = ScriptedModelGateway(
+        {
+            "design_probes": {"proposals": [proposal(api_key=secret)]},
+            "repair_probe_design": {"proposals": [proposal()]},
+        }
+    )
+
+    result = ModelProbeDesigner(gateway).propose(open_context(open_state))
+
+    assert len(result.candidates) == 1
+    repair_request = gateway.requests[1]
+    assert repair_request.input["validation_error"] == "probe design response invalid"
+    assert "api_key" not in repair_request.input["invalid_payload"]
+    assert secret not in repr(repair_request.input)
+
+
 def test_initial_open_design_requires_discriminator_or_frame_coverage(open_state):
     singleton = proposal(
         purpose="source_verification",

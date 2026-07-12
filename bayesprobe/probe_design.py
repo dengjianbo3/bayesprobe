@@ -189,59 +189,103 @@ class ModelProbeDesigner:
         self._model_gateway = model_gateway
 
     def propose(self, context: ProbeDesignContext) -> ProbeDesignResult:
-        request = StructuredModelRequest(
+        request = self._request(
+            stage="probe design",
             task="design_probes",
             input=_design_request_input(context),
             prompt_id="probe_design",
-            prompt_version="v0.2",
-            schema_name="ProbeDesign",
-            schema_version="v0.2",
             metadata={"run_id": context.run_id, "cycle_id": context.cycle_id},
         )
-        response = self._complete(request)
+        response = self._complete(request, stage="probe design")
         try:
-            proposals = self._validate_proposals(response, context)
+            proposals = self._validate_proposals(
+                response,
+                context,
+                stage="probe design",
+            )
             return _result_for_proposals(context, proposals)
         except ProbeDesignError as error:
-            if "secret" in str(error).casefold():
+            if str(error) == "probe design response contains secret material":
                 raise
-            repair_request = StructuredModelRequest(
+            repair_request = self._request(
+                stage="probe design repair",
                 task="repair_probe_design",
                 input={
-                    "original_request": request.input,
+                    "original_request": redact_secret_material(request.input),
                     "invalid_payload": redact_secret_material(response),
                     "validation_error": str(error),
                     "attempt_index": 1,
                 },
                 prompt_id="probe_design_repair",
-                prompt_version="v0.2",
-                schema_name="ProbeDesign",
-                schema_version="v0.2",
                 metadata={
                     "run_id": context.run_id,
                     "cycle_id": context.cycle_id,
                     "repair_attempt_index": 1,
                 },
             )
-            repaired = self._complete(repair_request)
-            proposals = self._validate_proposals(repaired, context)
+            repaired = self._complete(repair_request, stage="probe design repair")
+            proposals = self._validate_proposals(
+                repaired,
+                context,
+                stage="probe design repair",
+            )
             return _result_for_proposals(context, proposals)
 
-    def _complete(self, request: StructuredModelRequest) -> dict[str, Any]:
+    def _request(
+        self,
+        *,
+        stage: str,
+        task: str,
+        input: dict[str, Any],
+        prompt_id: str,
+        metadata: dict[str, Any],
+    ) -> StructuredModelRequest:
         try:
-            return self._model_gateway.complete_structured(request)
-        except Exception as error:
-            raise ProbeDesignError("probe design model gateway call failed") from error
+            request = StructuredModelRequest(
+                task=task,
+                input=input,
+                prompt_id=prompt_id,
+                prompt_version="v0.2",
+                schema_name="ProbeDesign",
+                schema_version="v0.2",
+                metadata=metadata,
+            )
+        except (TypeError, ValueError):
+            request = None
+        if request is None:
+            raise ProbeDesignError(f"{stage} request construction failed")
+        return request
+
+    def _complete(
+        self,
+        request: StructuredModelRequest,
+        *,
+        stage: str,
+    ) -> dict[str, Any]:
+        try:
+            response = self._model_gateway.complete_structured(request)
+        except Exception:
+            response = None
+        if response is None:
+            raise ProbeDesignError(f"{stage} model gateway call failed")
+        return response
 
     def _validate_proposals(
         self,
         response: dict[str, Any],
         context: ProbeDesignContext,
+        *,
+        stage: str,
     ) -> list[_ProbeProposal]:
         try:
             parsed = _ProbeProposalResponse.model_validate(response)
         except Exception as error:
-            raise ProbeDesignError(_validation_message(error)) from error
+            parsed = None
+            validation_error = _validation_message(error, stage=stage)
+        else:
+            validation_error = None
+        if parsed is None:
+            raise ProbeDesignError(validation_error)
         known_hypotheses = set(_active_hypothesis_ids(context))
         for proposal in parsed.proposals:
             unknown = set(proposal.target_hypotheses).difference(known_hypotheses)
@@ -397,11 +441,11 @@ def _design_request_input(context: ProbeDesignContext) -> dict[str, Any]:
     }
 
 
-def _validation_message(error: Exception) -> str:
+def _validation_message(error: Exception, *, stage: str) -> str:
     message = str(error)
-    if "secret" in message.casefold():
-        return "probe proposal must not contain secret material"
-    return f"invalid probe design response: {message}"
+    if "probe proposal must not contain secret material" in message:
+        return f"{stage} response contains secret material"
+    return f"{stage} response invalid"
 
 
 __all__ = [
