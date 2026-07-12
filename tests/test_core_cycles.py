@@ -5,6 +5,7 @@ import pytest
 from bayesprobe.core import BayesProbeCore, EvidenceIntegrationGate
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.inbox import SignalInbox
+from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import (
     EvidenceJudgmentRepairPolicy,
@@ -1808,6 +1809,25 @@ class StaticEventCore(BayesProbeCore):
         return self.static_gate
 
 
+class TrackingRetirementEngine(HypothesisEvolutionEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.public_retirement_calls = 0
+
+    def retire_stale_hypotheses(self, **kwargs):
+        self.public_retirement_calls += 1
+        return super().retire_stale_hypotheses(**kwargs)
+
+    def _retire_stale_hypotheses(self, **kwargs):
+        raise AssertionError("core must not call private retirement helpers")
+
+
+class TrackingRetirementCore(StaticEventCore):
+    def _create_hypothesis_evolution_policy(self):
+        self.tracking_retirement_engine = TrackingRetirementEngine()
+        return self.tracking_retirement_engine
+
+
 def test_core_integrates_named_and_unresolved_mass_atomically(tmp_path: Path):
     event = EvidenceEvent(
         id="E_open",
@@ -1974,6 +1994,175 @@ def test_core_retires_open_hypothesis_with_audited_mass_transfer(tmp_path: Path)
         "hypothesis_evolution",
         "belief_state",
     ]
+
+
+def test_core_retires_every_open_hypothesis_into_a_challenged_valid_frame(
+    tmp_path: Path,
+):
+    events = [
+        EvidenceEvent(
+            id=f"E_open_retire_all_{index}",
+            derived_from_signal=f"S_open_retire_all_{index}",
+            target_hypotheses=["H1", "H2"],
+            evidence_type=EvidenceType.COUNTEREVIDENCE,
+            content=f"Independent constraint {index} excludes every named candidate.",
+            reliability=1.0,
+            independence=1.0,
+            relevance=1.0,
+            novelty=1.0,
+            likelihoods={
+                "H1": LikelihoodBand.STRONGLY_DISCONFIRMING,
+                "H2": LikelihoodBand.STRONGLY_DISCONFIRMING,
+            },
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            effective_update_weight=1.0,
+            epistemic_origin="tool_result",
+            derivation_root_id=f"retire-all-root-{index}",
+        )
+        for index in (1, 2)
+    ]
+    ledger = JsonlLedgerStore(tmp_path / "open-retire-all-ledger.jsonl")
+    core = TrackingRetirementCore(events, ledger=ledger)
+
+    result = core.integrate_cycle(
+        cycle=make_cycle("cycle_open_retire_all"),
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set("cycle_open_retire_all"),
+        signals=[make_active_signal("pending")],
+    )
+
+    assert core.tracking_retirement_engine.public_retirement_calls == 1
+    assert result.belief_state.frame_state.active_hypothesis_ids == []
+    assert result.belief_state.frame_state.unresolved_alternative_mass == 1.0
+    assert {
+        hypothesis.status for hypothesis in result.belief_state.hypotheses
+    } == {HypothesisStatus.RETIRED}
+    assert BeliefState.model_validate(
+        result.belief_state.model_dump(mode="python")
+    ) == result.belief_state
+    assert [
+        evolution.from_hypothesis
+        for evolution in result.hypothesis_evolutions
+        if evolution.operation == EvolutionOperation.RETIRE
+    ] == ["H1", "H2"]
+    retirement_updates = [
+        update
+        for update in result.frame_mass_updates
+        if "_FM_retire_" in update.update_id
+    ]
+    assert [update.update_id for update in retirement_updates] == [
+        "run_1_cycle_open_retire_all_FM_retire_H1",
+        "run_1_cycle_open_retire_all_FM_retire_H2",
+    ]
+    assert sum(
+        update.posterior - update.prior for update in retirement_updates
+    ) == pytest.approx(sum(h.posterior for h in result.belief_state.hypotheses))
+    assert result.frame_adequacy_decision.frame_state.adequacy_status == (
+        FrameAdequacyStatus.CHALLENGED
+    )
+    assert result.frame_adequacy_decision.should_expand is True
+    assert result.frame_adequacy_decision.trigger_event_ids == [
+        "E_open_retire_all_1",
+        "E_open_retire_all_2",
+    ]
+    assert result.frame_adequacy_decision.reason == (
+        "All named hypotheses are retired; unresolved alternatives hold all frame mass."
+    )
+
+    ordered_types = [
+        record["record_type"]
+        for record in ledger.read_all()
+        if record["record_type"]
+        in {
+            "frame_mass_update",
+            "frame_adequacy_decision",
+            "hypothesis_evolution",
+            "belief_state",
+        }
+    ]
+    last_mass_update = max(
+        index
+        for index, record_type in enumerate(ordered_types)
+        if record_type == "frame_mass_update"
+    )
+    adequacy_decision = ordered_types.index("frame_adequacy_decision")
+    first_evolution = ordered_types.index("hypothesis_evolution")
+    assert last_mass_update < adequacy_decision < first_evolution
+    assert ordered_types[-1] == "belief_state"
+
+
+def test_core_does_not_retire_an_already_retired_hypothesis_twice(tmp_path: Path):
+    first_cycle_events = [
+        EvidenceEvent(
+            id=f"E_retire_once_{index}",
+            derived_from_signal=f"S_retire_once_{index}",
+            target_hypotheses=["H2"],
+            evidence_type=EvidenceType.COUNTEREVIDENCE,
+            content=f"Independent constraint {index} excludes H2.",
+            reliability=1.0,
+            independence=1.0,
+            relevance=1.0,
+            novelty=1.0,
+            likelihoods={"H2": LikelihoodBand.STRONGLY_DISCONFIRMING},
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            effective_update_weight=1.0,
+            epistemic_origin="tool_result",
+            derivation_root_id=f"retire-once-root-{index}",
+        )
+        for index in (1, 2)
+    ]
+    ledger = JsonlLedgerStore(tmp_path / "retirement-idempotence-ledger.jsonl")
+    core = StaticEventCore(first_cycle_events, ledger=ledger)
+    first = core.integrate_cycle(
+        cycle=make_cycle("cycle_retire_once"),
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set("cycle_retire_once"),
+        signals=[make_active_signal("pending")],
+    )
+    unresolved_after_retirement = (
+        first.belief_state.frame_state.unresolved_alternative_mass
+    )
+
+    core.static_gate.events = [
+        event.model_copy(
+            update={
+                "id": f"E_retired_target_{index}",
+                "derived_from_signal": f"S_retired_target_{index}",
+                "derivation_root_id": f"retired-target-root-{index}",
+            }
+        )
+        for index, event in enumerate(first_cycle_events, start=1)
+    ]
+    second_cycle = make_cycle("cycle_retired_target").model_copy(
+        update={"cycle_index": 2}
+    )
+    second = core.integrate_cycle(
+        cycle=second_cycle,
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set("cycle_retired_target"),
+        signals=[make_active_signal("pending")],
+    )
+
+    assert second.belief_state.hypotheses_by_id()["H2"].status == (
+        HypothesisStatus.RETIRED
+    )
+    assert second.belief_state.frame_state.unresolved_alternative_mass == (
+        unresolved_after_retirement
+    )
+    assert second.hypothesis_evolutions == []
+    assert [
+        update
+        for update in second.frame_mass_updates
+        if "_FM_retire_" in update.update_id
+    ] == []
+    assert len(ledger.read_all("hypothesis_evolution")) == 1
+    assert len(
+        [
+            record
+            for record in ledger.read_all("frame_mass_update")
+            if "_FM_retire_" in record["payload"]["update_id"]
+        ]
+    ) == 1
 
 
 def test_core_open_duplicate_event_moves_frame_mass_once(tmp_path: Path):

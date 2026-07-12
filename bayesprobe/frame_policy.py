@@ -143,6 +143,30 @@ class FrameAdequacyPolicy:
             for hypothesis in hypotheses
             if hypothesis.status not in _INACTIVE_STATUSES
         ]
+        if not active and not previous.active_hypothesis_ids:
+            named_ids = {hypothesis.id for hypothesis in hypotheses}
+            retirement_trigger_event_ids = _unique_ids(
+                event.id
+                for event in accepted
+                if any(
+                    hypothesis_id in named_ids and band in _DISCONFIRMING
+                    for hypothesis_id, band in event.likelihoods.items()
+                )
+            )
+            return self._decision(
+                previous,
+                status=FrameAdequacyStatus.CHALLENGED,
+                should_expand=True,
+                trigger_event_ids=(
+                    retirement_trigger_event_ids
+                    if retirement_trigger_event_ids
+                    else list(previous.trigger_event_ids)
+                ),
+                reason=(
+                    "All named hypotheses are retired; unresolved alternatives "
+                    "hold all frame mass."
+                ),
+            )
         unresolved_dominates = (
             previous.unresolved_alternative_mass is not None
             and bool(active)

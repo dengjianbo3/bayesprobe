@@ -194,6 +194,61 @@ def test_exhaustive_frame_rejects_positive_unresolved_mass():
         )
 
 
+def test_exclusive_open_frame_state_allows_all_named_hypotheses_retired():
+    frame_state = FrameState(
+        frame_id="frame_1",
+        competition=HypothesisCompetition.EXCLUSIVE,
+        coverage=HypothesisCoverage.OPEN,
+        active_hypothesis_ids=[],
+        unresolved_alternative_mass=1.0,
+        adequacy_status=FrameAdequacyStatus.CHALLENGED,
+    )
+
+    assert frame_state.active_hypothesis_ids == []
+    assert frame_state.unresolved_alternative_mass == 1.0
+
+
+@pytest.mark.parametrize(
+    "competition, coverage, unresolved",
+    [
+        (HypothesisCompetition.EXCLUSIVE, HypothesisCoverage.OPEN, 0.9),
+        (HypothesisCompetition.EXCLUSIVE, HypothesisCoverage.EXHAUSTIVE, 1.0),
+        (HypothesisCompetition.INDEPENDENT, HypothesisCoverage.OPEN, None),
+    ],
+)
+def test_empty_active_ids_are_reserved_for_fully_unresolved_exclusive_open_frames(
+    competition,
+    coverage,
+    unresolved,
+):
+    with pytest.raises(
+        ValueError,
+        match="empty active_hypothesis_ids require a fully unresolved exclusive-open frame",
+    ):
+        FrameState(
+            frame_id="frame_1",
+            competition=competition,
+            coverage=coverage,
+            active_hypothesis_ids=[],
+            unresolved_alternative_mass=unresolved,
+            adequacy_status=FrameAdequacyStatus.CHALLENGED,
+        )
+
+
+def test_task_frame_still_rejects_zero_initial_hypotheses():
+    frame = make_v02_task_frame()
+    payload = frame.hypothesis_frame.model_dump(mode="python")
+    payload["hypotheses"] = []
+    payload["rival_sets"] = {}
+    payload["unresolved_alternative_mass"] = 1.0
+
+    with pytest.raises(
+        ValueError,
+        match="hypothesis frame must contain between 1 and 6 hypotheses",
+    ):
+        HypothesisFrame.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     "native_fields",
     [

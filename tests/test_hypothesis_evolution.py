@@ -264,6 +264,59 @@ def test_independent_counterevidence_retires_stale_hypothesis():
     ]
 
 
+def test_public_retirement_only_operation_performs_no_other_evolution_behavior():
+    result = HypothesisEvolutionEngine().retire_stale_hypotheses(
+        cycle=make_cycle(),
+        hypotheses=updated_hypotheses(0.12),
+        evidence_events=[
+            anomaly_event(),
+            counter_event("E_independent_1", independence=0.8),
+            counter_event("E_independent_2", independence=0.75),
+        ],
+    )
+
+    assert isinstance(result, HypothesisEvolutionResult)
+    assert result.hypotheses_by_id()["H1"].status == HypothesisStatus.RETIRED
+    assert [evolution.operation for evolution in result.evolutions] == [
+        EvolutionOperation.RETIRE
+    ]
+    assert result.probe_candidates == []
+    assert all(hypothesis.created_by == "initial" for hypothesis in result.hypotheses)
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        HypothesisStatus.REFRAMED,
+        HypothesisStatus.SPLIT,
+        HypothesisStatus.RETIRED,
+        HypothesisStatus.ARCHIVED,
+    ],
+)
+def test_retirement_only_operation_ignores_terminal_hypothesis_statuses(
+    terminal_status,
+):
+    hypotheses = [
+        hypothesis.model_copy(update={"status": terminal_status})
+        if hypothesis.id == "H1"
+        else hypothesis
+        for hypothesis in updated_hypotheses(0.12)
+    ]
+
+    result = HypothesisEvolutionEngine().retire_stale_hypotheses(
+        cycle=make_cycle(),
+        hypotheses=hypotheses,
+        evidence_events=[
+            counter_event("E_independent_1", independence=0.8),
+            counter_event("E_independent_2", independence=0.75),
+        ],
+    )
+
+    assert result.hypotheses_by_id()["H1"].status == terminal_status
+    assert result.evolutions == []
+    assert result.probe_candidates == []
+
+
 def test_counterevidence_reframes_scoped_top_hypothesis():
     result = HypothesisEvolutionEngine(
         config=HypothesisEvolutionConfig(retire_posterior_threshold=0.05)

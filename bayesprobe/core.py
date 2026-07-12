@@ -126,21 +126,20 @@ class BayesProbeCore:
             accepted_events = [
                 event for event in evidence_events if event.discard_reason is None
             ]
-            evolved_hypotheses, evolutions = (
-                self._evolution_policy._retire_stale_hypotheses(
-                    cycle=closed_cycle,
-                    hypotheses=solve_result.hypotheses,
-                    evidence_events=accepted_events,
-                )
+            retirement_result = self._evolution_policy.retire_stale_hypotheses(
+                cycle=closed_cycle,
+                hypotheses=solve_result.hypotheses,
+                evidence_events=accepted_events,
             )
             solve_result = self._belief_solver.reconcile_retirements(
                 solve_result,
-                evolved_hypotheses=evolved_hypotheses,
-                evolutions=evolutions,
+                evolved_hypotheses=retirement_result.hypotheses,
+                evolutions=retirement_result.evolutions,
                 events=accepted_events,
                 run_id=cycle.run_id,
                 cycle_id=cycle.cycle_id,
             )
+            evolutions = retirement_result.evolutions
         belief_updates = solve_result.belief_updates
         frame_mass_updates = solve_result.frame_mass_updates
         frame_adequacy_decision = self._frame_policy.assess(

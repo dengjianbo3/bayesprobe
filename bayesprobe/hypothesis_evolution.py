@@ -20,6 +20,12 @@ from bayesprobe.schemas import (
 )
 
 
+_RETIREMENT_ELIGIBLE_STATUSES = {
+    HypothesisStatus.ACTIVE,
+    HypothesisStatus.WEAKENED,
+}
+
+
 @dataclass(frozen=True)
 class HypothesisEvolutionConfig:
     spawn_prior: float = 0.12
@@ -91,12 +97,13 @@ class HypothesisEvolutionEngine:
                 evolutions.append(spawn.evolution)
                 probe_candidates.append(spawn.probe_candidate)
 
-        hypotheses, retire_evolutions = self._retire_stale_hypotheses(
+        retirement_result = self.retire_stale_hypotheses(
             cycle=cycle,
             hypotheses=hypotheses,
             evidence_events=evidence_events,
         )
-        evolutions.extend(retire_evolutions)
+        hypotheses = retirement_result.hypotheses
+        evolutions.extend(retirement_result.evolutions)
 
         reframe_result = self._reframe_scoped_hypotheses(
             cycle=cycle,
@@ -189,16 +196,22 @@ class HypothesisEvolutionEngine:
             probe_candidate=probe_candidate,
         )
 
-    def _retire_stale_hypotheses(
+    def retire_stale_hypotheses(
         self,
         *,
         cycle: CycleRecord,
         hypotheses: list[Hypothesis],
         evidence_events: list[EvidenceEvent],
-    ) -> tuple[list[Hypothesis], list[HypothesisEvolution]]:
+    ) -> HypothesisEvolutionResult:
+        """Return retired hypotheses and RETIRE audits with no probe candidates."""
+        evidence_events = [
+            event for event in evidence_events if event.discard_reason is None
+        ]
         evolutions: list[HypothesisEvolution] = []
         retired_by_id: dict[str, Hypothesis] = {}
         for hypothesis in hypotheses:
+            if hypothesis.status not in _RETIREMENT_ELIGIBLE_STATUSES:
+                continue
             if hypothesis.posterior >= self.config.retire_posterior_threshold:
                 continue
             counterevents = [
@@ -233,12 +246,13 @@ class HypothesisEvolutionEngine:
                 )
             )
 
-        if not retired_by_id:
-            return hypotheses, []
-        return [
-            retired_by_id.get(hypothesis.id, hypothesis)
-            for hypothesis in hypotheses
-        ], evolutions
+        return HypothesisEvolutionResult(
+            hypotheses=[
+                retired_by_id.get(hypothesis.id, hypothesis)
+                for hypothesis in hypotheses
+            ],
+            evolutions=evolutions,
+        )
 
     def _reframe_scoped_hypotheses(
         self,

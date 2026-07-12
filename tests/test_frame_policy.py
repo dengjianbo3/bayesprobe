@@ -219,6 +219,90 @@ def test_all_named_candidates_can_lose_without_forced_winner():
     assert decision.should_expand is True
 
 
+def test_all_named_hypotheses_retired_challenges_fully_unresolved_frame():
+    state = _exact_state(
+        named={"H1": 0.005, "H2": 0.005},
+        unresolved=0.99,
+        statuses={
+            "H1": HypothesisStatus.RETIRED,
+            "H2": HypothesisStatus.RETIRED,
+        },
+    )
+    previous = state.frame_state.model_copy(
+        update={
+            "active_hypothesis_ids": [],
+            "unresolved_alternative_mass": 1.0,
+        }
+    )
+    events = [
+        _event(
+            event_id=f"E_retire_all_{index}",
+            likelihoods={
+                "H1": LikelihoodBand.STRONGLY_DISCONFIRMING,
+                "H2": LikelihoodBand.STRONGLY_DISCONFIRMING,
+            },
+            derivation_root_id=f"retirement-root-{index}",
+        )
+        for index in (1, 2)
+    ]
+
+    decision = FrameAdequacyPolicy().assess(
+        previous=previous,
+        events=events,
+        hypotheses=state.hypotheses,
+    )
+
+    assert decision.frame_state.adequacy_status == FrameAdequacyStatus.CHALLENGED
+    assert decision.should_expand is True
+    assert decision.trigger_event_ids == ["E_retire_all_1", "E_retire_all_2"]
+    assert decision.reason == (
+        "All named hypotheses are retired; unresolved alternatives hold all frame mass."
+    )
+
+
+def test_qualified_inadequacy_overrides_all_named_hypotheses_retired_challenge():
+    state = _exact_state(
+        named={"H1": 0.005, "H2": 0.005},
+        unresolved=0.99,
+        statuses={
+            "H1": HypothesisStatus.RETIRED,
+            "H2": HypothesisStatus.RETIRED,
+        },
+    )
+    previous = state.frame_state.model_copy(
+        update={
+            "active_hypothesis_ids": [],
+            "unresolved_alternative_mass": 1.0,
+        }
+    )
+    event = _event(
+        event_id="E_external_unresolved",
+        likelihoods={
+            "H1": LikelihoodBand.STRONGLY_DISCONFIRMING,
+            "H2": LikelihoodBand.STRONGLY_DISCONFIRMING,
+        },
+        unresolved_likelihood=LikelihoodBand.STRONGLY_CONFIRMING,
+        frame_fit=FrameFit.SUPPORTS_UNRESOLVED,
+        verifiability=0.9,
+        origin="tool_result",
+        derivation_root_id="external-root",
+    )
+
+    decision = FrameAdequacyPolicy().assess(
+        previous=previous,
+        events=[event],
+        hypotheses=state.hypotheses,
+    )
+
+    assert decision.frame_state.adequacy_status == FrameAdequacyStatus.INADEQUATE
+    assert decision.should_expand is True
+    assert decision.trigger_event_ids == [event.id]
+    assert decision.reason == (
+        "A strongly confirming, externally verifiable event supports an "
+        "unresolved alternative."
+    )
+
+
 def test_explicit_zero_effective_weight_remains_zero():
     state = _exact_state(named={"H1": 0.25, "H2": 0.25}, unresolved=0.50)
     event = _event(

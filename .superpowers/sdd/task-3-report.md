@@ -171,3 +171,60 @@ retirement remaining unreachable.
 No blocking concerns. Open-cycle evolution intentionally reaches only the
 existing retirement rule in Task 3; semantic expansion, reframing, anomaly
 spawning, and new probe candidates remain deferred to Task 6.
+
+## Review Fix 2
+
+Reviewed base: `b6165fd40866a93827ce3e8af3c961cf7e80b44c`.
+
+### Changes
+
+- A native exclusive-open `FrameState` may now have zero active hypothesis ids
+  only when unresolved alternative mass is fully conserved at one. Initial
+  `HypothesisFrame` construction still requires one to six hypotheses, and all
+  other empty-active-id combinations fail validation.
+- `FrameAdequacyPolicy` now treats a fully unresolved frame with no active named
+  hypotheses as challenged, requests expansion, and records the accepted
+  disconfirming retirement triggers. Already-qualified inadequate or expanding
+  rules retain precedence.
+- Added public
+  `HypothesisEvolutionEngine.retire_stale_hypotheses(...) -> HypothesisEvolutionResult`.
+  It returns only updated hypotheses and `RETIRE` audits, always has no probe
+  candidates, and performs no spawning, reframing, splitting, or candidate
+  creation. Normal evolution reuses the same method, and core no longer calls a
+  private retirement helper.
+- Retirement eligibility is limited to active and weakened hypotheses. Reframed,
+  split, retired, and archived terminal states are ignored, preventing duplicate
+  retirement evolutions on later evidence.
+- Added a public core-cycle regression that retires every active named
+  hypothesis, transfers each posterior into unresolved mass with one audit
+  update per hypothesis, returns a schema-valid fully unresolved state, and
+  preserves frame-mass, adequacy, evolution, and final-state ledger ordering.
+- Added a two-cycle public regression proving fresh counterevidence targeted at
+  an already retired hypothesis creates no second retirement evolution, no
+  retirement `FrameMassUpdate`, and no additional unresolved transfer.
+
+### RED Evidence
+
+1. Schema lifecycle tests produced `4 failed, 1 passed`: empty active ids were
+   rejected unconditionally.
+2. Adequacy tests produced `1 failed, 1 passed`: the all-retired frame remained
+   provisional while the stronger external inadequacy rule already passed.
+3. Retirement-only engine tests produced `5 failed`: the public method did not
+   exist.
+4. Public core regressions produced `2 failed`: core called the private helper,
+   and a second cycle emitted a duplicate `RETIRE` evolution.
+
+### GREEN Evidence
+
+- Exact Task 3 focused suite plus hypothesis-evolution/schema coverage:
+  `261 passed in 0.43s`.
+- Full offline Python suite: `988 passed, 10 skipped in 7.89s`.
+- Node stream regression: `15 passed, 0 failed`.
+- `git diff --check`: clean.
+- Production private-helper scan: no `_retire_stale_hypotheses` references.
+
+### Concerns
+
+No blocking concerns. This fix exposes and integrates retirement only. Semantic
+expansion, anomaly spawning, reframing, and candidate creation remain deferred
+to Task 6, and no Task 4/5, provider, probe, or WebUI behavior was added.

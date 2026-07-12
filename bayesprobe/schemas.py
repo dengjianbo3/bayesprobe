@@ -461,6 +461,8 @@ class FrameState(StrictTaskModel):
     @field_validator("active_hypothesis_ids")
     @classmethod
     def clean_active_ids(cls, value: list[str]) -> list[str]:
+        if not value:
+            return []
         return _unique_semantic_texts(value, "active_hypothesis_ids")
 
     @field_validator("trigger_event_ids")
@@ -486,6 +488,16 @@ class FrameState(StrictTaskModel):
     def validate_versions_and_mass(self) -> "FrameState":
         if self.frame_version < 1 or self.revision_count < 0:
             raise ValueError("frame versions and revision count must be non-negative")
+        if not self.active_hypothesis_ids and not (
+            self.competition == HypothesisCompetition.EXCLUSIVE
+            and self.coverage == HypothesisCoverage.OPEN
+            and self.unresolved_alternative_mass is not None
+            and math.isclose(self.unresolved_alternative_mass, 1.0, abs_tol=1e-6)
+        ):
+            raise ValueError(
+                "empty active_hypothesis_ids require a fully unresolved "
+                "exclusive-open frame"
+            )
         if self.competition == HypothesisCompetition.INDEPENDENT:
             if self.unresolved_alternative_mass is not None:
                 raise ValueError("independent frames do not use shared unresolved mass")
