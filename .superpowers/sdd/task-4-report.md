@@ -364,3 +364,29 @@ factual computation lineage when its exact code, plan, and safe sandbox policy
 are unchanged. This is conservative: differing outputs remain ledger-visible
 but do not claim fresh independent factual credit merely because the execution
 instance changed.
+
+## Review Fix 5
+
+### Changes
+
+- Validated reused signal-id source/content/root/supplied-group lineage directly
+  after provenance normalization and again at memory commit through one manager
+  method, before replay return, provider access, or ledger/memory mutation.
+- Kept accepted neutral events ledger-visible without emitting correlation-credit
+  deltas, so all existing directional balances remain unchanged.
+- Made native exclusive-open schema-violation events explicitly neutral on
+  unresolved mass with an `underdetermined` frame fit.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_accepted_neutral_event_preserves_existing_directional_credit tests/test_core_cycles.py::test_native_exclusive_open_schema_violation_is_neutral_and_underdetermined tests/test_core_cycles.py::test_replayed_signal_id_lineage_conflict_is_atomic_and_skips_provider -q -p no:cacheprovider` -> `3 failed`.
+- GREEN regression rerun: the same command -> `3 passed in 0.23s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py -q -p no:cacheprovider` -> `301 passed in 0.64s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `299 passed in 0.43s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1106 passed, 10 skipped in 8.74s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Concerns
+
+No blocking concerns.

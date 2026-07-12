@@ -133,6 +133,42 @@ class EvidenceMemoryManager:
     def __init__(self, policy: CorrelationCreditPolicy | None = None) -> None:
         self._policy = policy or CorrelationCreditPolicy()
 
+    def validate_signal_lineage(
+        self,
+        snapshot: EvidenceMemorySnapshot,
+        signal: ExternalSignal,
+        *,
+        canonical_correlation_group: str | None = None,
+    ) -> None:
+        provenance = _required_provenance(signal)
+        prior_source_content = snapshot.source_content_fingerprints.get(signal.id)
+        prior_content = snapshot.content_fingerprints.get(signal.id)
+        prior_root = snapshot.derivation_roots.get(signal.id)
+        identity_present = any(
+            value is not None
+            for value in (prior_source_content, prior_content, prior_root)
+        )
+        if not identity_present:
+            return
+
+        prior_identity = _source_content_identity_parts(prior_source_content)
+        supplied_identity = (
+            provenance.source_identity,
+            provenance.canonical_content_fingerprint,
+            provenance.correlation_group,
+        )
+        if (
+            prior_identity != supplied_identity
+            or prior_content != provenance.canonical_content_fingerprint
+            or prior_root != provenance.derivation_root_id
+            or (
+                canonical_correlation_group is not None
+                and prior_identity is not None
+                and prior_identity[2] != canonical_correlation_group
+            )
+        ):
+            raise ValueError("signal id lineage conflict")
+
     def classify(
         self,
         snapshot: EvidenceMemorySnapshot,
@@ -205,12 +241,14 @@ class EvidenceMemoryManager:
                 key: max(cap - snapshot.correlation_credit.get(key, 0.0), 0.0)
                 for key in credit_keys
             }
-        else:
+        elif likelihoods is None and unresolved_likelihood is None:
             remaining_before = {
                 key: max(cap - used, 0.0)
                 for key, used in snapshot.correlation_credit.items()
                 if key.startswith(group_prefix)
             }
+        else:
+            remaining_before = {}
         if status in {"duplicate_exact", "correlated_restatement"}:
             effective_weight = 0.0
         elif credit_keys:
@@ -246,26 +284,11 @@ class EvidenceMemoryManager:
         decision: EvidenceMemoryDecision,
     ) -> EvidenceMemorySnapshot:
         provenance = _required_provenance(signal)
-        prior_source_content = snapshot.source_content_fingerprints.get(signal.id)
-        prior_content = snapshot.content_fingerprints.get(signal.id)
-        prior_root = snapshot.derivation_roots.get(signal.id)
-        identity_present = any(
-            value is not None
-            for value in (prior_source_content, prior_content, prior_root)
+        self.validate_signal_lineage(
+            snapshot,
+            signal,
+            canonical_correlation_group=decision.canonical_correlation_group,
         )
-        if identity_present:
-            prior_identity = _source_content_identity_parts(prior_source_content)
-            current_identity = (
-                provenance.source_identity,
-                provenance.canonical_content_fingerprint,
-                decision.canonical_correlation_group,
-            )
-            if (
-                prior_identity != current_identity
-                or prior_content != provenance.canonical_content_fingerprint
-                or prior_root != provenance.derivation_root_id
-            ):
-                raise ValueError("signal id lineage conflict")
 
         if event.id in snapshot.accepted_evidence_ids or any(
             decode_discard_history_entry(item)[0] == event.id

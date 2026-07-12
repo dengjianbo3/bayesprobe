@@ -263,6 +263,7 @@ class EvidenceIntegrationGate:
                 raw_signal,
                 run_id=cycle.run_id,
             )
+            self._memory_manager.validate_signal_lineage(working_memory, signal)
             closed_signals.append(signal)
             signal_identity = _canonical_signal_identity(signal)
             identity_occurrences[signal_identity] = (
@@ -580,6 +581,7 @@ class EvidenceIntegrationGate:
                 event_id=event_id,
                 signal=signal,
                 hypothesis_ids=hypothesis_ids,
+                belief_state=belief_state,
                 is_duplicate=is_duplicate,
                 error=failure.error,
                 model_trace=failure.model_trace,
@@ -892,6 +894,7 @@ class EvidenceIntegrationGate:
         event_id: str,
         signal: ExternalSignal,
         hypothesis_ids: list[str],
+        belief_state: BeliefState,
         is_duplicate: bool,
         error: ModelGatewayValidationError,
         model_trace: ModelInvocationTrace | None = None,
@@ -902,6 +905,8 @@ class EvidenceIntegrationGate:
             hypothesis_ids=hypothesis_ids,
             evidence_type=EvidenceType.NEUTRAL,
             likelihoods={hypothesis_id: LikelihoodBand.NEUTRAL for hypothesis_id in hypothesis_ids},
+            unresolved_likelihood=_exclusive_open_unresolved_likelihood(belief_state),
+            frame_fit=FrameFit.UNDERDETERMINED,
             interpretation="Model gateway judgment failed schema validation.",
             is_duplicate=is_duplicate,
             quality_overrides=_ZERO_QUALITY_OVERRIDES,
@@ -927,7 +932,7 @@ class EvidenceIntegrationGate:
         likelihoods = {hypothesis_id: LikelihoodBand.NEUTRAL for hypothesis_id in hypothesis_ids}
         if endorsed_hypothesis in likelihoods:
             likelihoods[endorsed_hypothesis] = LikelihoodBand.WEAKLY_CONFIRMING
-        unresolved_likelihood = _projection_unresolved_likelihood(belief_state)
+        unresolved_likelihood = _exclusive_open_unresolved_likelihood(belief_state)
 
         return self._event(
             event_id=event_id,
@@ -955,7 +960,7 @@ class EvidenceIntegrationGate:
             belief_state=belief_state,
             probe_set=probe_set,
         )
-        unresolved_likelihood = _projection_unresolved_likelihood(belief_state)
+        unresolved_likelihood = _exclusive_open_unresolved_likelihood(belief_state)
         return self._event(
             event_id=event_id,
             signal=signal,
@@ -1229,7 +1234,7 @@ def _is_native_v02_state(belief_state: BeliefState) -> bool:
     )
 
 
-def _projection_unresolved_likelihood(
+def _exclusive_open_unresolved_likelihood(
     belief_state: BeliefState,
 ) -> LikelihoodBand | None:
     frame_state = belief_state.frame_state

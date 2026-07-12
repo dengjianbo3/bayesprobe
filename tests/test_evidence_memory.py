@@ -502,6 +502,51 @@ def test_credit_keys_include_direction_subject_and_internal_unresolved_subject()
     assert "H_other" not in repr(decision.remaining_credit)
 
 
+def test_accepted_neutral_event_preserves_existing_directional_credit():
+    manager = EvidenceMemoryManager()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_neutral_credit", "A neutral observation.", root="root-neutral"),
+        run_id="run_memory",
+    )
+    group = signal.provenance.correlation_group
+    original_credit = {
+        f"{group}|A|confirming": 0.2,
+        f"{group}|B|disconfirming": 0.35,
+        f"{group}|frame:3:unresolved|confirming": 0.1,
+        "other-group|A|confirming": 0.4,
+    }
+    snapshot = EvidenceMemorySnapshot(correlation_credit=original_credit)
+    decision = manager.classify(
+        snapshot,
+        signal,
+        likelihoods={"A": LikelihoodBand.NEUTRAL, "B": LikelihoodBand.NEUTRAL},
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        frame_version=3,
+        base_effective_weight=0.4,
+    )
+    event = EvidenceEvent(
+        id="E_neutral_credit",
+        derived_from_signal=signal.id,
+        target_hypotheses=["A", "B"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=signal.raw_content,
+        likelihoods={"A": LikelihoodBand.NEUTRAL, "B": LikelihoodBand.NEUTRAL},
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        effective_update_weight=decision.effective_update_weight,
+    )
+
+    committed = manager.commit(
+        snapshot,
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+
+    assert decision.remaining_credit == {}
+    assert committed.accepted_evidence_ids == [event.id]
+    assert committed.correlation_credit == original_credit
+
+
 def test_correlation_credit_saturation_stays_visible_with_zero_weight():
     manager = EvidenceMemoryManager(
         CorrelationCreditPolicy(max_cumulative_effective_weight_per_direction=0.5)

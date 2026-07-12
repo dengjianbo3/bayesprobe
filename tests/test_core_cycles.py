@@ -1449,6 +1449,41 @@ def test_direct_signal_schema_violation_becomes_discarded_evidence():
     assert event.verifiability == 0.0
 
 
+def test_native_exclusive_open_schema_violation_is_neutral_and_underdetermined():
+    belief_state = make_exact_belief_state()
+    hypothesis_ids = [hypothesis.id for hypothesis in belief_state.hypotheses]
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "likelihoods": {
+                    hypothesis_id: "neutral" for hypothesis_id in hypothesis_ids
+                },
+                "unresolved_likelihood": "neutral",
+                "frame_fit": "underdetermined",
+                "unexplained_observation": None,
+                "interpretation": "Missing evidence type.",
+                "quality_overrides": {},
+            }
+        }
+    )
+    gate = EvidenceIntegrationGate(model_gateway=gateway)
+    cycle = make_cycle("cycle_native_schema_violation")
+
+    result = gate.integrate(
+        cycle=cycle,
+        belief_state=belief_state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+
+    event = result.evidence_events[0]
+    assert event.schema_version == "v0.2"
+    assert event.discard_reason.startswith("schema_violation:")
+    assert set(event.likelihoods.values()) == {LikelihoodBand.NEUTRAL}
+    assert event.unresolved_likelihood == LikelihoodBand.NEUTRAL
+    assert event.frame_fit == FrameFit.UNDERDETERMINED
+
+
 def test_core_schema_violation_does_not_update_belief_state():
     gateway = ScriptedModelGateway(
         responses={
@@ -2899,6 +2934,45 @@ def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
     assert [
         record["payload"]["id"] for record in ledger.read_all("evidence_event")
     ] == [first.evidence_events[0].id]
+
+
+def test_replayed_signal_id_lineage_conflict_is_atomic_and_skips_provider(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger_path = tmp_path / "lineage-conflict-replay-ledger.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    cycle = make_cycle("cycle_lineage_conflict_replay")
+    signal = _memory_signal("S_reused_replay", "Stable audit result.", root="root-stable")
+    first = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[signal],
+    )
+    prior_memory = first.belief_state.evidence_memory
+    prior_memory_payload = prior_memory.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+    conflicting_signal = signal.model_copy(
+        update={
+            "provenance": signal.provenance.model_copy(
+                update={"correlation_group": "changed-supplied-group"}
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="signal id lineage conflict"):
+        core.integrate_cycle(
+            cycle=cycle.model_copy(update={"cycle_index": 2}),
+            belief_state=first.belief_state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[conflicting_signal],
+        )
+
+    assert len(gateway.requests) == 1
+    assert first.belief_state.evidence_memory.model_dump(mode="json") == prior_memory_payload
+    assert ledger_path.read_bytes() == prior_ledger
 
 
 def test_migrated_v01_reordered_inserted_replay_fails_before_provider_or_memory(
