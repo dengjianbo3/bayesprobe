@@ -212,8 +212,7 @@ class ModelProbeDesigner:
                 task="repair_probe_design",
                 input={
                     "original_request": redact_secret_material(request.input),
-                    "invalid_payload": redact_secret_material(response),
-                    "validation_error": str(error),
+                    "validation_error": "probe design response invalid",
                     "attempt_index": 1,
                 },
                 prompt_id="probe_design_repair",
@@ -290,9 +289,7 @@ class ModelProbeDesigner:
         for proposal in parsed.proposals:
             unknown = set(proposal.target_hypotheses).difference(known_hypotheses)
             if unknown:
-                raise ProbeDesignError(
-                    f"probe proposal contains unknown hypothesis ids: {sorted(unknown)}"
-                )
+                raise ProbeDesignError(f"{stage} response invalid")
         return parsed.proposals
 
 

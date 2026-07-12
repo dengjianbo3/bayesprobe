@@ -195,8 +195,32 @@ def test_model_probe_designer_rejects_unknown_hypotheses_after_repair(open_state
         }
     )
 
-    with pytest.raises(ProbeDesignError, match="unknown hypothesis"):
+    with pytest.raises(
+        ProbeDesignError,
+        match="probe design repair response invalid",
+    ):
         ModelProbeDesigner(gateway).propose(open_context(open_state))
+
+
+def test_model_probe_designer_never_forwards_unknown_target_to_repair_or_error(
+    open_state,
+):
+    secret = "AIzaSyD7x4-kY2_abcdefghijklmnopqrstuv"
+    invalid = proposal(target_hypotheses=[secret])
+    gateway = ScriptedModelGateway(
+        {
+            "design_probes": {"proposals": [invalid]},
+            "repair_probe_design": {"proposals": [invalid]},
+        }
+    )
+
+    with pytest.raises(ProbeDesignError) as captured:
+        ModelProbeDesigner(gateway).propose(open_context(open_state))
+
+    assert str(captured.value) == "probe design repair response invalid"
+    assert secret not in str(captured.value)
+    repair_request = gateway.requests[1]
+    assert secret not in repr(repair_request.input)
 
 
 def test_model_probe_designer_removes_semantic_duplicates(open_state):
@@ -247,7 +271,7 @@ def test_model_probe_designer_redacts_extra_api_key_from_repair_failure(
         "repair_probe_design",
     ]
     repair_request = gateway.requests[1]
-    assert "api_key" not in repair_request.input["invalid_payload"]
+    assert "invalid_payload" not in repair_request.input
     assert secret not in repr(repair_request.input)
     assert secret not in repair_request.input["validation_error"]
 
@@ -268,7 +292,7 @@ def test_model_probe_designer_redacts_extra_api_key_from_repair_request(
     assert len(result.candidates) == 1
     repair_request = gateway.requests[1]
     assert repair_request.input["validation_error"] == "probe design response invalid"
-    assert "api_key" not in repair_request.input["invalid_payload"]
+    assert "invalid_payload" not in repair_request.input
     assert secret not in repr(repair_request.input)
 
 
