@@ -12,6 +12,7 @@ from bayesprobe.model_gateway import (
     StructuredModelRequest,
 )
 from bayesprobe.openai_gateway import (
+    ANSWER_PROJECTION_JSON_SCHEMA,
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
     EVIDENCE_JUDGMENT_V01_JSON_SCHEMA,
     HYPOTHESIS_EXPANSION_JSON_SCHEMA,
@@ -78,6 +79,20 @@ FORBIDDEN_HYPOTHESIS_EXPANSION_FIELDS = [
     "unresolved_mass",
 ]
 OPENAI_MODEL_IDENTITY_PREFIX = "openai_model_identity:v1:"
+ANSWER_PROJECTION_REQUIRED_KEYS = [
+    "answer",
+    "contract_sections",
+    "main_uncertainty",
+    "weakest_assumption",
+    "cited_evidence_ids",
+]
+FORBIDDEN_ANSWER_PROJECTION_FIELDS = [
+    "mode",
+    "answer_value",
+    "current_best_hypothesis",
+    "posterior",
+    "belief_updates",
+]
 
 
 def parse_openai_model_identity(identity: str) -> dict[str, str]:
@@ -166,6 +181,25 @@ def make_multiple_choice_request(
         prompt_version="v0.1",
         schema_name="MultipleChoiceAnswer",
         schema_version="v0.1",
+    )
+
+
+def make_answer_projection_request(
+    *, task: str = "project_answer"
+) -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task=task,
+        input={
+            "task_frame": {"task_frame_id": "frame_1"},
+            "hypothesis_summaries": [{"id": "H1", "posterior": 0.7}],
+            "belief_summary": {"uncertainty_summary": "A rival remains plausible."},
+            "admitted_evidence": [{"id": "E1", "content": "A matched result."}],
+            "stop_reason": "cycle limit reached",
+        },
+        prompt_id="answer_projection",
+        prompt_version="v0.2",
+        schema_name="AnswerProjection",
+        schema_version="v0.2",
     )
 
 
@@ -261,6 +295,44 @@ def make_task_admission_request(
         schema_name="TaskAdmissionDecision",
         schema_version="v0.2",
     )
+
+
+def test_answer_projection_provider_schema_exposes_only_semantic_fields():
+    assert ANSWER_PROJECTION_JSON_SCHEMA["required"] == ANSWER_PROJECTION_REQUIRED_KEYS
+    assert list(ANSWER_PROJECTION_JSON_SCHEMA["properties"]) == ANSWER_PROJECTION_REQUIRED_KEYS
+    serialized = json.dumps(ANSWER_PROJECTION_JSON_SCHEMA).lower()
+    for field in FORBIDDEN_ANSWER_PROJECTION_FIELDS:
+        assert f'"{field}"' not in serialized
+
+
+@pytest.mark.parametrize(
+    "model_request",
+    [
+        make_answer_projection_request(),
+        make_answer_projection_request(task="repair_answer_projection"),
+    ],
+)
+def test_answer_projection_provider_tasks_use_the_strict_projection_schema(
+    model_request: StructuredModelRequest,
+):
+    responses_payload = build_openai_request_payload(model_request, model="test-model")
+    chat_payload = build_openai_chat_completions_payload(
+        model_request,
+        model="test-model",
+    )
+
+    assert responses_payload["text"]["format"] == {
+        "type": "json_schema",
+        "name": "AnswerProjection",
+        "strict": True,
+        "schema": ANSWER_PROJECTION_JSON_SCHEMA,
+    }
+    required_output = json.loads(chat_payload["messages"][1]["content"])[
+        "required_output"
+    ]
+    assert required_output["type"] == "AnswerProjection"
+    assert required_output["required_keys"] == ANSWER_PROJECTION_REQUIRED_KEYS
+    assert required_output["json_schema"] == ANSWER_PROJECTION_JSON_SCHEMA
 
 
 @pytest.mark.parametrize(

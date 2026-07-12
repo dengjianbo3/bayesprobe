@@ -1605,14 +1605,73 @@ class HypothesisEvolution(BaseModel):
 
 
 class AnswerProjection(BaseModel):
+    mode: ProjectionMode = ProjectionMode.SELECTION
     answer: str
-    current_best_hypothesis: str
+    answer_value: str | int | float | None = None
+    contract_sections: dict[str, str] = Field(default_factory=dict)
+    current_best_hypothesis: str | None = None
     posterior_summary: str
     main_uncertainty: str
     weakest_assumption: str
     main_evidence_events: list[str]
     change_my_mind_condition: ChangeMyMindCondition
     answer_utility_notes: str = ""
+
+    @field_validator(
+        "answer",
+        "posterior_summary",
+        "main_uncertainty",
+        "weakest_assumption",
+    )
+    @classmethod
+    def clean_projection_text(cls, value: str, info: ValidationInfo) -> str:
+        return _required_text(value, info.field_name)
+
+    @field_validator("current_best_hypothesis")
+    @classmethod
+    def clean_optional_hypothesis_id(cls, value: str | None) -> str | None:
+        return (
+            None
+            if value is None
+            else validate_credit_subject_hypothesis_id(
+                value,
+                "current_best_hypothesis",
+            )
+        )
+
+    @field_validator("answer_value", mode="before")
+    @classmethod
+    def validate_answer_value_scalar(cls, value: Any) -> str | int | float | None:
+        if value is None:
+            return None
+        if type(value) not in {str, int, float}:
+            raise ValueError("answer_value must be a scalar or null")
+        if isinstance(value, str):
+            return _required_text(value, "answer_value")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("answer_value must be finite")
+        return value
+
+    @field_validator("contract_sections", mode="before")
+    @classmethod
+    def clean_contract_sections(cls, value: Any) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise ValueError("contract_sections must be an object")
+        cleaned: dict[str, str] = {}
+        for section, text in value.items():
+            if not isinstance(section, str) or not isinstance(text, str):
+                raise ValueError("contract_sections must map text keys to text values")
+            key = _required_text(section, "contract section")
+            if key in cleaned:
+                raise ValueError("contract_sections keys must be unique")
+            cleaned[key] = _required_text(text, f"contract section {key}")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_projection_mode(self) -> "AnswerProjection":
+        if self.mode == ProjectionMode.ABSTENTION and self.answer_value is not None:
+            raise ValueError("abstention projections must not contain answer_value")
+        return self
 
 
 class BeliefStateProjection(BaseModel):

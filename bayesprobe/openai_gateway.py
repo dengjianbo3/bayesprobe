@@ -125,6 +125,32 @@ PROBE_SIGNAL_JSON_SCHEMA: dict[str, Any] = {
     },
 }
 
+ANSWER_PROJECTION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "answer",
+        "contract_sections",
+        "main_uncertainty",
+        "weakest_assumption",
+        "cited_evidence_ids",
+    ],
+    "properties": {
+        "answer": {"type": "string", "minLength": 1},
+        "contract_sections": {
+            "type": "object",
+            "additionalProperties": {"type": "string", "minLength": 1},
+        },
+        "main_uncertainty": {"type": "string", "minLength": 1},
+        "weakest_assumption": {"type": "string", "minLength": 1},
+        "cited_evidence_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": True,
+        },
+    },
+}
+
 PROBE_DESIGN_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -1035,6 +1061,19 @@ def parse_openai_chat_completions_response(response: Any) -> dict[str, Any]:
 
 
 def _instruction_for_task(task: str) -> str:
+    if task == "project_answer":
+        return (
+            "Synthesize an answer only from the supplied TaskFrame, belief summaries, "
+            "and admitted evidence summaries. Satisfy every required contract section and "
+            "cite only supplied evidence ids. Do not assign modes, answer values, hypothesis "
+            "ids, posterior values, frame status, unresolved mass, or belief updates."
+        )
+    if task == "repair_answer_projection":
+        return (
+            "Repair the malformed BayesProbe answer projection. Return only the exact "
+            "AnswerProjection semantic fields, satisfy every required contract section, and "
+            "cite only admitted evidence ids. Do not assign belief quantities or answer mode."
+        )
     if task == "assess_task_admission":
         return (
             "Perform task admission by assessing whether the supplied task can enter "
@@ -1152,6 +1191,8 @@ def _structured_output_for_task(
     *,
     schema_version: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if task in {"project_answer", "repair_answer_projection"}:
+        return "AnswerProjection", ANSWER_PROJECTION_JSON_SCHEMA
     if task in {"assess_task_admission", "repair_task_admission"}:
         return "TaskAdmissionDecision", TASK_ADMISSION_DECISION_JSON_SCHEMA
     if task == "execute_probe":
@@ -1205,6 +1246,12 @@ def _chat_instruction_for_task(
             f"{base_instruction} Return only one JSON object with exactly these "
             f"top-level keys: {judgment_keys}. Do not include markdown."
         )
+    if task in {"project_answer", "repair_answer_projection"}:
+        return (
+            f"{base_instruction} Return only one JSON object with exactly these "
+            "top-level keys: answer, contract_sections, main_uncertainty, "
+            "weakest_assumption, cited_evidence_ids. Do not include markdown."
+        )
     if task in {"answer_multiple_choice", "repair_multiple_choice_answer"}:
         return (
             f"{base_instruction} Return only one JSON object with exactly these "
@@ -1252,6 +1299,23 @@ def _required_output_for_task(
     *,
     schema_version: str | None = None,
 ) -> dict[str, Any]:
+    if task in {"project_answer", "repair_answer_projection"}:
+        return {
+            "type": "AnswerProjection",
+            "required_keys": [
+                "answer",
+                "contract_sections",
+                "main_uncertainty",
+                "weakest_assumption",
+                "cited_evidence_ids",
+            ],
+            "json_schema": ANSWER_PROJECTION_JSON_SCHEMA,
+            "notes": [
+                "contract_sections must cover the TaskFrame required_sections exactly",
+                "cited_evidence_ids must be selected from admitted evidence ids",
+                "the server owns answer mode, answer value, hypotheses, and beliefs",
+            ],
+        }
     if task in {"assess_task_admission", "repair_task_admission"}:
         return {
             "type": "TaskAdmissionDecision",
@@ -1598,6 +1662,7 @@ def _sanitize_provider_error(message: str, api_key: str) -> str:
 
 
 __all__ = [
+    "ANSWER_PROJECTION_JSON_SCHEMA",
     "EVIDENCE_JUDGMENT_JSON_SCHEMA",
     "EVIDENCE_JUDGMENT_V01_JSON_SCHEMA",
     "HYPOTHESIS_EXPANSION_JSON_SCHEMA",

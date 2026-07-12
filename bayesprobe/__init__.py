@@ -97,6 +97,12 @@ from bayesprobe.probe_design import (
     ProbeDesignResult,
     ProbeDesigner,
 )
+from bayesprobe.projections import (
+    AnswerProjectionError,
+    AnswerProjectionInput,
+    AnswerProjector,
+    TaskAwareAnswerProjector,
+)
 from bayesprobe.hypothesis_expansion import (
     HypothesisExpansionAdapter,
     HypothesisExpansionError,
@@ -172,6 +178,9 @@ __all__ = [
     "AnswerContract",
     "AnswerContractOutline",
     "AnswerProjection",
+    "AnswerProjectionError",
+    "AnswerProjectionInput",
+    "AnswerProjector",
     "AnswerRelationship",
     "AnswerValueType",
     "ArmCaseResult",
@@ -278,6 +287,7 @@ __all__ = [
     "TaskFrame",
     "TaskAdmissionDecision",
     "TaskAdmissionStatus",
+    "TaskAwareAnswerProjector",
     "TaskKind",
     "NeedsReframingResult",
     "OutOfScopeResult",
