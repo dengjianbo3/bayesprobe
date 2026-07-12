@@ -202,6 +202,8 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert request.task == "execute_probe"
     assert request.prompt_id == "probe_execution"
     assert request.schema_name == "ProbeSignal"
+    assert request.prompt_version == "v0.1"
+    assert request.schema_version == "v0.1"
     assert request.input["problem"] == "Which answer choice is correct?"
     assert request.input["task_context"] == (
         "Use graph-chain irreducibility and aperiodicity."
@@ -214,6 +216,7 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert signal.source_type == "model_probe_gateway"
     assert signal.source == "model_gateway:scripted"
     assert signal.raw_content.startswith("A direct comparison")
+    assert signal.provenance is None
 
 
 def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_empty():
@@ -233,7 +236,7 @@ def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_emp
     )
     probe = make_probe("P_choice", ["A", "B"], method="answer_choice_discrimination")
 
-    ProbeExecutor(ModelBackedProbeToolGateway(model_gateway)).execute_probe_set(
+    result = ProbeExecutor(ModelBackedProbeToolGateway(model_gateway)).execute_probe_set(
         probe_set=make_probe_set([probe]),
         context=ProbeExecutionContext(
             run_id="run_task_context_fallback",
@@ -246,6 +249,9 @@ def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_emp
     assert model_gateway.requests[0].input["task_context"] == (
         "Use the supplied theorem definitions."
     )
+    assert model_gateway.requests[0].prompt_version == "v0.2"
+    assert model_gateway.requests[0].schema_version == "v0.2"
+    assert result.signals[0].provenance is None
 
 
 def test_executor_preserves_probe_and_signal_order():

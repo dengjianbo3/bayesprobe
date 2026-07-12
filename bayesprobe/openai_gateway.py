@@ -21,7 +21,7 @@ from bayesprobe.model_gateway import (
     ProviderRequestControls,
     StructuredModelRequest,
 )
-from bayesprobe.schemas import EvidenceType, LikelihoodBand
+from bayesprobe.schemas import EvidenceType, FrameFit, LikelihoodBand
 from bayesprobe.provider_telemetry import (
     ProviderInvocationContext,
     ProviderInvocationObserver,
@@ -39,7 +39,7 @@ except ImportError:
     OpenAI = None
 
 
-EVIDENCE_JUDGMENT_JSON_SCHEMA: dict[str, Any] = {
+EVIDENCE_JUDGMENT_V01_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
@@ -60,6 +60,47 @@ EVIDENCE_JUDGMENT_JSON_SCHEMA: dict[str, Any] = {
                 "enum": [band.value for band in LikelihoodBand],
             },
         },
+        "interpretation": {"type": "string"},
+        "quality_overrides": {
+            "type": "object",
+            "additionalProperties": {"type": "number"},
+        },
+    },
+}
+
+EVIDENCE_JUDGMENT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "evidence_type",
+        "likelihoods",
+        "unresolved_likelihood",
+        "frame_fit",
+        "unexplained_observation",
+        "interpretation",
+        "quality_overrides",
+    ],
+    "properties": {
+        "evidence_type": {
+            "type": "string",
+            "enum": [evidence_type.value for evidence_type in EvidenceType],
+        },
+        "likelihoods": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "string",
+                "enum": [band.value for band in LikelihoodBand],
+            },
+        },
+        "unresolved_likelihood": {
+            "type": ["string", "null"],
+            "enum": [*(band.value for band in LikelihoodBand), None],
+        },
+        "frame_fit": {
+            "type": "string",
+            "enum": [frame_fit.value for frame_fit in FrameFit],
+        },
+        "unexplained_observation": {"type": ["string", "null"]},
         "interpretation": {"type": "string"},
         "quality_overrides": {
             "type": "object",
@@ -497,7 +538,10 @@ def build_openai_request_payload(
     model: str,
     max_output_tokens: int | None = None,
 ) -> dict[str, Any]:
-    schema_name, schema = _structured_output_for_task(request.task)
+    schema_name, schema = _structured_output_for_task(
+        request.task,
+        schema_version=request.schema_version,
+    )
     payload: dict[str, Any] = {
         "model": model,
         "input": [
@@ -540,7 +584,10 @@ def build_openai_chat_completions_payload(
         "messages": [
             {
                 "role": "system",
-                "content": _chat_instruction_for_task(request.task),
+                "content": _chat_instruction_for_task(
+                    request.task,
+                    schema_version=request.schema_version,
+                ),
             },
             {
                 "role": "user",
@@ -548,7 +595,10 @@ def build_openai_chat_completions_payload(
                     {
                         "task": request.task,
                         "input": request.input,
-                        "required_output": _required_output_for_task(request.task),
+                        "required_output": _required_output_for_task(
+                            request.task,
+                            schema_version=request.schema_version,
+                        ),
                     },
                     sort_keys=True,
                 ),
@@ -870,13 +920,27 @@ def _instruction_for_task(task: str) -> str:
     raise ValueError(f"unsupported openai model task: {task}")
 
 
-def _structured_output_for_task(task: str) -> tuple[str, dict[str, Any]]:
+def _evidence_schema_for_version(schema_version: str | None) -> dict[str, Any]:
+    if schema_version == "v0.2":
+        return EVIDENCE_JUDGMENT_JSON_SCHEMA
+    return EVIDENCE_JUDGMENT_V01_JSON_SCHEMA
+
+
+def _evidence_judgment_key_text(schema_version: str | None) -> str:
+    return ", ".join(_evidence_schema_for_version(schema_version)["required"])
+
+
+def _structured_output_for_task(
+    task: str,
+    *,
+    schema_version: str | None = None,
+) -> tuple[str, dict[str, Any]]:
     if task in {"assess_task_admission", "repair_task_admission"}:
         return "TaskAdmissionDecision", TASK_ADMISSION_DECISION_JSON_SCHEMA
     if task == "execute_probe":
         return "ProbeSignal", PROBE_SIGNAL_JSON_SCHEMA
     if task in {"judge_evidence", "repair_evidence_judgment"}:
-        return "EvidenceJudgment", EVIDENCE_JUDGMENT_JSON_SCHEMA
+        return "EvidenceJudgment", _evidence_schema_for_version(schema_version)
     if task in {"answer_multiple_choice", "repair_multiple_choice_answer"}:
         return "MultipleChoiceAnswer", MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA
     if task in {"plan_python_probe", "repair_python_probe_plan"}:
@@ -888,7 +952,11 @@ def _structured_output_for_task(task: str) -> tuple[str, dict[str, Any]]:
     raise ValueError(f"unsupported openai model task: {task}")
 
 
-def _chat_instruction_for_task(task: str) -> str:
+def _chat_instruction_for_task(
+    task: str,
+    *,
+    schema_version: str | None = None,
+) -> str:
     base_instruction = _instruction_for_task(task)
     if task in {"assess_task_admission", "repair_task_admission"}:
         return (
@@ -903,18 +971,18 @@ def _chat_instruction_for_task(task: str) -> str:
             "top-level key: raw_content. Do not include markdown."
         )
     if task == "judge_evidence":
+        judgment_keys = _evidence_judgment_key_text(schema_version)
         return (
             f"{base_instruction} Return only one JSON object with exactly these "
-            "top-level keys: evidence_type, likelihoods, interpretation, "
-            "quality_overrides. Do not copy input fields such as signal_id, "
+            f"top-level keys: {judgment_keys}. Do not copy input fields such as signal_id, "
             "source, source_type, target_hypotheses, likelihood_bands, or "
             "evidence into the output. Do not include markdown."
         )
     if task == "repair_evidence_judgment":
+        judgment_keys = _evidence_judgment_key_text(schema_version)
         return (
             f"{base_instruction} Return only one JSON object with exactly these "
-            "top-level keys: evidence_type, likelihoods, interpretation, "
-            "quality_overrides. Do not include markdown."
+            f"top-level keys: {judgment_keys}. Do not include markdown."
         )
     if task in {"answer_multiple_choice", "repair_multiple_choice_answer"}:
         return (
@@ -943,7 +1011,11 @@ def _chat_instruction_for_task(task: str) -> str:
     raise ValueError(f"unsupported openai model task: {task}")
 
 
-def _required_output_for_task(task: str) -> dict[str, Any]:
+def _required_output_for_task(
+    task: str,
+    *,
+    schema_version: str | None = None,
+) -> dict[str, Any]:
     if task in {"assess_task_admission", "repair_task_admission"}:
         return {
             "type": "TaskAdmissionDecision",
@@ -968,15 +1040,11 @@ def _required_output_for_task(task: str) -> dict[str, Any]:
             ],
         }
     if task in {"judge_evidence", "repair_evidence_judgment"}:
+        schema = _evidence_schema_for_version(schema_version)
         return {
             "type": "EvidenceJudgment",
-            "required_keys": [
-                "evidence_type",
-                "likelihoods",
-                "interpretation",
-                "quality_overrides",
-            ],
-            "json_schema": EVIDENCE_JUDGMENT_JSON_SCHEMA,
+            "required_keys": list(schema["required"]),
+            "json_schema": schema,
             "notes": [
                 "likelihoods must be an object keyed only by supplied hypothesis ids",
                 "quality_overrides may be an empty object",
@@ -1275,6 +1343,7 @@ def _sanitize_provider_error(message: str, api_key: str) -> str:
 
 __all__ = [
     "EVIDENCE_JUDGMENT_JSON_SCHEMA",
+    "EVIDENCE_JUDGMENT_V01_JSON_SCHEMA",
     "MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA",
     "PYTHON_CODE_REPAIR_JSON_SCHEMA",
     "PYTHON_PROBE_PLAN_JSON_SCHEMA",

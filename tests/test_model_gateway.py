@@ -22,7 +22,13 @@ from bayesprobe.model_gateway import (
     evidence_judgment_from_mapping,
     model_gateway_adapter_kind,
 )
-from bayesprobe.schemas import EvidenceType, LikelihoodBand
+from bayesprobe.schemas import (
+    EvidenceType,
+    FrameFit,
+    HypothesisCompetition,
+    HypothesisCoverage,
+    LikelihoodBand,
+)
 
 
 def make_request(
@@ -98,6 +104,36 @@ def test_deterministic_gateway_judges_anomaly_for_all_targets():
     }
 
 
+def test_deterministic_gateway_maps_anomaly_to_unresolved_only_for_exclusive_open():
+    open_request = make_request("ANOMALY: named candidates miss this result.")
+    open_request.input["frame"] = {
+        "competition": "exclusive",
+        "coverage": "open",
+        "frame_version": 2,
+    }
+    open_judgment = evidence_judgment_from_mapping(
+        DeterministicModelGateway().complete_structured(open_request),
+        competition=HypothesisCompetition.EXCLUSIVE,
+        coverage=HypothesisCoverage.OPEN,
+    )
+    exhaustive_request = make_request("ANOMALY: this result is underdetermined.")
+    exhaustive_request.input["frame"] = {
+        "competition": "exclusive",
+        "coverage": "exhaustive",
+        "frame_version": 1,
+    }
+    exhaustive_judgment = evidence_judgment_from_mapping(
+        DeterministicModelGateway().complete_structured(exhaustive_request),
+        competition=HypothesisCompetition.EXCLUSIVE,
+        coverage=HypothesisCoverage.EXHAUSTIVE,
+    )
+
+    assert open_judgment.frame_fit == FrameFit.SUPPORTS_UNRESOLVED
+    assert open_judgment.unresolved_likelihood == LikelihoodBand.MODERATELY_CONFIRMING
+    assert exhaustive_judgment.frame_fit == FrameFit.UNDERDETERMINED
+    assert exhaustive_judgment.unresolved_likelihood is None
+
+
 def test_deterministic_gateway_judges_neutral_signal():
     response = DeterministicModelGateway().complete_structured(
         make_request("This signal has no deterministic cue.")
@@ -148,6 +184,19 @@ def test_structured_model_request_accepts_minimal_call():
     assert request.schema_name is None
     assert request.schema_version is None
     assert request.metadata == {}
+
+
+def test_structured_model_request_rejects_secret_input_without_echoing_it():
+    secret = "sk-provider-secret-value-123"
+
+    with pytest.raises(ValueError) as captured:
+        StructuredModelRequest(
+            task="judge_evidence",
+            input={"Authorization": f"Bearer {secret}"},
+        )
+
+    assert "secret" in str(captured.value).lower()
+    assert secret not in str(captured.value)
 
 
 def test_structured_model_request_stores_metadata_and_is_frozen():
@@ -572,3 +621,87 @@ def test_evidence_judgment_repair_policy_rejects_invalid_config(config, expected
 def test_evidence_judgment_from_mapping_raises_validation_error(payload, expected_message):
     with pytest.raises(ModelGatewayValidationError, match=expected_message):
         evidence_judgment_from_mapping(payload)
+
+
+def test_native_evidence_judgment_requires_all_v02_fields():
+    with pytest.raises(ModelGatewayValidationError, match="missing field: frame_fit"):
+        evidence_judgment_from_mapping(
+            {
+                "evidence_type": "neutral",
+                "likelihoods": {"H1": "neutral"},
+                "unresolved_likelihood": None,
+                "unexplained_observation": None,
+                "interpretation": "Incomplete native judgment.",
+                "quality_overrides": {},
+            },
+            competition=HypothesisCompetition.INDEPENDENT,
+            coverage=HypothesisCoverage.OPEN,
+        )
+
+
+@pytest.mark.parametrize(
+    ("frame_fit", "unresolved_likelihood", "message"),
+    [
+        ("supports_unresolved", "neutral", "requires a confirming"),
+        ("explained_by_named", "weakly_confirming", "cannot confirm unresolved"),
+        ("underdetermined", "weakly_confirming", "requires neutral"),
+    ],
+)
+def test_native_evidence_judgment_rejects_incoherent_open_frame_fields(
+    frame_fit,
+    unresolved_likelihood,
+    message,
+):
+    with pytest.raises(ModelGatewayValidationError, match=message):
+        evidence_judgment_from_mapping(
+            {
+                "evidence_type": "anomaly",
+                "likelihoods": {"H1": "moderately_disconfirming"},
+                "unresolved_likelihood": unresolved_likelihood,
+                "frame_fit": frame_fit,
+                "unexplained_observation": "The named claim misses the result.",
+                "interpretation": "Native coherence fixture.",
+                "quality_overrides": {},
+            },
+            competition=HypothesisCompetition.EXCLUSIVE,
+            coverage=HypothesisCoverage.OPEN,
+        )
+
+
+def test_native_evidence_judgment_requires_null_unresolved_outside_exclusive_open():
+    with pytest.raises(ModelGatewayValidationError, match="must be null"):
+        evidence_judgment_from_mapping(
+            {
+                "evidence_type": "supporting",
+                "likelihoods": {"H1": "weakly_confirming"},
+                "unresolved_likelihood": "neutral",
+                "frame_fit": "underdetermined",
+                "unexplained_observation": None,
+                "interpretation": "Independent frames have no shared reserve.",
+                "quality_overrides": {},
+            },
+            competition=HypothesisCompetition.INDEPENDENT,
+            coverage=HypothesisCoverage.OPEN,
+        )
+
+
+def test_evidence_judgment_rejects_secret_provider_payload_without_echoing_it():
+    secret = "sk-provider-secret-value-123"
+
+    with pytest.raises(ModelGatewayValidationError) as captured:
+        evidence_judgment_from_mapping(
+            {
+                "evidence_type": "neutral",
+                "likelihoods": {"H1": "neutral"},
+                "unresolved_likelihood": None,
+                "frame_fit": "underdetermined",
+                "unexplained_observation": None,
+                "interpretation": f"Authorization: Bearer {secret}",
+                "quality_overrides": {},
+            },
+            competition=HypothesisCompetition.INDEPENDENT,
+            coverage=HypothesisCoverage.OPEN,
+        )
+
+    assert "secret" in str(captured.value).lower()
+    assert secret not in str(captured.value)

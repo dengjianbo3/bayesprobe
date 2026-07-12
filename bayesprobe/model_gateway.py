@@ -7,7 +7,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from bayesprobe.schemas import EvidenceType, LikelihoodBand
+from bayesprobe.schemas import (
+    EvidenceType,
+    FrameFit,
+    HypothesisCompetition,
+    HypothesisCoverage,
+    LikelihoodBand,
+    is_forbidden_secret_key_name,
+    is_secret_like_value,
+)
 from bayesprobe.provider_telemetry import ProviderInvocationObserver
 
 
@@ -46,6 +54,8 @@ class StructuredModelRequest:
             raise ValueError("structured model request task must not be empty")
         if not isinstance(self.input, Mapping):
             raise ValueError("structured model request input must be an object")
+        if _contains_secret_material(self.input):
+            raise ValueError("structured model request must not contain secret material")
         _validate_optional_string(
             self.prompt_id,
             owner="structured model request",
@@ -68,6 +78,8 @@ class StructuredModelRequest:
         )
         if not isinstance(self.metadata, Mapping):
             raise ValueError("structured model request metadata must be an object")
+        if _contains_secret_material(self.metadata):
+            raise ValueError("structured model request must not contain secret material")
         object.__setattr__(self, "input", dict(self.input))
         object.__setattr__(self, "metadata", dict(self.metadata))
 
@@ -250,6 +262,9 @@ class ModelGateway(Protocol):
 class EvidenceJudgment:
     evidence_type: EvidenceType
     likelihoods: dict[str, LikelihoodBand]
+    unresolved_likelihood: LikelihoodBand | None
+    frame_fit: FrameFit
+    unexplained_observation: str | None
     interpretation: str
     quality_overrides: dict[str, float] = field(default_factory=dict)
 
@@ -264,9 +279,43 @@ _QUALITY_OVERRIDE_METRICS = {
 }
 
 
-def evidence_judgment_from_mapping(payload: dict[str, Any]) -> EvidenceJudgment:
+def evidence_judgment_from_mapping(
+    payload: dict[str, Any],
+    *,
+    competition: HypothesisCompetition | None = None,
+    coverage: HypothesisCoverage | None = None,
+) -> EvidenceJudgment:
     if not isinstance(payload, Mapping):
         raise ModelGatewayValidationError("evidence judgment payload must be an object")
+    if _contains_secret_material(payload):
+        raise ModelGatewayValidationError(
+            "evidence judgment must not contain secret material"
+        )
+    native_v02 = competition is not None or coverage is not None
+    if native_v02:
+        if competition is None or coverage is None:
+            raise ModelGatewayValidationError(
+                "native evidence judgment requires competition and coverage"
+            )
+        required_fields = {
+            "evidence_type",
+            "likelihoods",
+            "unresolved_likelihood",
+            "frame_fit",
+            "unexplained_observation",
+            "interpretation",
+            "quality_overrides",
+        }
+        for field_name in required_fields:
+            if field_name not in payload:
+                raise ModelGatewayValidationError(
+                    f"evidence judgment missing field: {field_name}"
+                )
+        unexpected_fields = set(payload).difference(required_fields)
+        if unexpected_fields:
+            raise ModelGatewayValidationError(
+                "evidence judgment contains unexpected fields"
+            )
     if "evidence_type" not in payload:
         raise ModelGatewayValidationError("evidence judgment missing field: evidence_type")
 
@@ -288,6 +337,32 @@ def evidence_judgment_from_mapping(payload: dict[str, Any]) -> EvidenceJudgment:
             raise ModelGatewayValidationError(
                 f"invalid likelihood band for {hypothesis_id}: {likelihood}"
             ) from error
+
+    raw_unresolved_likelihood = payload.get("unresolved_likelihood")
+    if raw_unresolved_likelihood is None:
+        unresolved_likelihood = None
+    else:
+        try:
+            unresolved_likelihood = LikelihoodBand(raw_unresolved_likelihood)
+        except (TypeError, ValueError) as error:
+            raise ModelGatewayValidationError(
+                f"invalid unresolved likelihood band: {raw_unresolved_likelihood}"
+            ) from error
+
+    raw_frame_fit = payload.get("frame_fit", FrameFit.UNDERDETERMINED.value)
+    try:
+        frame_fit = FrameFit(raw_frame_fit)
+    except (TypeError, ValueError) as error:
+        raise ModelGatewayValidationError(f"invalid frame_fit: {raw_frame_fit}") from error
+
+    unexplained_observation = payload.get("unexplained_observation")
+    if unexplained_observation is not None and not isinstance(
+        unexplained_observation,
+        str,
+    ):
+        raise ModelGatewayValidationError(
+            "evidence judgment unexplained_observation must be a string or null"
+        )
 
     quality_overrides_payload = payload.get("quality_overrides", {})
     if quality_overrides_payload is None:
@@ -314,12 +389,70 @@ def evidence_judgment_from_mapping(payload: dict[str, Any]) -> EvidenceJudgment:
             )
         quality_overrides[metric_name] = parsed_value
 
+    if native_v02:
+        exclusive_open = (
+            competition == HypothesisCompetition.EXCLUSIVE
+            and coverage == HypothesisCoverage.OPEN
+        )
+        if exclusive_open and unresolved_likelihood is None:
+            raise ModelGatewayValidationError(
+                "exclusive-open evidence judgment requires unresolved_likelihood"
+            )
+        if not exclusive_open and unresolved_likelihood is not None:
+            raise ModelGatewayValidationError(
+                "unresolved_likelihood must be null outside exclusive-open frames"
+            )
+        if frame_fit == FrameFit.SUPPORTS_UNRESOLVED and not _is_confirming(
+            unresolved_likelihood
+        ):
+            raise ModelGatewayValidationError(
+                "supports_unresolved requires a confirming unresolved likelihood"
+            )
+        if frame_fit == FrameFit.EXPLAINED_BY_NAMED and _is_confirming(
+            unresolved_likelihood
+        ):
+            raise ModelGatewayValidationError(
+                "explained_by_named cannot confirm unresolved likelihood"
+            )
+        if (
+            frame_fit == FrameFit.UNDERDETERMINED
+            and exclusive_open
+            and unresolved_likelihood != LikelihoodBand.NEUTRAL
+        ):
+            raise ModelGatewayValidationError(
+                "underdetermined requires neutral unresolved likelihood"
+            )
+
     return EvidenceJudgment(
         evidence_type=evidence_type,
         likelihoods=likelihoods,
+        unresolved_likelihood=unresolved_likelihood,
+        frame_fit=frame_fit,
+        unexplained_observation=unexplained_observation,
         interpretation=str(payload.get("interpretation", "")),
         quality_overrides=quality_overrides,
     )
+
+
+def _is_confirming(band: LikelihoodBand | None) -> bool:
+    return band in {
+        LikelihoodBand.WEAKLY_CONFIRMING,
+        LikelihoodBand.MODERATELY_CONFIRMING,
+        LikelihoodBand.STRONGLY_CONFIRMING,
+    }
+
+
+def _contains_secret_material(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            is_forbidden_secret_key_name(str(key))
+            or is_secret_like_value(str(key))
+            or _contains_secret_material(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple):
+        return any(_contains_secret_material(item) for item in value)
+    return isinstance(value, str) and is_secret_like_value(value)
 
 
 class DeterministicModelGateway:
@@ -344,9 +477,20 @@ class DeterministicModelGateway:
             raw_content=content_upper,
             hypothesis_ids=hypothesis_ids,
         )
+        frame = request.input.get("frame", {})
+        exclusive_open = (
+            frame.get("competition") == HypothesisCompetition.EXCLUSIVE.value
+            and frame.get("coverage") == HypothesisCoverage.OPEN.value
+        )
+        unresolved_likelihood = (
+            LikelihoodBand.NEUTRAL.value if exclusive_open else None
+        )
+        frame_fit = FrameFit.UNDERDETERMINED
+        unexplained_observation = None
 
         if "REFUTES" in content_upper or "CONTRADICTS" in content_upper:
             evidence_type = EvidenceType.COUNTEREVIDENCE
+            frame_fit = FrameFit.EXPLAINED_BY_NAMED
             for hypothesis_id in hypothesis_ids:
                 likelihoods[hypothesis_id] = (
                     LikelihoodBand.MODERATELY_DISCONFIRMING.value
@@ -355,6 +499,7 @@ class DeterministicModelGateway:
                 )
         elif "SUPPORTS" in content_upper:
             evidence_type = EvidenceType.SUPPORTING
+            frame_fit = FrameFit.EXPLAINED_BY_NAMED
             for hypothesis_id in hypothesis_ids:
                 likelihoods[hypothesis_id] = (
                     LikelihoodBand.MODERATELY_CONFIRMING.value
@@ -367,10 +512,17 @@ class DeterministicModelGateway:
                 hypothesis_id: LikelihoodBand.MODERATELY_DISCONFIRMING.value
                 for hypothesis_id in hypothesis_ids
             }
+            unexplained_observation = "The signal is poorly explained by named hypotheses."
+            if exclusive_open:
+                frame_fit = FrameFit.SUPPORTS_UNRESOLVED
+                unresolved_likelihood = LikelihoodBand.MODERATELY_CONFIRMING.value
 
         return {
             "evidence_type": evidence_type.value,
             "likelihoods": likelihoods,
+            "unresolved_likelihood": unresolved_likelihood,
+            "frame_fit": frame_fit.value,
+            "unexplained_observation": unexplained_observation,
             "interpretation": f"Deterministic v0.2 interpretation for {source_type}.",
             "quality_overrides": {},
         }

@@ -102,6 +102,8 @@ class BayesProbeCore:
                 signals=normalized_signals,
             )
         )
+        ledger_signals = integration.normalized_signals or normalized_signals
+        next_evidence_memory = integration.evidence_memory or belief_state.evidence_memory
         evidence_events = mark_replayed_evidence_events(
             belief_state,
             integration.evidence_events,
@@ -222,6 +224,7 @@ class BayesProbeCore:
                     for hypothesis in evolved_hypotheses
                 ],
                 "frame_state": next_frame_state.model_dump(mode="python"),
+                "evidence_memory": next_evidence_memory.model_dump(mode="python"),
                 "posterior_summary": posterior_summary,
                 "uncertainty_summary": uncertainty_summary,
                 "ledger_refs": merged_ledger_refs,
@@ -236,7 +239,7 @@ class BayesProbeCore:
         )
         self._append_ledger_records(
             cycle=integrated_cycle,
-            signals=normalized_signals,
+            signals=ledger_signals,
             probe_set=probe_set,
             evidence_events=canonical_evidence_events,
             belief_updates=belief_updates,

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore, EvidenceIntegrationGate
+from bayesprobe.evidence import EvidenceIntegrationResult
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
@@ -20,6 +21,7 @@ from bayesprobe.schemas import (
     CycleRecord,
     CycleSignalShape,
     EvidenceEvent,
+    EvidenceMemorySnapshot,
     EvidenceType,
     ExternalSignal,
     FramingMethod,
@@ -29,10 +31,12 @@ from bayesprobe.schemas import (
     HypothesisEvolution,
     HypothesisStatus,
     EvolutionOperation,
+    EpistemicOrigin,
     LikelihoodBand,
     ProbeDesign,
     ProbeSet,
     SignalKind,
+    SignalProvenance,
     TaskAdmissionDecision,
     TaskAdmissionStatus,
     TaskKind,
@@ -60,6 +64,7 @@ class RecordingEvidenceIntegrationGate(EvidenceIntegrationGate):
         self.seen_signal_ids: list[str] = []
         self.seen_cycle_ids: list[str] = []
         self.seen_inbox_statuses: list[str] = []
+        self.seen_provenance = []
 
     def integrate(
         self,
@@ -72,6 +77,7 @@ class RecordingEvidenceIntegrationGate(EvidenceIntegrationGate):
         self.seen_cycle_ids.append(cycle.cycle_id)
         self.seen_signal_ids.extend(signal.id for signal in signals)
         self.seen_inbox_statuses.extend(signal.inbox_status.value for signal in signals)
+        self.seen_provenance.extend(signal.provenance for signal in signals)
         assert all(signal.cycle_id == cycle.cycle_id for signal in signals)
         assert all(signal.inbox_status.value == "accepted" for signal in signals)
         return super().integrate(
@@ -284,6 +290,7 @@ def test_active_only_signal_updates_belief_through_evidence_gate():
     assert core.inbox.closed_called is True
     assert core.gate.seen_signal_ids == ["S1"]
     assert core.gate.seen_cycle_ids == ["cycle_1"]
+    assert core.gate.seen_provenance == [None]
     assert result.evidence_events[0].evidence_type == EvidenceType.COUNTEREVIDENCE
     assert result.evidence_events[0].likelihoods["H1"] == LikelihoodBand.MODERATELY_DISCONFIRMING
     assert result.evidence_events[0].id == "run_1_cycle_1_E1"
@@ -571,7 +578,7 @@ def test_direct_signal_repair_success_produces_normal_evidence():
     assert event.likelihoods["H1"] == LikelihoodBand.MODERATELY_CONFIRMING
     assert event.discard_reason is None
     assert event.interpretation == "Repaired supporting judgment."
-    assert event.reliability == 0.91
+    assert event.reliability == 0.8
 
 
 def test_direct_signal_invalid_repair_becomes_schema_violation():
@@ -1809,6 +1816,36 @@ class StaticEventCore(BayesProbeCore):
         return self.static_gate
 
 
+class InvalidMemoryGate(EvidenceIntegrationGate):
+    def integrate(self, *, cycle, belief_state, probe_set, signals):
+        return EvidenceIntegrationResult(
+            evidence_events=[],
+            probe_candidates=[],
+            evidence_memory=EvidenceMemorySnapshot.model_construct(memory_version=0),
+            normalized_signals=list(signals),
+        )
+
+
+class InvalidMemoryCore(BayesProbeCore):
+    def _create_evidence_integration_gate(self):
+        return InvalidMemoryGate()
+
+
+def test_invalid_committed_memory_fails_before_any_cycle_ledger_append(tmp_path: Path):
+    ledger = JsonlLedgerStore(tmp_path / "invalid-memory-ledger.jsonl")
+    core = InvalidMemoryCore(ledger=ledger)
+
+    with pytest.raises(ValueError, match="final belief state failed recursive validation"):
+        core.integrate_cycle(
+            cycle=make_cycle("cycle_invalid_memory"),
+            belief_state=make_exact_belief_state(),
+            probe_set=make_empty_probe_set("cycle_invalid_memory"),
+            signals=[make_active_signal()],
+        )
+
+    assert ledger.read_all() == []
+
+
 class TrackingRetirementEngine(HypothesisEvolutionEngine):
     def __init__(self) -> None:
         super().__init__()
@@ -2621,6 +2658,161 @@ def test_duplicate_signals_downweight_later_event_independence_and_novelty():
     assert first_event.novelty == 0.8
     assert second_event.independence == 0.25
     assert second_event.novelty == 0.25
+
+
+def _memory_signal(signal_id: str, content: str, *, root: str) -> ExternalSignal:
+    return ExternalSignal(
+        id=signal_id,
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="retrieved_source",
+        source="source.example/audit",
+        raw_content=content,
+        initial_target_hypotheses=["H1", "H2"],
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.RETRIEVED_SOURCE,
+            source_identity="source.example/audit",
+            derivation_root_id=root,
+            correlation_group="source.example/audit",
+            canonical_content_fingerprint="normalize-me",
+        ),
+    )
+
+
+def _native_open_judgment():
+    return {
+        "evidence_type": "supporting",
+        "likelihoods": {
+            "H1": "moderately_confirming",
+            "H2": "moderately_disconfirming",
+        },
+        "unresolved_likelihood": "neutral",
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": None,
+        "interpretation": "The audit favors H1.",
+        "quality_overrides": {},
+    }
+
+
+def test_core_commits_memory_once_and_ledgers_normalized_cross_cycle_duplicate(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger = JsonlLedgerStore(tmp_path / "memory-ledger.jsonl")
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    first_cycle = make_cycle("cycle_memory_1")
+    first = core.integrate_cycle(
+        cycle=first_cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(first_cycle.cycle_id),
+        signals=[_memory_signal("S_memory_1", "The audit supports H1.", root="root-audit")],
+    )
+    first_credit = dict(first.belief_state.evidence_memory.correlation_credit)
+    second_cycle = make_cycle("cycle_memory_2").model_copy(update={"cycle_index": 2})
+
+    second = core.integrate_cycle(
+        cycle=second_cycle,
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(second_cycle.cycle_id),
+        signals=[_memory_signal("S_memory_2", "The audit supports H1.", root="root-audit")],
+    )
+
+    assert len(gateway.requests) == 1
+    assert second.evidence_events[0].discard_reason == "duplicate_exact"
+    assert second.evidence_events[0].effective_update_weight == 0.0
+    assert second.belief_updates == []
+    assert second.frame_mass_updates == []
+    assert second.belief_state.evidence_memory.correlation_credit == first_credit
+    assert second.belief_state.evidence_memory.accepted_evidence_ids == [
+        "run_1_cycle_memory_1_E1"
+    ]
+    assert second.belief_state.evidence_memory.discard_and_schema_history == [
+        "run_1_cycle_memory_2_E1:duplicate_exact"
+    ]
+    signal_records = ledger.read_all("external_signal")
+    assert len(signal_records) == 2
+    assert all(record["payload"]["provenance"] for record in signal_records)
+
+
+def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger = JsonlLedgerStore(tmp_path / "memory-replay-ledger.jsonl")
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    cycle = make_cycle("cycle_memory_replay")
+    first = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[_memory_signal("S_replay_1", "First audit result.", root="root-1")],
+    )
+    prior_memory = first.belief_state.evidence_memory
+
+    replayed = core.integrate_cycle(
+        cycle=cycle.model_copy(update={"cycle_index": 2}),
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[_memory_signal("S_replay_2", "Second audit result.", root="root-2")],
+    )
+
+    assert len(gateway.requests) == 2
+    assert replayed.evidence_events[0].discard_reason == "duplicate evidence event id"
+    assert replayed.belief_state.evidence_memory == prior_memory
+    assert replayed.belief_updates == []
+    assert [
+        record["payload"]["id"] for record in ledger.read_all("evidence_event")
+    ] == ["run_1_cycle_memory_replay_E1"]
+
+
+def test_saturated_correlation_event_is_ledger_visible_without_mass_update(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger = JsonlLedgerStore(tmp_path / "saturated-memory-ledger.jsonl")
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    state = make_exact_belief_state()
+    group = "model:model_gateway:scripted:run_1"
+    state = state.model_copy(
+        update={
+            "evidence_memory": state.evidence_memory.model_copy(
+                update={
+                    "correlation_credit": {
+                        f"{group}|H1|confirming": 1.0,
+                        f"{group}|H2|disconfirming": 1.0,
+                    }
+                }
+            )
+        }
+    )
+    cycle = make_cycle("cycle_saturated")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[
+            ExternalSignal(
+                id="S_saturated",
+                cycle_id="pending",
+                signal_kind=SignalKind.ACTIVE,
+                source_type="model_probe_gateway",
+                source="model_gateway:scripted",
+                raw_content="A fresh model restatement favors H1.",
+                initial_target_hypotheses=["H1", "H2"],
+            )
+        ],
+    )
+
+    event = result.evidence_events[0]
+    assert event.correlation_status == "correlated_novel"
+    assert event.discard_reason == "correlation_credit_saturated"
+    assert event.effective_update_weight == 0.0
+    assert result.belief_updates == []
+    assert result.frame_mass_updates == []
+    assert [
+        record["payload"]["id"] for record in ledger.read_all("evidence_event")
+    ] == [event.id]
 
 
 def test_generated_probe_candidates_are_written_to_ledger_and_belief_refs(tmp_path: Path):

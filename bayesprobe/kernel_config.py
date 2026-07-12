@@ -66,6 +66,16 @@ class FrameAdequacyPolicyConfig:
 
 
 @dataclass(frozen=True)
+class CorrelationCreditPolicy:
+    max_cumulative_effective_weight_per_direction: float = 1.0
+
+    def __post_init__(self) -> None:
+        value = self.max_cumulative_effective_weight_per_direction
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError("correlation credit cap must be finite and positive")
+
+
+@dataclass(frozen=True)
 class ExpansionPolicy:
     max_frame_revisions: int = 3
     max_active_hypotheses: int = 8
@@ -95,6 +105,7 @@ class ProjectionPolicy:
 
 
 __all__ = [
+    "CorrelationCreditPolicy",
     "ExpansionPolicy",
     "FrameAdequacyPolicyConfig",
     "OpenCoveragePolicy",

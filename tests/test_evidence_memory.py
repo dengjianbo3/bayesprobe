@@ -1,0 +1,659 @@
+import pytest
+
+from bayesprobe.evidence import EvidenceIntegrationGate
+from bayesprobe.evidence_memory import (
+    EvidenceMemoryManager,
+    SignalProvenanceNormalizer,
+)
+from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.kernel_config import CorrelationCreditPolicy
+from bayesprobe.schemas import (
+    AnswerChoice,
+    CycleRecord,
+    CycleSignalShape,
+    EpistemicOrigin,
+    EvidenceEvent,
+    EvidenceMemorySnapshot,
+    EvidenceType,
+    ExternalSignal,
+    LikelihoodBand,
+    ProbeSet,
+    SignalKind,
+    SignalProvenance,
+)
+
+
+class CountingGateway:
+    adapter_kind = "counting"
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    def complete_structured(self, request):
+        self.requests.append(request)
+        return {
+            "evidence_type": "supporting",
+            "likelihoods": {
+                "A": "moderately_confirming",
+                "B": "moderately_disconfirming",
+            },
+            "unresolved_likelihood": None,
+            "frame_fit": "explained_by_named",
+            "unexplained_observation": None,
+            "interpretation": "The source favors A over B.",
+            "quality_overrides": {},
+        }
+
+
+def _state():
+    return BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="run_memory",
+            problem="Which option is supported?",
+            answer_choices=[
+                AnswerChoice(label="A", text="Option A"),
+                AnswerChoice(label="B", text="Option B"),
+            ],
+        )
+    ).belief_state
+
+
+def _cycle(index: int) -> CycleRecord:
+    return CycleRecord(
+        cycle_id=f"cycle_{index}",
+        run_id="run_memory",
+        cycle_index=index,
+        signal_shape=CycleSignalShape.ACTIVE_ONLY,
+    )
+
+
+def _probe_set(index: int) -> ProbeSet:
+    return ProbeSet(
+        probe_set_id=f"ps_{index}",
+        cycle_id=f"cycle_{index}",
+        probes=[],
+        selection_reason="Evidence-memory fixture.",
+        may_be_empty=True,
+    )
+
+
+def _signal(
+    signal_id: str,
+    content: str,
+    *,
+    root: str = "root-source-1",
+) -> ExternalSignal:
+    return ExternalSignal(
+        id=signal_id,
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="retrieved_source",
+        source="source.example/report",
+        raw_content=content,
+        initial_target_hypotheses=["A", "B"],
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.RETRIEVED_SOURCE,
+            source_identity="source.example/report",
+            derivation_root_id=root,
+            correlation_group="source.example/report",
+            canonical_content_fingerprint="to-be-normalized",
+            citations=["source.example/report#finding"],
+        ),
+    )
+
+
+def test_normalization_is_deterministic_and_model_session_groups_are_stable():
+    normalizer = SignalProvenanceNormalizer()
+    first = ExternalSignal(
+        id="S_model_1",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="model_probe_gateway",
+        source="model_gateway:scripted",
+        raw_content="Cafe\u0301   result\n supports H1.",
+    )
+    equivalent = first.model_copy(
+        update={"id": "S_model_2", "raw_content": "Caf\u00e9 result supports H1."}
+    )
+    different = first.model_copy(
+        update={"id": "S_model_3", "raw_content": "A different conclusion."}
+    )
+
+    normalized = normalizer.normalize(first, run_id="run_1")
+    normalized_equivalent = normalizer.normalize(equivalent, run_id="run_1")
+    normalized_different = normalizer.normalize(different, run_id="run_1")
+    another_session = normalizer.normalize(different, run_id="run_2")
+
+    assert normalized.provenance.canonical_content_fingerprint == (
+        normalized_equivalent.provenance.canonical_content_fingerprint
+    )
+    assert normalized.provenance.correlation_group == (
+        normalized_different.provenance.correlation_group
+    )
+    assert normalized.provenance.correlation_group != (
+        another_session.provenance.correlation_group
+    )
+    assert normalized.provenance.derivation_root_id != (
+        normalized_different.provenance.derivation_root_id
+    )
+
+
+def test_derived_summary_preserves_supplied_derivation_root():
+    normalizer = SignalProvenanceNormalizer()
+    summary = ExternalSignal(
+        id="S_summary",
+        cycle_id="pending",
+        signal_kind=SignalKind.PASSIVE,
+        source_type="derived_summary",
+        source="summary-worker",
+        raw_content="A compact restatement.",
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.DERIVED_SUMMARY,
+            source_identity="summary-worker",
+            provider_model_or_tool_identity="summary-model",
+            session_id="run_1",
+            parent_signal_ids=["S_parent"],
+            derivation_root_id="root-parent",
+            correlation_group="group-parent",
+            canonical_content_fingerprint="replace-me",
+        ),
+    )
+
+    normalized = normalizer.normalize(summary, run_id="run_1")
+
+    assert normalized.provenance.derivation_root_id == "root-parent"
+    assert normalized.provenance.parent_signal_ids == ["S_parent"]
+
+
+def test_supplied_model_group_cannot_override_stable_provider_session_group():
+    normalizer = SignalProvenanceNormalizer()
+    base = ExternalSignal(
+        id="S_supplied_model_1",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="custom_model_adapter",
+        source="provider/model-a",
+        raw_content="First model conclusion.",
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+            source_identity="provider/model-a",
+            provider_model_or_tool_identity="provider/model-a",
+            session_id="session-1",
+            derivation_root_id="root-model-1",
+            correlation_group="caller-group-1",
+            canonical_content_fingerprint="replace-me",
+        ),
+    )
+    second = base.model_copy(
+        update={
+            "id": "S_supplied_model_2",
+            "raw_content": "Second model conclusion.",
+            "provenance": base.provenance.model_copy(
+                update={
+                    "derivation_root_id": "root-model-2",
+                    "correlation_group": "caller-group-2",
+                }
+            ),
+        }
+    )
+
+    first_normalized = normalizer.normalize(base, run_id="run_memory")
+    second_normalized = normalizer.normalize(second, run_id="run_memory")
+
+    assert first_normalized.provenance.correlation_group == (
+        second_normalized.provenance.correlation_group
+    )
+    assert first_normalized.provenance.correlation_group.startswith("model:")
+
+
+def test_normalization_rejects_secret_material_without_echoing_it():
+    signal = ExternalSignal(
+        id="S_secret",
+        cycle_id="pending",
+        signal_kind=SignalKind.PASSIVE,
+        source_type="human_input",
+        source="human",
+        raw_content="Authorization: Bearer provider-secret-value-123",
+    )
+
+    with pytest.raises(ValueError) as captured:
+        SignalProvenanceNormalizer().normalize(signal, run_id="run_1")
+
+    assert "secret" in str(captured.value).lower()
+    assert "provider-secret-value-123" not in str(captured.value)
+
+
+def test_exact_cross_cycle_repeat_produces_no_update_or_provider_call():
+    gateway = CountingGateway()
+    gate = EvidenceIntegrationGate(
+        model_gateway=gateway,
+        provenance_normalizer=SignalProvenanceNormalizer(),
+        memory_manager=EvidenceMemoryManager(),
+    )
+    state = _state()
+    first = gate.integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[_signal("S_first", "The audited value supports A.")],
+    )
+    state = state.model_copy(update={"evidence_memory": first.evidence_memory})
+
+    repeated = gate.integrate(
+        cycle=_cycle(2),
+        belief_state=state,
+        probe_set=_probe_set(2),
+        signals=[_signal("S_repeat", "The audited value supports A.")],
+    )
+
+    event = repeated.evidence_events[0]
+    assert event.discard_reason == "duplicate_exact"
+    assert event.effective_update_weight == 0.0
+    assert len(gateway.requests) == 1
+
+
+def test_same_root_restatement_has_zero_independence():
+    gateway = CountingGateway()
+    gate = EvidenceIntegrationGate(
+        model_gateway=gateway,
+        provenance_normalizer=SignalProvenanceNormalizer(),
+        memory_manager=EvidenceMemoryManager(),
+    )
+    state = _state()
+    first = gate.integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[_signal("S_first", "The audited value supports A.")],
+    )
+    state = state.model_copy(update={"evidence_memory": first.evidence_memory})
+
+    restated = gate.integrate(
+        cycle=_cycle(2),
+        belief_state=state,
+        probe_set=_probe_set(2),
+        signals=[
+            _signal(
+                "S_restatement",
+                "In other words, the audit points toward option A.",
+            )
+        ],
+    )
+
+    event = restated.evidence_events[0]
+    assert event.correlation_status == "correlated_restatement"
+    assert event.independence == 0.0
+    assert event.effective_update_weight == 0.0
+    assert len(gateway.requests) == 2
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, float("inf"), float("nan"), "1"])
+def test_correlation_credit_policy_rejects_invalid_caps(value):
+    with pytest.raises(ValueError, match="correlation credit cap"):
+        CorrelationCreditPolicy(value)
+
+
+def test_credit_keys_include_direction_subject_and_internal_unresolved_subject():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(max_cumulative_effective_weight_per_direction=1.0)
+    )
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_credit_1", "First independent measurement.", root="root-1"),
+        run_id="run_memory",
+    )
+    decision = manager.classify(
+        EvidenceMemorySnapshot(),
+        signal,
+        likelihoods={
+            "A": LikelihoodBand.MODERATELY_CONFIRMING,
+            "B": LikelihoodBand.MODERATELY_DISCONFIRMING,
+        },
+        unresolved_likelihood=LikelihoodBand.WEAKLY_CONFIRMING,
+        frame_version=3,
+        base_effective_weight=0.6,
+    )
+    group = signal.provenance.correlation_group
+
+    assert decision.remaining_credit == {
+        f"{group}|A|confirming": 0.4,
+        f"{group}|B|disconfirming": 0.4,
+        f"{group}|frame:3:unresolved|confirming": 0.4,
+    }
+    assert "H_other" not in repr(decision.remaining_credit)
+
+
+def test_correlation_credit_saturation_stays_visible_with_zero_weight():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(max_cumulative_effective_weight_per_direction=0.5)
+    )
+    normalizer = SignalProvenanceNormalizer()
+    memory = EvidenceMemorySnapshot()
+
+    for index in (1, 2):
+        signal = normalizer.normalize(
+            _signal(
+                f"S_credit_{index}",
+                f"Independent wording {index}.",
+                root=f"root-{index}",
+            ),
+            run_id="run_memory",
+        )
+        decision = manager.classify(
+            memory,
+            signal,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+            base_effective_weight=0.5,
+        )
+        event = EvidenceEvent(
+            id=f"E_credit_{index}",
+            derived_from_signal=signal.id,
+            epistemic_origin=signal.provenance.epistemic_origin,
+            derivation_root_id=signal.provenance.derivation_root_id,
+            target_hypotheses=["A"],
+            evidence_type=EvidenceType.SUPPORTING,
+            content=signal.raw_content,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+            correlation_status=decision.correlation_status,
+            effective_update_weight=decision.effective_update_weight,
+            discard_reason=decision.discard_reason,
+        )
+        memory = manager.commit(memory, signal=signal, event=event, decision=decision)
+
+    assert decision.correlation_status == "correlated_novel"
+    assert decision.effective_update_weight == 0.0
+    assert decision.discard_reason == "correlation_credit_saturated"
+    assert memory.discard_and_schema_history == [
+        "E_credit_2:correlation_credit_saturated"
+    ]
+
+
+def test_neutral_event_still_correlates_later_model_reasoning_from_same_session():
+    manager = EvidenceMemoryManager()
+    normalizer = SignalProvenanceNormalizer()
+    first = normalizer.normalize(
+        ExternalSignal(
+            id="S_model_neutral_1",
+            cycle_id="pending",
+            signal_kind=SignalKind.ACTIVE,
+            source_type="model_probe_gateway",
+            source="model_gateway:scripted",
+            raw_content="The first model observation is neutral.",
+        ),
+        run_id="run_memory",
+    )
+    first_decision = manager.classify(
+        EvidenceMemorySnapshot(),
+        first,
+        likelihoods={"A": LikelihoodBand.NEUTRAL},
+        base_effective_weight=0.4,
+    )
+    first_event = EvidenceEvent(
+        id="E_model_neutral_1",
+        derived_from_signal=first.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=first.raw_content,
+        likelihoods={"A": LikelihoodBand.NEUTRAL},
+    )
+    memory = manager.commit(
+        EvidenceMemorySnapshot(),
+        signal=first,
+        event=first_event,
+        decision=first_decision,
+    )
+    second = normalizer.normalize(
+        first.model_copy(
+            update={
+                "id": "S_model_neutral_2",
+                "raw_content": "A later, distinct model observation.",
+                "provenance": None,
+            }
+        ),
+        run_id="run_memory",
+    )
+
+    decision = manager.classify(memory, second)
+
+    assert decision.correlation_status == "correlated_novel"
+
+
+def test_same_source_cannot_become_independent_by_changing_declared_group():
+    manager = EvidenceMemoryManager()
+    normalizer = SignalProvenanceNormalizer()
+    first = normalizer.normalize(
+        _signal("S_source_1", "First source observation.", root="root-1"),
+        run_id="run_memory",
+    )
+    first_decision = manager.classify(EvidenceMemorySnapshot(), first)
+    first_event = EvidenceEvent(
+        id="E_source_1",
+        derived_from_signal=first.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=first.raw_content,
+        likelihoods={"A": LikelihoodBand.NEUTRAL},
+    )
+    memory = manager.commit(
+        EvidenceMemorySnapshot(),
+        signal=first,
+        event=first_event,
+        decision=first_decision,
+    )
+    changed_group = _signal(
+        "S_source_2",
+        "Second source observation.",
+        root="root-2",
+    )
+    changed_group = changed_group.model_copy(
+        update={
+            "provenance": changed_group.provenance.model_copy(
+                update={"correlation_group": "declared-as-new"}
+            )
+        }
+    )
+    second = normalizer.normalize(changed_group, run_id="run_memory")
+
+    decision = manager.classify(memory, second)
+
+    assert decision.correlation_status == "correlated_novel"
+
+
+def test_known_derived_parent_cannot_change_derivation_root():
+    manager = EvidenceMemoryManager()
+    normalizer = SignalProvenanceNormalizer()
+    parent = normalizer.normalize(
+        _signal("S_parent", "Parent observation.", root="root-parent"),
+        run_id="run_memory",
+    )
+    parent_decision = manager.classify(EvidenceMemorySnapshot(), parent)
+    parent_event = EvidenceEvent(
+        id="E_parent",
+        derived_from_signal=parent.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=parent.raw_content,
+        likelihoods={"A": LikelihoodBand.NEUTRAL},
+    )
+    memory = manager.commit(
+        EvidenceMemorySnapshot(),
+        signal=parent,
+        event=parent_event,
+        decision=parent_decision,
+    )
+    derived = ExternalSignal(
+        id="S_bad_summary",
+        cycle_id="pending",
+        signal_kind=SignalKind.PASSIVE,
+        source_type="derived_summary",
+        source="summary-worker",
+        raw_content="A derived restatement.",
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.DERIVED_SUMMARY,
+            source_identity="summary-worker",
+            parent_signal_ids=["S_parent"],
+            derivation_root_id="root-changed",
+            correlation_group="summary-group",
+            canonical_content_fingerprint="replace-me",
+        ),
+    )
+    derived = normalizer.normalize(derived, run_id="run_memory")
+
+    with pytest.raises(ValueError, match="preserve parent derivation root"):
+        manager.classify(memory, derived)
+
+
+def test_prejudgment_classification_reports_existing_group_credit():
+    manager = EvidenceMemoryManager()
+    normalizer = SignalProvenanceNormalizer()
+    first = normalizer.normalize(
+        _signal("S_precredit_1", "First credited observation.", root="root-1"),
+        run_id="run_memory",
+    )
+    first_decision = manager.classify(
+        EvidenceMemorySnapshot(),
+        first,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+        base_effective_weight=0.4,
+    )
+    first_event = EvidenceEvent(
+        id="E_precredit_1",
+        derived_from_signal=first.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=first.raw_content,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+    )
+    memory = manager.commit(
+        EvidenceMemorySnapshot(),
+        signal=first,
+        event=first_event,
+        decision=first_decision,
+    )
+    second = normalizer.normalize(
+        _signal("S_precredit_2", "Second credited observation.", root="root-2"),
+        run_id="run_memory",
+    )
+
+    decision = manager.classify(memory, second)
+
+    assert decision.remaining_credit == {
+        f"{second.provenance.correlation_group}|A|confirming": 0.6
+    }
+
+
+def test_epistemic_origin_caps_quality_even_when_source_type_looks_external():
+    gateway = CountingGateway()
+    signal = ExternalSignal(
+        id="S_spoofed_model",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="benchmark_stream",
+        source="provider/model-a",
+        raw_content="A model-generated conclusion favors A.",
+        initial_target_hypotheses=["A", "B"],
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+            source_identity="provider/model-a",
+            provider_model_or_tool_identity="provider/model-a",
+            session_id="session-1",
+            derivation_root_id="root-spoofed",
+            correlation_group="caller-group",
+            canonical_content_fingerprint="replace-me",
+        ),
+    )
+
+    result = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=_cycle(1),
+        belief_state=_state(),
+        probe_set=_probe_set(1),
+        signals=[signal],
+    )
+
+    event = result.evidence_events[0]
+    assert event.reliability == 0.55
+    assert event.independence == 0.35
+    assert event.novelty == 0.55
+    assert event.verifiability == 0.3
+
+
+def test_native_judgment_request_contains_full_semantics_provenance_and_memory():
+    gateway = CountingGateway()
+    gate = EvidenceIntegrationGate(model_gateway=gateway)
+
+    result = gate.integrate(
+        cycle=_cycle(1),
+        belief_state=_state(),
+        probe_set=_probe_set(1),
+        signals=[_signal("S_context", "The audited value supports A.")],
+    )
+
+    request = gateway.requests[0]
+    hypothesis = request.input["hypotheses"][0]
+    assert request.prompt_version == "v0.2"
+    assert request.schema_version == "v0.2"
+    assert hypothesis.keys() >= {
+        "id",
+        "statement",
+        "type",
+        "scope",
+        "posterior",
+        "predictions",
+        "falsifiers",
+        "rivals",
+    }
+    assert request.input["frame"] == {
+        "competition": "exclusive",
+        "coverage": "exhaustive",
+        "frame_version": 1,
+    }
+    assert request.input["provenance"]["derivation_root_id"] == "root-source-1"
+    assert request.input["memory"]["correlation_status"] == "novel"
+    assert request.input["probes"] == []
+    assert result.evidence_events[0].schema_version == "v0.2"
+    assert result.evidence_events[0].frame_fit.value == "explained_by_named"
+
+
+def test_v02_evidence_event_requires_native_provenance_and_memory_fields():
+    with pytest.raises(ValueError, match="v0.2 evidence event requires"):
+        EvidenceEvent(
+            schema_version="v0.2",
+            id="E_invalid_native",
+            derived_from_signal="S_invalid_native",
+            target_hypotheses=["A"],
+            evidence_type=EvidenceType.NEUTRAL,
+            content="Missing native identity fields.",
+            likelihoods={"A": LikelihoodBand.NEUTRAL},
+        )
+
+
+def test_v02_evidence_event_rejects_incoherent_frame_fit():
+    with pytest.raises(ValueError, match="supports_unresolved"):
+        EvidenceEvent(
+            schema_version="v0.2",
+            id="E_bad_frame_fit",
+            derived_from_signal="S_bad_frame_fit",
+            epistemic_origin=EpistemicOrigin.TOOL_RESULT,
+            derivation_root_id="root-bad",
+            target_hypotheses=["A"],
+            evidence_type=EvidenceType.ANOMALY,
+            content="Named candidates miss this result.",
+            likelihoods={"A": LikelihoodBand.MODERATELY_DISCONFIRMING},
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            frame_fit="supports_unresolved",
+            correlation_status="novel",
+            effective_update_weight=0.4,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"content_fingerprints": {"S1": "sk-provider-secret-123"}},
+        {"source_content_fingerprints": {"api_key": "sha256:abc"}},
+        {"correlation_credit": {"group|H_other|confirming": 0.2}},
+        {"correlation_credit": {"group|A|confirming": float("nan")}},
+    ],
+)
+def test_evidence_memory_snapshot_rejects_secret_or_invalid_native_data(payload):
+    with pytest.raises(ValueError):
+        EvidenceMemorySnapshot(**payload)

@@ -13,6 +13,7 @@ from bayesprobe.model_gateway import (
 from bayesprobe.schemas import (
     BeliefState,
     ExternalSignal,
+    FramingMethod,
     ProbeDesign,
     ProbeSet,
     SignalKind,
@@ -80,6 +81,14 @@ class ModelBackedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
     ) -> list[ExternalSignal]:
+        native_v02 = (
+            context.belief_state.schema_version == "v0.2"
+            and context.belief_state.task_frame is not None
+            and context.belief_state.task_frame.framing_method
+            != FramingMethod.LEGACY_MIGRATION
+            and context.belief_state.task_frame.framing_trace.get("source")
+            != "hypothesis_seeds"
+        )
         request = StructuredModelRequest(
             task="execute_probe",
             input={
@@ -106,9 +115,9 @@ class ModelBackedProbeToolGateway:
                 ],
             },
             prompt_id="probe_execution",
-            prompt_version="v0.1",
+            prompt_version="v0.2" if native_v02 else "v0.1",
             schema_name="ProbeSignal",
-            schema_version="v0.1",
+            schema_version="v0.2" if native_v02 else "v0.1",
             metadata={
                 "run_id": context.run_id,
                 "cycle_id": context.cycle_id,

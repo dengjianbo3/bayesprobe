@@ -85,6 +85,9 @@
       "response": {
         "evidence_type": "supporting",
         "likelihoods": {"H1": "weakly_confirming"},
+        "unresolved_likelihood": null,
+        "frame_fit": "underdetermined",
+        "unexplained_observation": null,
         "interpretation": "该信号提出设计方向，但不是外部实验结果。",
         "quality_overrides": {"independence": 0.2, "verifiability": 0.2}
       }

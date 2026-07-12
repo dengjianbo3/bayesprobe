@@ -741,6 +741,10 @@ class CoverageAwareBeliefSolver:
 
 
 def _effective_update_weight(event: EvidenceEvent) -> float:
+    if event.schema_version == "v0.2":
+        if event.effective_update_weight is None:
+            raise ValueError("v0.2 evidence requires effective_update_weight")
+        return event.effective_update_weight
     if event.effective_update_weight is not None:
         return event.effective_update_weight
     return event.reliability * event.independence * event.relevance * event.novelty

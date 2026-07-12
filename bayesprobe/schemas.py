@@ -329,6 +329,21 @@ def redact_secret_material(value: Any) -> Any:
     return "[UNSUPPORTED]"
 
 
+def _contains_secret_material(value: Any) -> bool:
+    if isinstance(value, BaseModel):
+        return _contains_secret_material(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        return any(
+            is_forbidden_secret_key_name(str(key))
+            or is_secret_like_value(str(key))
+            or _contains_secret_material(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple):
+        return any(_contains_secret_material(item) for item in value)
+    return isinstance(value, str) and is_secret_like_value(value)
+
+
 def _reject_secret_string(value: str) -> None:
     if is_secret_like_value(value):
         raise ValueError("TaskFrame must not contain secret values")
@@ -551,6 +566,51 @@ class EvidenceMemorySnapshot(StrictTaskModel):
             for hypothesis_id, evidence_ids in value.items()
         }
 
+    @field_validator(
+        "content_fingerprints",
+        "source_content_fingerprints",
+        "derivation_roots",
+    )
+    @classmethod
+    def validate_identity_maps(
+        cls,
+        value: dict[str, str],
+        info: ValidationInfo,
+    ) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for key, item in value.items():
+            clean_key = _required_text(key, f"{info.field_name} key")
+            clean_value = _required_text(item, info.field_name)
+            if _contains_secret_material({clean_key: clean_value}):
+                raise ValueError("evidence memory must not contain secret material")
+            result[clean_key] = clean_value
+        return result
+
+    @field_validator("correlation_credit")
+    @classmethod
+    def validate_correlation_credit(cls, value: dict[str, float]) -> dict[str, float]:
+        result: dict[str, float] = {}
+        for key, credit in value.items():
+            clean_key = _required_text(key, "correlation credit key")
+            if "|h_other|" in clean_key.casefold():
+                raise ValueError("correlation credit must not use an H_other subject")
+            if _contains_secret_material(clean_key):
+                raise ValueError("evidence memory must not contain secret material")
+            if (
+                type(credit) not in (int, float)
+                or not math.isfinite(credit)
+                or credit < 0
+            ):
+                raise ValueError("correlation credit must be finite and non-negative")
+            result[clean_key] = float(credit)
+        return result
+
+    @model_validator(mode="after")
+    def reject_secret_material(self) -> "EvidenceMemorySnapshot":
+        if _contains_secret_material(self.model_dump(mode="python")):
+            raise ValueError("evidence memory must not contain secret material")
+        return self
+
 
 class SignalProvenance(StrictTaskModel):
     epistemic_origin: EpistemicOrigin
@@ -579,6 +639,12 @@ class SignalProvenance(StrictTaskModel):
     @classmethod
     def clean_identity_lists(cls, value: list[str], info: ValidationInfo) -> list[str]:
         return _unique_optional_semantic_texts(value, info.field_name)
+
+    @model_validator(mode="after")
+    def reject_secret_material(self) -> "SignalProvenance":
+        if _contains_secret_material(self.model_dump(mode="python")):
+            raise ValueError("signal provenance must not contain secret material")
+        return self
 
 
 class FrameMassUpdate(StrictTaskModel):
@@ -1085,6 +1151,7 @@ class ExternalSignal(BaseModel):
 
 
 class EvidenceEvent(BaseModel):
+    schema_version: Literal["v0.1", "v0.2"] = "v0.1"
     id: str
     derived_from_signal: str
     epistemic_origin: EpistemicOrigin | None = None
@@ -1126,9 +1193,61 @@ class EvidenceEvent(BaseModel):
     def score_between_zero_and_one(cls, value: float | None) -> float | None:
         if value is None:
             return None
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("quality score must be finite")
         if value < 0 or value > 1:
             raise ValueError("quality score must be between 0 and 1")
         return value
+
+    @model_validator(mode="after")
+    def validate_native_evidence_contract(self) -> "EvidenceEvent":
+        if _contains_secret_material(self.model_dump(mode="python")):
+            raise ValueError("evidence event must not contain secret material")
+        if self.schema_version != "v0.2":
+            return self
+        if (
+            self.epistemic_origin is None
+            or self.derivation_root_id is None
+            or self.correlation_status
+            not in {
+                "novel",
+                "duplicate_exact",
+                "correlated_restatement",
+                "correlated_novel",
+            }
+            or self.effective_update_weight is None
+        ):
+            raise ValueError(
+                "v0.2 evidence event requires provenance, correlation, and weight"
+            )
+        confirming = {
+            LikelihoodBand.WEAKLY_CONFIRMING,
+            LikelihoodBand.MODERATELY_CONFIRMING,
+            LikelihoodBand.STRONGLY_CONFIRMING,
+        }
+        if (
+            self.frame_fit == FrameFit.SUPPORTS_UNRESOLVED
+            and self.unresolved_likelihood not in confirming
+        ):
+            raise ValueError(
+                "supports_unresolved requires a confirming unresolved likelihood"
+            )
+        if (
+            self.frame_fit == FrameFit.EXPLAINED_BY_NAMED
+            and self.unresolved_likelihood in confirming
+        ):
+            raise ValueError(
+                "explained_by_named cannot confirm unresolved likelihood"
+            )
+        if (
+            self.frame_fit == FrameFit.UNDERDETERMINED
+            and self.unresolved_likelihood
+            not in {None, LikelihoodBand.NEUTRAL}
+        ):
+            raise ValueError(
+                "underdetermined requires neutral or null unresolved likelihood"
+            )
+        return self
 
 
 class BeliefUpdate(BaseModel):

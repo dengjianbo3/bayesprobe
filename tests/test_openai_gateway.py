@@ -13,6 +13,7 @@ from bayesprobe.model_gateway import (
 )
 from bayesprobe.openai_gateway import (
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
+    EVIDENCE_JUDGMENT_V01_JSON_SCHEMA,
     OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA,
     PROBE_SIGNAL_JSON_SCHEMA,
     TASK_ADMISSION_DECISION_JSON_SCHEMA,
@@ -61,6 +62,22 @@ def make_judge_request() -> StructuredModelRequest:
         prompt_version="v0.1",
         schema_name="EvidenceJudgment",
         schema_version="v0.1",
+        metadata={"run_id": "run_1"},
+    )
+
+
+def make_native_judge_request(
+    *,
+    task: str = "judge_evidence",
+) -> StructuredModelRequest:
+    request = make_judge_request()
+    return StructuredModelRequest(
+        task=task,
+        input=request.input,
+        prompt_id="evidence_judgment",
+        prompt_version="v0.2",
+        schema_name="EvidenceJudgment",
+        schema_version="v0.2",
         metadata={"run_id": "run_1"},
     )
 
@@ -386,7 +403,7 @@ def test_build_openai_request_payload_for_judge_evidence():
     assert payload["text"]["format"]["type"] == "json_schema"
     assert payload["text"]["format"]["name"] == "EvidenceJudgment"
     assert payload["text"]["format"]["strict"] is True
-    assert payload["text"]["format"]["schema"] == EVIDENCE_JUDGMENT_JSON_SCHEMA
+    assert payload["text"]["format"]["schema"] == EVIDENCE_JUDGMENT_V01_JSON_SCHEMA
     assert payload["input"][0]["role"] == "developer"
     assert "BayesProbe" in payload["input"][0]["content"]
     assert payload["input"][1]["role"] == "user"
@@ -465,13 +482,60 @@ def test_build_openai_chat_completions_payload_uses_common_json_object_shape():
     assert payload["messages"][1]["role"] == "user"
     user_payload = json.loads(payload["messages"][1]["content"])
     assert user_payload["task"] == "judge_evidence"
-    assert user_payload["required_output"]["json_schema"] == EVIDENCE_JUDGMENT_JSON_SCHEMA
+    assert user_payload["required_output"]["json_schema"] == EVIDENCE_JUDGMENT_V01_JSON_SCHEMA
     assert user_payload["required_output"]["required_keys"] == [
         "evidence_type",
         "likelihoods",
         "interpretation",
         "quality_overrides",
     ]
+
+
+def test_v02_judgment_schema_aligns_responses_and_chat_transports():
+    responses_payload = build_openai_request_payload(
+        make_native_judge_request(),
+        model="gpt-5.5",
+    )
+    chat_payload = build_openai_chat_completions_payload(
+        make_native_judge_request(),
+        model="provider-model",
+    )
+    expected_keys = [
+        "evidence_type",
+        "likelihoods",
+        "unresolved_likelihood",
+        "frame_fit",
+        "unexplained_observation",
+        "interpretation",
+        "quality_overrides",
+    ]
+
+    assert EVIDENCE_JUDGMENT_JSON_SCHEMA["required"] == expected_keys
+    assert responses_payload["text"]["format"]["schema"] == (
+        EVIDENCE_JUDGMENT_JSON_SCHEMA
+    )
+    required_output = json.loads(chat_payload["messages"][1]["content"])[
+        "required_output"
+    ]
+    assert required_output["required_keys"] == expected_keys
+    assert required_output["json_schema"] == EVIDENCE_JUDGMENT_JSON_SCHEMA
+
+
+def test_v02_repair_request_uses_v02_judgment_schema():
+    request = make_native_judge_request(task="repair_evidence_judgment")
+
+    responses_payload = build_openai_request_payload(request, model="gpt-5.5")
+    chat_payload = build_openai_chat_completions_payload(
+        request,
+        model="provider-model",
+    )
+
+    assert responses_payload["text"]["format"]["schema"] == (
+        EVIDENCE_JUDGMENT_JSON_SCHEMA
+    )
+    assert json.loads(chat_payload["messages"][1]["content"])[
+        "required_output"
+    ]["json_schema"] == EVIDENCE_JUDGMENT_JSON_SCHEMA
 
 
 def test_build_openai_chat_completions_payload_includes_explicit_request_controls():

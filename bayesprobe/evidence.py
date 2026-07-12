@@ -5,6 +5,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from bayesprobe.evidence_memory import (
+    EvidenceMemoryDecision,
+    EvidenceMemoryManager,
+    SignalProvenanceNormalizer,
+)
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     EvidenceJudgment,
@@ -19,14 +24,21 @@ from bayesprobe.model_gateway import (
 from bayesprobe.schemas import (
     BeliefState,
     CycleRecord,
+    EpistemicOrigin,
     EvidenceEvent,
+    EvidenceMemorySnapshot,
     EvidenceType,
     ExternalSignal,
+    FrameFit,
+    FramingMethod,
     Hypothesis,
     LikelihoodBand,
+    HypothesisCompetition,
+    HypothesisCoverage,
     ProbeCandidate,
     ProbeDesign,
     ProbeSet,
+    redact_secret_material,
 )
 
 
@@ -34,6 +46,8 @@ from bayesprobe.schemas import (
 class EvidenceIntegrationResult:
     evidence_events: list[EvidenceEvent]
     probe_candidates: list[ProbeCandidate]
+    evidence_memory: EvidenceMemorySnapshot | None = None
+    normalized_signals: list[ExternalSignal] | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +146,57 @@ class SignalQualityAssessor:
                 verifiability=quality.verifiability,
             )
 
+        if (
+            signal.provenance is not None
+            and event_type != EvidenceType.SOURCE_CLAIM
+        ):
+            quality = _cap_quality_for_origin(
+                quality,
+                signal.provenance.epistemic_origin,
+            )
+
         return quality
+
+
+def _cap_quality_for_origin(
+    quality: SignalQuality,
+    origin: EpistemicOrigin,
+) -> SignalQuality:
+    if origin in {EpistemicOrigin.MODEL_REASONING, EpistemicOrigin.DERIVED_SUMMARY}:
+        cap = SignalQuality(
+            reliability=0.55,
+            independence=0.35,
+            relevance=0.85,
+            novelty=0.55,
+            specificity=0.65,
+            verifiability=0.3,
+        )
+    elif origin == EpistemicOrigin.TOOL_RESULT:
+        cap = SignalQuality(
+            reliability=0.8,
+            independence=0.8,
+            relevance=0.9,
+            novelty=0.8,
+            specificity=0.9,
+            verifiability=0.9,
+        )
+    elif origin == EpistemicOrigin.AGENT_MESSAGE:
+        cap = SignalQuality(
+            reliability=0.55,
+            independence=0.45,
+            relevance=0.75,
+            novelty=0.6,
+            specificity=0.6,
+            verifiability=0.4,
+        )
+    else:
+        return quality
+    return SignalQuality(
+        **{
+            metric: min(getattr(quality, metric), getattr(cap, metric))
+            for metric in _QUALITY_METRICS
+        }
+    )
 
 
 class ProjectionDecomposer:
@@ -161,11 +225,15 @@ class EvidenceIntegrationGate:
         projection_decomposer: ProjectionDecomposer | None = None,
         model_gateway: ModelGateway | None = None,
         judgment_repair_policy: EvidenceJudgmentRepairPolicy | None = None,
+        provenance_normalizer: SignalProvenanceNormalizer | None = None,
+        memory_manager: EvidenceMemoryManager | None = None,
     ) -> None:
         self._quality_assessor = quality_assessor or SignalQualityAssessor()
         self._projection_decomposer = projection_decomposer or ProjectionDecomposer()
         self._model_gateway = model_gateway or DeterministicModelGateway()
         self._judgment_repair_policy = judgment_repair_policy or EvidenceJudgmentRepairPolicy()
+        self._provenance_normalizer = provenance_normalizer or SignalProvenanceNormalizer()
+        self._memory_manager = memory_manager or EvidenceMemoryManager()
 
     def integrate(
         self,
@@ -178,24 +246,76 @@ class EvidenceIntegrationGate:
         self._ensure_helpers()
         evidence_events: list[EvidenceEvent] = []
         probe_candidates: list[ProbeCandidate] = []
+        closed_signals: list[ExternalSignal] = []
         seen_signatures: set[tuple[str, str]] = set()
+        working_memory = belief_state.evidence_memory or EvidenceMemorySnapshot()
 
-        for index, signal in enumerate(signals, start=1):
-            is_duplicate = _is_duplicate_signal(signal=signal, seen_signatures=seen_signatures)
-            event_result = self._build_signal_events(
-                index=index,
-                signal=signal,
-                belief_state=belief_state,
-                probe_set=probe_set,
-                cycle=cycle,
-                is_duplicate=is_duplicate,
+        for index, raw_signal in enumerate(signals, start=1):
+            signal = self._provenance_normalizer.normalize(
+                raw_signal,
+                run_id=cycle.run_id,
             )
-            evidence_events.extend(event_result.evidence_events)
+            closed_signals.append(signal)
+            prior_decision = self._memory_manager.classify(
+                working_memory,
+                signal,
+                frame_version=(
+                    belief_state.frame_state.frame_version
+                    if belief_state.frame_state is not None
+                    else 1
+                ),
+            )
+            if prior_decision.correlation_status == "duplicate_exact":
+                event_result = EvidenceIntegrationResult(
+                    evidence_events=[
+                        self._duplicate_exact_event(
+                            index=index,
+                            signal=signal,
+                            belief_state=belief_state,
+                            probe_set=probe_set,
+                            cycle=cycle,
+                        )
+                    ],
+                    probe_candidates=[],
+                )
+            else:
+                is_duplicate = _is_duplicate_signal(
+                    signal=signal,
+                    seen_signatures=seen_signatures,
+                )
+                event_result = self._build_signal_events(
+                    index=index,
+                    signal=signal,
+                    belief_state=belief_state,
+                    probe_set=probe_set,
+                    cycle=cycle,
+                    is_duplicate=is_duplicate,
+                    prior_memory_decision=prior_decision,
+                )
+            memory_events: list[EvidenceEvent] = []
+            classification_snapshot = working_memory
+            for event in event_result.evidence_events:
+                event, decision = self._apply_memory_decision(
+                    event=event,
+                    signal=signal,
+                    belief_state=belief_state,
+                    snapshot=classification_snapshot,
+                )
+                working_memory = self._memory_manager.commit(
+                    working_memory,
+                    signal=signal,
+                    event=event,
+                    decision=decision,
+                )
+                memory_events.append(event)
+            evidence_events.extend(memory_events)
             probe_candidates.extend(event_result.probe_candidates)
 
         return EvidenceIntegrationResult(
             evidence_events=evidence_events,
             probe_candidates=probe_candidates,
+            evidence_memory=working_memory,
+            normalized_signals=closed_signals,
         )
 
     def _ensure_helpers(self) -> None:
@@ -207,6 +327,95 @@ class EvidenceIntegrationGate:
             self._model_gateway = DeterministicModelGateway()
         if not hasattr(self, "_judgment_repair_policy"):
             self._judgment_repair_policy = EvidenceJudgmentRepairPolicy()
+        if not hasattr(self, "_provenance_normalizer"):
+            self._provenance_normalizer = SignalProvenanceNormalizer()
+        if not hasattr(self, "_memory_manager"):
+            self._memory_manager = EvidenceMemoryManager()
+
+    def _duplicate_exact_event(
+        self,
+        *,
+        index: int,
+        signal: ExternalSignal,
+        belief_state: BeliefState,
+        probe_set: ProbeSet,
+        cycle: CycleRecord,
+    ) -> EvidenceEvent:
+        hypothesis_ids = self._resolve_target_hypotheses(
+            signal=signal,
+            belief_state=belief_state,
+            probe_set=probe_set,
+        )
+        unresolved_likelihood = None
+        frame_state = belief_state.frame_state
+        if frame_state is not None and (
+            frame_state.competition == HypothesisCompetition.EXCLUSIVE
+            and frame_state.coverage == HypothesisCoverage.OPEN
+        ):
+            unresolved_likelihood = LikelihoodBand.NEUTRAL
+        return self._event(
+            event_id=f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}",
+            signal=signal,
+            hypothesis_ids=hypothesis_ids,
+            evidence_type=EvidenceType.NEUTRAL,
+            likelihoods={
+                hypothesis_id: LikelihoodBand.NEUTRAL
+                for hypothesis_id in hypothesis_ids
+            },
+            unresolved_likelihood=unresolved_likelihood,
+            interpretation="Exact evidence identity already exists in memory.",
+            is_duplicate=True,
+            discard_reason="duplicate_exact",
+        )
+
+    def _apply_memory_decision(
+        self,
+        *,
+        event: EvidenceEvent,
+        signal: ExternalSignal,
+        belief_state: BeliefState,
+        snapshot: EvidenceMemorySnapshot,
+    ) -> tuple[EvidenceEvent, EvidenceMemoryDecision]:
+        decision = self._memory_manager.classify(
+            snapshot,
+            signal,
+            likelihoods=event.likelihoods,
+            unresolved_likelihood=event.unresolved_likelihood,
+            frame_version=(
+                belief_state.frame_state.frame_version
+                if belief_state.frame_state is not None
+                else 1
+            ),
+            base_effective_weight=(
+                event.reliability
+                * event.independence
+                * event.relevance
+                * event.novelty
+            ),
+        )
+        independence = event.independence
+        novelty = event.novelty
+        if decision.correlation_status == "correlated_restatement":
+            independence = 0.0
+            novelty = min(novelty, 0.25)
+        provenance = signal.provenance
+        discard_reason = event.discard_reason or decision.discard_reason
+        payload = event.model_dump(mode="python")
+        payload.update(
+            {
+                "schema_version": (
+                    "v0.2" if _is_native_v02_state(belief_state) else "v0.1"
+                ),
+                "epistemic_origin": provenance.epistemic_origin,
+                "derivation_root_id": provenance.derivation_root_id,
+                "correlation_status": decision.correlation_status,
+                "effective_update_weight": decision.effective_update_weight,
+                "independence": independence,
+                "novelty": novelty,
+                "discard_reason": discard_reason,
+            }
+        )
+        return EvidenceEvent.model_validate(payload), decision
 
     def _model_trace_for_request(self, request: StructuredModelRequest) -> ModelInvocationTrace:
         return ModelInvocationTrace.from_request(
@@ -223,6 +432,7 @@ class EvidenceIntegrationGate:
         probe_set: ProbeSet,
         cycle: CycleRecord,
         is_duplicate: bool,
+        prior_memory_decision: EvidenceMemoryDecision,
     ) -> EvidenceIntegrationResult:
         if signal.source_type == "external_agent_projection":
             sender_event = self._build_projection_sender_event(
@@ -260,6 +470,7 @@ class EvidenceIntegrationGate:
                     probe_set=probe_set,
                     cycle=cycle,
                     is_duplicate=is_duplicate,
+                    prior_memory_decision=prior_memory_decision,
                 )
             ],
             probe_candidates=[],
@@ -274,6 +485,7 @@ class EvidenceIntegrationGate:
         probe_set: ProbeSet,
         cycle: CycleRecord,
         is_duplicate: bool,
+        prior_memory_decision: EvidenceMemoryDecision,
     ) -> EvidenceEvent:
         hypothesis_ids = self._resolve_target_hypotheses(
             signal=signal,
@@ -285,6 +497,8 @@ class EvidenceIntegrationGate:
             hypothesis_ids=hypothesis_ids,
             cycle=cycle,
             probe_set=probe_set,
+            belief_state=belief_state,
+            memory_decision=prior_memory_decision,
         )
         try:
             judgment, model_trace = self._evidence_judgment_with_repair(request=request)
@@ -305,6 +519,9 @@ class EvidenceIntegrationGate:
             hypothesis_ids=hypothesis_ids,
             evidence_type=judgment.evidence_type,
             likelihoods=judgment.likelihoods,
+            unresolved_likelihood=judgment.unresolved_likelihood,
+            frame_fit=judgment.frame_fit,
+            unexplained_observation=judgment.unexplained_observation,
             interpretation=judgment.interpretation,
             is_duplicate=is_duplicate,
             quality_overrides=judgment.quality_overrides,
@@ -318,22 +535,106 @@ class EvidenceIntegrationGate:
         hypothesis_ids: list[str],
         cycle: CycleRecord,
         probe_set: ProbeSet,
+        belief_state: BeliefState,
+        memory_decision: EvidenceMemoryDecision,
     ) -> StructuredModelRequest:
+        native_v02 = _is_native_v02_state(belief_state)
+        if native_v02:
+            hypotheses_by_id = belief_state.hypotheses_by_id()
+            hypotheses = [
+                {
+                    "id": hypotheses_by_id[hypothesis_id].id,
+                    "statement": hypotheses_by_id[hypothesis_id].statement,
+                    "type": hypotheses_by_id[hypothesis_id].type,
+                    "scope": hypotheses_by_id[hypothesis_id].scope,
+                    "posterior": hypotheses_by_id[hypothesis_id].posterior,
+                    "predictions": list(
+                        hypotheses_by_id[hypothesis_id].predictions
+                    ),
+                    "falsifiers": list(
+                        hypotheses_by_id[hypothesis_id].falsifiers
+                    ),
+                    "rivals": list(hypotheses_by_id[hypothesis_id].rivals),
+                }
+                for hypothesis_id in hypothesis_ids
+            ]
+            frame = {
+                "competition": belief_state.frame_state.competition.value,
+                "coverage": belief_state.frame_state.coverage.value,
+                "frame_version": belief_state.frame_state.frame_version,
+            }
+            probes = [
+                {
+                    "id": probe.id,
+                    "purpose": probe.probe_type,
+                    "target_hypotheses": list(probe.target_hypotheses),
+                    "inquiry_goal": probe.inquiry_goal,
+                    "support_condition": dict(probe.support_condition),
+                    "weaken_condition": dict(probe.weaken_condition),
+                    "reframe_condition": (
+                        None
+                        if probe.reframe_condition is None
+                        else dict(probe.reframe_condition)
+                    ),
+                }
+                for probe in probe_set.probes
+            ]
+            provenance = signal.provenance.model_dump(mode="json")
+            memory = {
+                "correlation_status": memory_decision.correlation_status,
+                "remaining_credit": dict(memory_decision.remaining_credit),
+                "accepted_evidence_count": len(
+                    belief_state.evidence_memory.accepted_evidence_ids
+                ),
+            }
+        else:
+            hypotheses = []
+            frame = None
+            probes = []
+            provenance = None
+            memory = None
+        request_input = {
+            "signal_id": signal.id,
+            "source_type": signal.source_type,
+            "source": signal.source,
+            "raw_content": signal.raw_content,
+            "target_hypotheses": hypothesis_ids,
+            "cycle_id": cycle.cycle_id,
+            "probe_ids": [probe.id for probe in probe_set.probes],
+        }
+        if native_v02:
+            request_input.update(
+                {
+                    "hypotheses": hypotheses,
+                    "frame": frame,
+                    "probes": probes,
+                    "provenance": provenance,
+                    "memory": memory,
+                    "allowed_evidence_types": [
+                        evidence_type.value for evidence_type in EvidenceType
+                    ],
+                    "allowed_likelihood_bands": [
+                        band.value for band in LikelihoodBand
+                    ],
+                    "allowed_frame_fits": [frame_fit.value for frame_fit in FrameFit],
+                }
+            )
         return StructuredModelRequest(
             task="judge_evidence",
-            input={
-                "signal_id": signal.id,
-                "source_type": signal.source_type,
-                "source": signal.source,
-                "raw_content": signal.raw_content,
-                "target_hypotheses": hypothesis_ids,
-                "cycle_id": cycle.cycle_id,
-                "probe_ids": [probe.id for probe in probe_set.probes],
-            },
+            input=request_input,
             prompt_id="evidence_judgment",
-            prompt_version="v0.1",
+            prompt_version="v0.2" if native_v02 else "v0.1",
             schema_name="EvidenceJudgment",
-            schema_version="v0.1",
+            schema_version="v0.2" if native_v02 else "v0.1",
+            metadata=(
+                {
+                    "run_id": cycle.run_id,
+                    "cycle_id": cycle.cycle_id,
+                    "signal_id": signal.id,
+                }
+                if native_v02
+                else {}
+            ),
         )
 
     def _evidence_judgment_with_repair(
@@ -385,16 +686,27 @@ class EvidenceIntegrationGate:
                     "attempt_index": attempt_index,
                     "allowed_evidence_types": [evidence_type.value for evidence_type in EvidenceType],
                     "allowed_likelihood_bands": [band.value for band in LikelihoodBand],
-                    "required_fields": [
-                        "evidence_type",
-                        "likelihoods",
-                        "interpretation",
+                    "required_fields": (
+                        [
+                            "evidence_type",
+                            "likelihoods",
+                            "unresolved_likelihood",
+                            "frame_fit",
+                            "unexplained_observation",
+                            "interpretation",
+                            "quality_overrides",
+                        ]
+                        if original_request.schema_version == "v0.2"
+                        else ["evidence_type", "likelihoods", "interpretation"]
+                    ),
+                    "allowed_frame_fits": [
+                        frame_fit.value for frame_fit in FrameFit
                     ],
                 },
                 prompt_id="evidence_judgment_repair",
-                prompt_version="v0.1",
+                prompt_version=original_request.prompt_version,
                 schema_name="EvidenceJudgment",
-                schema_version="v0.1",
+                schema_version=original_request.schema_version,
                 metadata={"repair_attempt_index": attempt_index},
             )
             repair_trace = self._model_trace_for_request(repair_request)
@@ -425,7 +737,20 @@ class EvidenceIntegrationGate:
         payload: dict[str, Any],
         original_request: StructuredModelRequest,
     ) -> EvidenceJudgment:
-        judgment = evidence_judgment_from_mapping(payload)
+        frame = original_request.input.get("frame")
+        if original_request.schema_version == "v0.2":
+            payload = _migrate_v01_judgment_payload(
+                payload,
+                competition=HypothesisCompetition(frame["competition"]),
+                coverage=HypothesisCoverage(frame["coverage"]),
+            )
+            judgment = evidence_judgment_from_mapping(
+                payload,
+                competition=HypothesisCompetition(frame["competition"]),
+                coverage=HypothesisCoverage(frame["coverage"]),
+            )
+        else:
+            judgment = evidence_judgment_from_mapping(payload)
         expected_targets = {
             str(hypothesis_id)
             for hypothesis_id in original_request.input.get(
@@ -528,6 +853,9 @@ class EvidenceIntegrationGate:
         hypothesis_ids: list[str],
         evidence_type: EvidenceType,
         likelihoods: dict[str, LikelihoodBand],
+        unresolved_likelihood: LikelihoodBand | None = None,
+        frame_fit: FrameFit = FrameFit.UNDERDETERMINED,
+        unexplained_observation: str | None = None,
         interpretation: str,
         is_duplicate: bool,
         quality_overrides: dict[str, float] | None = None,
@@ -540,12 +868,10 @@ class EvidenceIntegrationGate:
             is_duplicate=is_duplicate,
         )
         if quality_overrides:
-            effective_overrides = quality_overrides
-            if signal.source_type in {"model_probe_gateway", "python_sandbox"}:
-                effective_overrides = {
-                    metric: min(value, getattr(quality, metric))
-                    for metric, value in quality_overrides.items()
-                }
+            effective_overrides = {
+                metric: min(value, getattr(quality, metric))
+                for metric, value in quality_overrides.items()
+            }
             quality = _apply_quality_overrides(
                 quality=quality,
                 overrides=effective_overrides,
@@ -563,6 +889,9 @@ class EvidenceIntegrationGate:
             specificity=quality.specificity,
             verifiability=quality.verifiability,
             likelihoods=likelihoods,
+            unresolved_likelihood=unresolved_likelihood,
+            frame_fit=frame_fit,
+            unexplained_observation=unexplained_observation,
             interpretation=interpretation,
             discard_reason=discard_reason,
             model_trace=model_trace.to_dict() if model_trace is not None else {},
@@ -707,14 +1036,81 @@ def _endorsed_hypothesis(content: str, hypotheses: list[Hypothesis]) -> str | No
 
 def _repair_payload_from(payload: Any) -> dict[str, Any]:
     if isinstance(payload, Mapping):
-        return dict(payload)
-    return {"_raw_payload": payload}
+        return dict(redact_secret_material(payload))
+    return {"_raw_payload": redact_secret_material(payload)}
 
 
 def _scoped_cycle_key(run_id: str, cycle_id: str) -> str:
     if cycle_id.startswith(f"{run_id}_"):
         return cycle_id
     return f"{run_id}_{cycle_id}"
+
+
+def _is_native_v02_state(belief_state: BeliefState) -> bool:
+    return (
+        belief_state.schema_version == "v0.2"
+        and belief_state.task_frame is not None
+        and belief_state.frame_state is not None
+        and belief_state.evidence_memory is not None
+        and belief_state.task_frame.framing_method != FramingMethod.LEGACY_MIGRATION
+        and belief_state.task_frame.framing_trace.get("source")
+        != "hypothesis_seeds"
+    )
+
+
+def _migrate_v01_judgment_payload(
+    payload: dict[str, Any],
+    *,
+    competition: HypothesisCompetition,
+    coverage: HypothesisCoverage,
+) -> dict[str, Any]:
+    """Explicitly complete the reviewed v0.1 provider response shape."""
+    if not isinstance(payload, Mapping):
+        return payload
+    v01_fields = {
+        "evidence_type",
+        "likelihoods",
+        "interpretation",
+        "quality_overrides",
+    }
+    if not set(payload).issubset(v01_fields):
+        return payload
+    migrated = dict(payload)
+    migrated.setdefault("quality_overrides", {})
+    exclusive_open = (
+        competition == HypothesisCompetition.EXCLUSIVE
+        and coverage == HypothesisCoverage.OPEN
+    )
+    evidence_type = migrated.get("evidence_type")
+    likelihoods = migrated.get("likelihoods")
+    has_directional_likelihood = isinstance(likelihoods, Mapping) and any(
+        likelihood != LikelihoodBand.NEUTRAL.value
+        for likelihood in likelihoods.values()
+    )
+    if evidence_type == EvidenceType.ANOMALY.value and exclusive_open:
+        unresolved_likelihood = LikelihoodBand.MODERATELY_CONFIRMING.value
+        frame_fit = FrameFit.SUPPORTS_UNRESOLVED.value
+        unexplained_observation = "The signal is poorly explained by named hypotheses."
+    elif has_directional_likelihood:
+        unresolved_likelihood = (
+            LikelihoodBand.NEUTRAL.value if exclusive_open else None
+        )
+        frame_fit = FrameFit.EXPLAINED_BY_NAMED.value
+        unexplained_observation = None
+    else:
+        unresolved_likelihood = (
+            LikelihoodBand.NEUTRAL.value if exclusive_open else None
+        )
+        frame_fit = FrameFit.UNDERDETERMINED.value
+        unexplained_observation = None
+    migrated.update(
+        {
+            "unresolved_likelihood": unresolved_likelihood,
+            "frame_fit": frame_fit,
+            "unexplained_observation": unexplained_observation,
+        }
+    )
+    return migrated
 
 
 __all__ = [
