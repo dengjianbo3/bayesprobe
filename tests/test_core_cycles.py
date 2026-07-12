@@ -13,6 +13,7 @@ from bayesprobe.inbox import SignalInbox
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.ledger import JsonlLedgerStore
+from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
     EvidenceJudgmentRepairPolicy,
     ModelGatewayValidationError,
@@ -5113,6 +5114,277 @@ def _legacy_evidence_judgment():
         "interpretation": "The audit favors H1.",
         "quality_overrides": {},
     }
+
+
+class _InPlaceCoreInputMutationGate:
+    def __init__(self, delegate, mutation: str) -> None:
+        self._delegate = delegate
+        self._mutation = mutation
+
+    def integrate(self, *, cycle, belief_state, probe_set, signals):
+        if self._mutation == "signal":
+            _mutate_gate_signal(signals[0], "first")
+        elif self._mutation == "later_signal":
+            _mutate_gate_signal(signals[-1], "later")
+        elif self._mutation == "belief_state":
+            memory = belief_state.evidence_memory
+            assert memory is not None
+            memory.accepted_evidence_ids.clear()
+            memory.content_fingerprints.clear()
+            memory.source_content_fingerprints.clear()
+            memory.derivation_roots.clear()
+            memory.event_signal_identity_digests.clear()
+            memory.correlation_credit.clear()
+            memory.discovery_evidence_ids.clear()
+            memory.counterevidence_ids_by_hypothesis.clear()
+            memory.discard_and_schema_history.clear()
+            belief_state.ledger_refs.clear()
+
+        integration = self._delegate.integrate(
+            cycle=cycle,
+            belief_state=belief_state,
+            probe_set=probe_set,
+            signals=signals,
+        )
+        if self._mutation == "cycle_probe":
+            cycle.cycle_id = "cycle_gate_mutated"
+            cycle.boundary_status = BoundaryStatus.OPEN
+            cycle.boundary_closed_at = None
+            probe_set.probe_set_id = "ps_gate_mutated"
+            probe_set.cycle_id = "cycle_gate_mutated"
+            probe_set.probes[0].id = "P_gate_mutated"
+            probe_set.probes[0].cycle_id = "cycle_gate_mutated"
+            probe_set.probes[0].inquiry_goal = "Gate-mutated inquiry."
+        return integration
+
+
+class _GateInputMutationCore(BayesProbeCore):
+    def __init__(self, mutation: str, *, ledger, model_gateway) -> None:
+        self._input_mutation = mutation
+        super().__init__(ledger=ledger, model_gateway=model_gateway)
+
+    def _create_evidence_integration_gate(self):
+        return _InPlaceCoreInputMutationGate(
+            super()._create_evidence_integration_gate(),
+            self._input_mutation,
+        )
+
+
+class _RecordingSolverProxy:
+    def __init__(self, solver) -> None:
+        self._solver = solver
+        self.calls = 0
+
+    def solve(self, *args, **kwargs):
+        self.calls += 1
+        return self._solver.solve(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._solver, name)
+
+
+def _mutate_gate_signal(signal: ExternalSignal, label: str) -> None:
+    provenance = signal.provenance
+    assert provenance is not None
+    signal.raw_content = f"Gate-mutated {label} signal content."
+    signal.source = f"gate-mutated-{label}-source"
+    provenance.source_identity = f"gate-mutated-{label}-identity"
+    provenance.derivation_root_id = f"gate-mutated-{label}-root"
+    provenance.correlation_group = f"gate-mutated-{label}-group"
+    provenance.supplied_correlation_group = f"gate-mutated-{label}-group"
+
+
+def _mutating_core(tmp_path: Path, mutation: str):
+    ledger_path = tmp_path / f"gate-input-{mutation}.jsonl"
+    ledger_path.touch()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = _GateInputMutationCore(
+        mutation,
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    return core, solver, ledger_path
+
+
+def test_gate_signal_mutation_cannot_redefine_authoritative_closed_signal(
+    tmp_path: Path,
+):
+    core, solver, ledger_path = _mutating_core(tmp_path, "signal")
+    state = make_exact_belief_state()
+    signal = _memory_signal(
+        "S_gate_mutation",
+        "The original signal supports H1.",
+        root="root-gate-mutation",
+    )
+    prior_state = state.model_dump(mode="json")
+    prior_signal = signal.model_dump(mode="json")
+    cycle = make_cycle("cycle_gate_signal_mutation")
+
+    with pytest.raises(
+        ValueError,
+        match="native closed signal ownership is invalid",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[signal],
+        )
+
+    assert solver.calls == 0
+    assert signal.model_dump(mode="json") == prior_signal
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+def test_gate_belief_memory_mutation_cannot_erase_authoritative_history(
+    tmp_path: Path,
+):
+    core, solver, ledger_path = _mutating_core(tmp_path, "belief_state")
+    state, _, _, _ = _native_transition_fixture()
+    prior_memory = state.evidence_memory
+    assert prior_memory is not None
+    prior_state = state.model_dump(mode="json")
+    prior_memory_payload = prior_memory.model_dump(mode="json")
+    cycle = make_cycle("cycle_gate_belief_mutation")
+
+    with pytest.raises(
+        ValueError,
+        match="native evidence memory transition is invalid",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                _memory_signal(
+                    "S_gate_belief_mutation",
+                    "A new observation follows preserved history.",
+                    root="root-gate-belief-mutation",
+                )
+            ],
+        )
+
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert state.evidence_memory is prior_memory
+    assert state.evidence_memory.model_dump(mode="json") == prior_memory_payload
+    assert ledger_path.read_bytes() == b""
+
+
+def test_gate_cycle_and_probe_mutation_never_reaches_result_or_ledger(
+    tmp_path: Path,
+):
+    core, _, ledger_path = _mutating_core(tmp_path, "cycle_probe")
+    cycle = make_cycle("cycle_gate_record_mutation")
+    probe = ProbeDesign(
+        id="P_gate_record_original",
+        cycle_id=cycle.cycle_id,
+        target_hypotheses=["H1", "H2"],
+        inquiry_goal="Preserve the authoritative probe.",
+        method="source_tracing",
+    )
+    probe_set = ProbeSet(
+        probe_set_id="ps_gate_record_original",
+        cycle_id=cycle.cycle_id,
+        probes=[probe],
+        selection_reason="Gate isolation regression.",
+    )
+    signal = _memory_signal(
+        "S_gate_record_mutation",
+        "The probe result supports H1.",
+        root="root-gate-record-mutation",
+    ).model_copy(update={"generated_by_probe": probe.id})
+    prior_cycle = cycle.model_dump(mode="json")
+    prior_probe_set = probe_set.model_dump(mode="json")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=probe_set,
+        signals=[signal],
+    )
+
+    assert cycle.model_dump(mode="json") == prior_cycle
+    assert probe_set.model_dump(mode="json") == prior_probe_set
+    assert result.cycle.cycle_id == cycle.cycle_id
+    assert result.cycle.boundary_status == BoundaryStatus.INTEGRATED
+    assert result.cycle.boundary_closed_at is not None
+    assert result.belief_state.ledger_refs["probe_sets"] == [
+        "ps_gate_record_original"
+    ]
+    ledger = JsonlLedgerStore(ledger_path)
+    assert ledger.read_all("cycle")[0]["payload"]["cycle_id"] == cycle.cycle_id
+    ledger_probe_set = ledger.read_all("probe_set")[0]["payload"]
+    assert ledger_probe_set["probe_set_id"] == "ps_gate_record_original"
+    assert ledger_probe_set["probes"][0]["id"] == "P_gate_record_original"
+
+
+def test_later_gate_signal_mutation_cannot_change_earlier_authoritative_signal(
+    tmp_path: Path,
+):
+    core, solver, ledger_path = _mutating_core(tmp_path, "later_signal")
+    state = make_exact_belief_state()
+    first = _memory_signal(
+        "S_gate_later_first",
+        "The first original observation supports H1.",
+        root="root-gate-later-shared",
+    )
+    second = first.model_copy(
+        update={
+            "id": "S_gate_later_second",
+            "raw_content": "The second original observation supports H1.",
+        }
+    )
+    assert first.provenance is second.provenance
+    prior_signals = [
+        signal.model_dump(mode="json") for signal in (first, second)
+    ]
+    prior_state = state.model_dump(mode="json")
+    cycle = make_cycle("cycle_gate_later_signal")
+
+    with pytest.raises(
+        ValueError,
+        match="native closed signal ownership is invalid",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[first, second],
+        )
+
+    assert solver.calls == 0
+    assert [signal.model_dump(mode="json") for signal in (first, second)] == (
+        prior_signals
+    )
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+def test_core_isolation_preserves_authentic_migration_receipt():
+    state = make_explicit_legacy_belief_state(cycle_id="cycle_0")
+    prior_state = state.model_dump(mode="json")
+    assert resolve_belief_lifecycle(state) == (
+        BeliefLifecycle.LEGACY_V01_MIGRATION
+    )
+    cycle = make_cycle("cycle_isolated_migration")
+
+    result = BayesProbeCore().integrate_cycle(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+
+    assert state.model_dump(mode="json") == prior_state
+    assert resolve_belief_lifecycle(result.belief_state) == (
+        BeliefLifecycle.LEGACY_V01_MIGRATION
+    )
 
 
 def _memory_lifecycle_ids(state: BeliefState) -> set[str]:

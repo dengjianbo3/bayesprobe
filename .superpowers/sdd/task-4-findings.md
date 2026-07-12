@@ -110,3 +110,7 @@
 ## Fifteenth full-range re-review finding
 
 1. Copying a PythonExecutionRecord must preserve deep policy immutability. `copy.copy` and `copy.deepcopy` of the record cannot thaw nested policy mappings, while `dataclasses.asdict` must continue to return independent JSON-compatible dictionaries/lists for artifact serialization. Directly deep-copying the policy value may produce an independent mutable serialization but must never mutate or replace the policy attached to a record.
+
+## Sixteenth full-range re-review finding
+
+1. Core must preserve immutable authoritative pre-gate snapshots. The EvidenceGate receives isolated deep copies of BeliefState, closed signals, cycle, and ProbeSet; all post-gate ownership, memory-transition, solving, state construction, and ledger work use untouched authoritative snapshots. In-place gate mutation cannot redefine the validation baseline, erase prior memory/ledger history, rewrite signal content, or alter cycle/probe records.

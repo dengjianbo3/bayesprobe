@@ -94,58 +94,68 @@ class BayesProbeCore:
         probe_set: ProbeSet,
         signals: list[ExternalSignal],
     ) -> CycleResult:
-        belief_state = migrate_legacy_belief_state(belief_state)
-        lifecycle = resolve_belief_lifecycle(belief_state)
-        self._validate_cycle_boundary(cycle=cycle, belief_state=belief_state, probe_set=probe_set)
-        inbox = self._create_signal_inbox(cycle)
+        migrated_belief_state = migrate_legacy_belief_state(belief_state)
+        lifecycle = resolve_belief_lifecycle(migrated_belief_state)
+        authoritative_belief_state = migrated_belief_state.model_copy(deep=True)
+        if resolve_belief_lifecycle(authoritative_belief_state) != lifecycle:
+            raise ValueError("belief lifecycle isolation is invalid")
+        authoritative_cycle = cycle.model_copy(deep=True)
+        authoritative_probe_set = probe_set.model_copy(deep=True)
+        self._validate_cycle_boundary(
+            cycle=authoritative_cycle,
+            belief_state=authoritative_belief_state,
+            probe_set=authoritative_probe_set,
+        )
+        inbox = self._create_signal_inbox(authoritative_cycle)
         for signal in signals:
-            inbox.add(signal)
-        closed_inbox_signals = inbox.close()
-        closed_cycle = cycle.model_copy(
+            inbox.add(signal.model_copy(deep=True))
+        authoritative_closed_signals = _deep_signal_copies(inbox.close())
+        authoritative_closed_cycle = authoritative_cycle.model_copy(
+            deep=True,
             update={
                 "boundary_status": BoundaryStatus.CLOSED,
                 "boundary_closed_at": utc_now(),
             }
         )
         self._validate_signal_shape(
-            cycle=closed_cycle,
-            signals=closed_inbox_signals,
+            cycle=authoritative_closed_cycle,
+            signals=authoritative_closed_signals,
         )
         integration = self._normalize_evidence_integration(
             self._evidence_gate.integrate(
-                cycle=closed_cycle,
-                belief_state=belief_state,
-                probe_set=probe_set,
-                signals=closed_inbox_signals,
+                cycle=authoritative_closed_cycle.model_copy(deep=True),
+                belief_state=authoritative_belief_state.model_copy(deep=True),
+                probe_set=authoritative_probe_set.model_copy(deep=True),
+                signals=_deep_signal_copies(authoritative_closed_signals),
             )
         )
         ledger_signals = _resolve_owned_closed_signals(
             lifecycle=lifecycle,
-            inbox_signals=closed_inbox_signals,
+            inbox_signals=authoritative_closed_signals,
             integration=integration,
-            run_id=cycle.run_id,
+            run_id=authoritative_cycle.run_id,
         )
         next_evidence_memory = _resolve_next_evidence_memory(
             lifecycle=lifecycle,
-            belief_state=belief_state,
+            belief_state=authoritative_belief_state,
             integration=integration,
             normalized_signals=ledger_signals,
             memory_manager=self._evidence_memory_manager,
         )
         evidence_events = mark_replayed_evidence_events(
-            belief_state,
+            authoritative_belief_state,
             integration.evidence_events,
         )
         canonical_evidence_events = _canonical_new_evidence_events(
-            belief_state.ledger_refs.get("evidence_events", []),
+            authoritative_belief_state.ledger_refs.get("evidence_events", []),
             evidence_events,
         )
         probe_candidates = integration.probe_candidates
         solve_result = self._belief_solver.solve(
-            belief_state,
+            authoritative_belief_state,
             evidence_events,
-            run_id=cycle.run_id,
-            cycle_id=cycle.cycle_id,
+            run_id=authoritative_cycle.run_id,
+            cycle_id=authoritative_cycle.cycle_id,
         )
         open_exclusive_frame = (
             solve_result.frame_state.competition
@@ -157,7 +167,7 @@ class BayesProbeCore:
                 event for event in evidence_events if event.discard_reason is None
             ]
             retirement_result = self._evolution_policy.retire_stale_hypotheses(
-                cycle=closed_cycle,
+                cycle=authoritative_closed_cycle,
                 hypotheses=solve_result.hypotheses,
                 evidence_events=accepted_events,
             )
@@ -166,8 +176,8 @@ class BayesProbeCore:
                 evolved_hypotheses=retirement_result.hypotheses,
                 evolutions=retirement_result.evolutions,
                 events=accepted_events,
-                run_id=cycle.run_id,
-                cycle_id=cycle.cycle_id,
+                run_id=authoritative_cycle.run_id,
+                cycle_id=authoritative_cycle.cycle_id,
             )
             evolutions = retirement_result.evolutions
         belief_updates = solve_result.belief_updates
@@ -178,10 +188,10 @@ class BayesProbeCore:
             hypotheses=solve_result.hypotheses,
         )
         record_frame_adequacy_decision = (
-            belief_state.task_frame.framing_method
+            authoritative_belief_state.task_frame.framing_method
             != FramingMethod.LEGACY_MIGRATION
             or frame_adequacy_decision.frame_state.adequacy_status
-            != belief_state.frame_state.adequacy_status
+            != authoritative_belief_state.frame_state.adequacy_status
             or frame_adequacy_decision.should_expand
             or bool(frame_adequacy_decision.trigger_event_ids)
         )
@@ -189,8 +199,8 @@ class BayesProbeCore:
             evolved_hypotheses = solve_result.hypotheses
         else:
             evolution_result = self._evolution_policy.evolve(
-                cycle=closed_cycle,
-                previous_belief_state=belief_state,
+                cycle=authoritative_closed_cycle,
+                previous_belief_state=authoritative_belief_state,
                 updated_hypotheses=solve_result.hypotheses,
                 evidence_events=evidence_events,
                 belief_updates=belief_updates,
@@ -211,11 +221,11 @@ class BayesProbeCore:
                 ]
             }
         )
-        existing_ledger_refs = dict(belief_state.ledger_refs)
+        existing_ledger_refs = dict(authoritative_belief_state.ledger_refs)
         merged_ledger_refs = dict(existing_ledger_refs)
         merged_ledger_refs["probe_sets"] = [
             *existing_ledger_refs.get("probe_sets", []),
-            probe_set.probe_set_id,
+            authoritative_probe_set.probe_set_id,
         ]
         merged_ledger_refs["evidence_events"] = _append_unique(
             existing_ledger_refs.get("evidence_events", []),
@@ -241,12 +251,15 @@ class BayesProbeCore:
             evolved_hypotheses,
             frame_state=next_frame_state,
         )
-        updated_state_payload = belief_state.model_dump(mode="python")
+        updated_state_payload = authoritative_belief_state.model_dump(mode="python")
         updated_state_payload.update(
             {
-                "belief_state_id": f"{cycle.run_id}_bs_{cycle.cycle_index}",
-                "cycle_id": cycle.cycle_id,
-                "cycle_index": cycle.cycle_index,
+                "belief_state_id": (
+                    f"{authoritative_cycle.run_id}_bs_"
+                    f"{authoritative_cycle.cycle_index}"
+                ),
+                "cycle_id": authoritative_cycle.cycle_id,
+                "cycle_index": authoritative_cycle.cycle_index,
                 "hypotheses": [
                     hypothesis.model_dump(mode="python")
                     for hypothesis in evolved_hypotheses
@@ -260,10 +273,11 @@ class BayesProbeCore:
         )
         updated_state = _deep_revalidate_final_belief_state(updated_state_payload)
         updated_state = _carry_v01_migration_receipt(
-            belief_state,
+            authoritative_belief_state,
             updated_state,
         )
-        integrated_cycle = closed_cycle.model_copy(
+        integrated_cycle = authoritative_closed_cycle.model_copy(
+            deep=True,
             update={
                 "boundary_status": BoundaryStatus.INTEGRATED,
                 "completed_at": utc_now(),
@@ -272,7 +286,7 @@ class BayesProbeCore:
         self._append_ledger_records(
             cycle=integrated_cycle,
             signals=ledger_signals,
-            probe_set=probe_set,
+            probe_set=authoritative_probe_set,
             evidence_events=canonical_evidence_events,
             belief_updates=belief_updates,
             frame_mass_updates=frame_mass_updates,
@@ -413,6 +427,12 @@ class BayesProbeCore:
         for probe in probe_set.probes:
             if probe.cycle_id != cycle.cycle_id:
                 raise ValueError("probe design must be frozen to the current cycle")
+
+
+def _deep_signal_copies(
+    signals: list[ExternalSignal],
+) -> list[ExternalSignal]:
+    return [signal.model_copy(deep=True) for signal in signals]
 
 
 def _scoped_cycle_key(run_id: str, cycle_id: str) -> str:

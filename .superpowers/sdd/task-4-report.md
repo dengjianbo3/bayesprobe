@@ -1254,3 +1254,89 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/evaluation/test_python_probe.p
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 21
+
+### Design Decision
+
+- Established an isolation boundary immediately after explicit migration and
+  lifecycle resolution. Core deep-copies the migrated `BeliefState`, re-resolves
+  its lifecycle to prove the private migration receipt survived, and deep-copies
+  the caller's `CycleRecord` and `ProbeSet` without serialization round trips.
+- Core deep-copies every caller signal before inbox admission, then takes a
+  second authoritative deep snapshot after the collection boundary closes.
+  This isolates caller provenance and also prevents aliasing between later gate
+  mutations and any earlier authoritative signal baseline.
+- EvidenceGate receives a separate deep copy of the authoritative closed cycle,
+  belief state, probe set, and closed signals. All ownership comparison, memory
+  transition validation, replay handling, solver/policy/evolution work, final
+  state construction, ledger records, and returned cycle use only the untouched
+  authoritative snapshots.
+
+### Changes
+
+- Reworked `BayesProbeCore.integrate_cycle` to name and retain authoritative
+  state/cycle/probe/signal snapshots across the gate boundary. Added one narrow
+  `_deep_signal_copies` helper; no generic serialization/copy framework was
+  introduced.
+- Added adversarial gate wrappers that mutate signal content/source/provenance,
+  erase every prior Evidence Memory and ledger-reference category, mutate
+  cycle/probe fields after a self-consistent integration, and mutate a later
+  signal sharing provenance with an earlier caller signal.
+- Added positive receipt coverage for an authentic explicitly migrated input
+  and retained focused production controls for native integration, native
+  replay, default credit, and a non-default cumulative credit policy.
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py::test_gate_signal_mutation_cannot_redefine_authoritative_closed_signal tests/test_core_cycles.py::test_gate_belief_memory_mutation_cannot_erase_authoritative_history tests/test_core_cycles.py::test_gate_cycle_and_probe_mutation_never_reaches_result_or_ledger tests/test_core_cycles.py::test_later_gate_signal_mutation_cannot_change_earlier_authoritative_signal tests/test_core_cycles.py::test_core_isolation_preserves_authentic_migration_receipt tests/test_core_cycles.py::test_core_default_credit_policy_behavior_is_unchanged tests/test_core_cycles.py::test_core_custom_credit_policy_is_shared_with_production_gate tests/test_core_cycles.py::test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record -q --tb=short -p no:cacheprovider
+```
+
+Result: `4 failed, 4 passed in 0.42s`; all mutation attacks leaked while all
+production/migration controls passed.
+
+- GREEN/refactor: the same focused selection -> `8 passed in 0.29s`.
+- Core suite: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest
+  tests/test_core_cycles.py -q --tb=short -p no:cacheprovider` -> `186 passed
+  in 1.25s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_model_gateway.py tests/test_openai_gateway.py
+  tests/test_core_cycles.py tests/test_probe_executor.py
+  tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `548 passed
+  in 2.01s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1365 passed, 10 skipped in 11.23s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before
+  report/commit; the range check is repeated after commit.
+
+### Self-Review
+
+- A gate may still mutate its isolated inputs and return a self-consistent result,
+  but normalized signal ownership is compared against untouched closed signals
+  and prior memory is validated against the untouched authoritative state.
+  Signal and state attacks therefore fail with generic existing errors before
+  solver or ledger work, while caller objects and ledger bytes stay unchanged.
+- Cycle and probe mutations occur only on gate copies. The integrated cycle,
+  final ledger references, cycle ledger payload, and full nested probe-set
+  payload retain authoritative ids, boundary timestamps, and probe fields.
+- Caller signals are copied before inbox admission and again at boundary close;
+  separate gate copies cannot mutate shared caller provenance or alter an
+  earlier authoritative baseline through a later signal.
+- Authentic migrated states retain a valid private receipt through the
+  authoritative deep copy, gate copy, and `_carry_v01_migration_receipt` final
+  transition. Native production, replay, and configured credit behavior remain
+  unchanged.
+
+### Concerns
+
+No blocking concerns.
