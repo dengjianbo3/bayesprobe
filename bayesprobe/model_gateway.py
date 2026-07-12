@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import re
-import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +15,7 @@ from bayesprobe.schemas import (
     LikelihoodBand,
     is_forbidden_secret_key_name,
     is_secret_like_value,
+    validate_secret_free_provider_identity,
 )
 from bayesprobe.provider_telemetry import ProviderInvocationObserver
 
@@ -659,12 +659,10 @@ def model_gateway_adapter_kind(gateway: object) -> str:
 def model_gateway_identity(gateway: object) -> str:
     identity = getattr(gateway, "model_identity", None)
     if isinstance(identity, str) and identity.strip():
-        cleaned = identity.strip()
-        normalized = unicodedata.normalize("NFKC", cleaned)
-        if is_secret_like_value(cleaned) or is_secret_like_value(normalized):
-            raise ValueError("model gateway identity must not contain secret material")
-        return cleaned
-    return model_gateway_adapter_kind(gateway)
+        return validate_secret_free_provider_identity(identity)
+    return validate_secret_free_provider_identity(
+        model_gateway_adapter_kind(gateway)
+    )
 
 
 def _model_gateway_config_from_input(

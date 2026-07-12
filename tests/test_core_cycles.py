@@ -43,6 +43,8 @@ from bayesprobe.schemas import (
     TaskAdmissionDecision,
     TaskAdmissionStatus,
     TaskKind,
+    decode_discard_history_entry,
+    encode_discard_history_entry,
 )
 from bayesprobe.task_framing import ModelTaskFramer, migrate_legacy_belief_state
 
@@ -1883,8 +1885,72 @@ class StaticEventGate(EvidenceIntegrationGate):
 
     def integrate(self, *, cycle, belief_state, probe_set, signals):
         assert belief_state.task_frame is not None
+        assert signals
         self.seen_framing_methods.append(belief_state.task_frame.framing_method)
-        return list(self.events)
+        normalizer = evidence_memory.SignalProvenanceNormalizer()
+        normalized_by_id = {}
+        for event in self.events:
+            if event.derived_from_signal in normalized_by_id:
+                continue
+            normalized_by_id[event.derived_from_signal] = normalizer.normalize(
+                signals[0].model_copy(
+                    update={
+                        "id": event.derived_from_signal,
+                        "provenance": None,
+                    }
+                ),
+                run_id=cycle.run_id,
+            )
+
+        prior_memory = belief_state.evidence_memory or EvidenceMemorySnapshot()
+        accepted_ids = list(prior_memory.accepted_evidence_ids)
+        discard_history = list(prior_memory.discard_and_schema_history)
+        discarded_ids = {
+            decode_discard_history_entry(entry)[0]
+            for entry in discard_history
+        }
+        lifecycle_ids = set(accepted_ids) | discarded_ids
+        bindings = dict(prior_memory.event_signal_identity_digests)
+        for event in self.events:
+            if event.id not in lifecycle_ids:
+                if event.discard_reason is None:
+                    accepted_ids.append(event.id)
+                else:
+                    discard_history.append(
+                        encode_discard_history_entry(
+                            event.id,
+                            event.discard_reason,
+                        )
+                    )
+                lifecycle_ids.add(event.id)
+            bindings[event.id] = evidence_memory.canonical_signal_identity_digest(
+                normalized_by_id[event.derived_from_signal]
+            )
+        committed_memory = EvidenceMemorySnapshot(
+            memory_version=2,
+            accepted_evidence_ids=accepted_ids,
+            content_fingerprints=dict(prior_memory.content_fingerprints),
+            source_content_fingerprints=dict(
+                prior_memory.source_content_fingerprints
+            ),
+            derivation_roots=dict(prior_memory.derivation_roots),
+            event_signal_identity_digests=bindings,
+            correlation_credit=dict(prior_memory.correlation_credit),
+            discovery_evidence_ids=list(prior_memory.discovery_evidence_ids),
+            counterevidence_ids_by_hypothesis={
+                hypothesis_id: list(event_ids)
+                for hypothesis_id, event_ids in (
+                    prior_memory.counterevidence_ids_by_hypothesis.items()
+                )
+            },
+            discard_and_schema_history=discard_history,
+        )
+        return EvidenceIntegrationResult(
+            evidence_events=list(self.events),
+            probe_candidates=[],
+            evidence_memory=committed_memory,
+            normalized_signals=list(normalized_by_id.values()),
+        )
 
 
 class StaticEventCore(BayesProbeCore):
@@ -1931,11 +1997,130 @@ def test_invalid_committed_memory_fails_before_any_cycle_ledger_append(tmp_path:
     assert ledger.read_all() == []
 
 
+def test_native_plain_list_gate_fails_before_state_or_ledger_mutation(
+    tmp_path: Path,
+):
+    class PlainListNativeGate(EvidenceIntegrationGate):
+        def integrate(self, *, cycle, belief_state, probe_set, signals):
+            return [
+                EvidenceEvent(
+                    schema_version="v0.2",
+                    id="E_unowned_native",
+                    derived_from_signal="S_unowned_native",
+                    epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                    derivation_root_id="root-unowned-native",
+                    target_hypotheses=["H1", "H2"],
+                    evidence_type=EvidenceType.NEUTRAL,
+                    content="An unowned native event must not be applied.",
+                    likelihoods={
+                        "H1": LikelihoodBand.NEUTRAL,
+                        "H2": LikelihoodBand.NEUTRAL,
+                    },
+                    unresolved_likelihood=LikelihoodBand.NEUTRAL,
+                    frame_fit=FrameFit.UNDERDETERMINED,
+                    correlation_status="novel",
+                    effective_update_weight=0.0,
+                )
+            ]
+
+    class PlainListNativeCore(BayesProbeCore):
+        def _create_evidence_integration_gate(self):
+            return PlainListNativeGate()
+
+    ledger_path = tmp_path / "native-plain-list-ledger.jsonl"
+    ledger_path.touch()
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    prior_memory = state.evidence_memory.model_dump(mode="json")
+    core = PlainListNativeCore(ledger=JsonlLedgerStore(ledger_path))
+    cycle = make_cycle("cycle_native_plain_list")
+
+    with pytest.raises(
+        ValueError,
+        match="native evidence integration requires coherent evidence memory",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[make_active_signal()],
+        )
+
+    assert state.model_dump(mode="json") == prior_state
+    assert state.evidence_memory.model_dump(mode="json") == prior_memory
+    assert ledger_path.read_bytes() == b""
+
+
+def test_native_gate_wrong_event_signal_binding_fails_before_ledger(
+    tmp_path: Path,
+):
+    class WrongBindingGate(EvidenceIntegrationGate):
+        def integrate(self, *, cycle, belief_state, probe_set, signals):
+            normalized = evidence_memory.SignalProvenanceNormalizer().normalize(
+                signals[0].model_copy(update={"id": "S_wrong_binding"}),
+                run_id=cycle.run_id,
+            )
+            event = EvidenceEvent(
+                schema_version="v0.2",
+                id="E_wrong_binding",
+                derived_from_signal=normalized.id,
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                derivation_root_id=normalized.provenance.derivation_root_id,
+                target_hypotheses=["H1", "H2"],
+                evidence_type=EvidenceType.NEUTRAL,
+                content="A syntactically bound native event.",
+                likelihoods={
+                    "H1": LikelihoodBand.NEUTRAL,
+                    "H2": LikelihoodBand.NEUTRAL,
+                },
+                unresolved_likelihood=LikelihoodBand.NEUTRAL,
+                frame_fit=FrameFit.UNDERDETERMINED,
+                correlation_status="novel",
+                effective_update_weight=0.0,
+            )
+            return EvidenceIntegrationResult(
+                evidence_events=[event],
+                probe_candidates=[],
+                evidence_memory=EvidenceMemorySnapshot(
+                    memory_version=2,
+                    accepted_evidence_ids=[event.id],
+                    event_signal_identity_digests={event.id: "a" * 64},
+                ),
+                normalized_signals=[normalized],
+            )
+
+    class WrongBindingCore(BayesProbeCore):
+        def _create_evidence_integration_gate(self):
+            return WrongBindingGate()
+
+    ledger_path = tmp_path / "native-wrong-binding-ledger.jsonl"
+    ledger_path.touch()
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    core = WrongBindingCore(ledger=JsonlLedgerStore(ledger_path))
+    cycle = make_cycle("cycle_native_wrong_binding")
+
+    with pytest.raises(
+        ValueError,
+        match="native evidence integration requires coherent evidence memory",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[make_active_signal()],
+        )
+
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
 @pytest.mark.parametrize(
     "invalid_envelope",
     [
         "missing_task_frame",
         "tag_only",
+        "forged_recognized_marker",
         "v01_task_frame",
         "missing_trace",
         "fake_trace",
@@ -1960,6 +2145,20 @@ def test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append(
             update={
                 "task_frame": native.task_frame.model_copy(
                     update={"framing_method": FramingMethod.LEGACY_MIGRATION}
+                )
+            }
+        )
+    elif invalid_envelope == "forged_recognized_marker":
+        state = native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={
+                        "framing_method": FramingMethod.LEGACY_MIGRATION,
+                        "framing_trace": {
+                            **native.task_frame.framing_trace,
+                            "migration": "belief_state_v0.1_to_v0.2",
+                        },
+                    }
                 )
             }
         )
@@ -2189,6 +2388,7 @@ def test_core_retires_open_hypothesis_with_audited_mass_transfer(tmp_path: Path)
         }
     ]
     assert ordered_types == [
+        "external_signal",
         "external_signal",
         "evidence_event",
         "evidence_event",
@@ -3434,7 +3634,7 @@ def test_later_positional_conflict_preflights_before_novel_provider(
             "ledger_refs": {"evidence_events": [second_event_id]},
         }
     )
-    partial_state = BeliefState.model_validate(
+    BeliefState.model_validate(
         partial_state.model_dump(mode="python")
     )
     novel = _memory_signal(
@@ -4039,7 +4239,7 @@ def test_historical_positional_event_without_binding_fails_with_other_identity_m
             }
         }
     )
-    historical_state = BeliefState.model_validate(
+    BeliefState.model_validate(
         historical_state.model_dump(mode="python")
     )
     prior_state_payload = historical_state.model_dump(mode="json")

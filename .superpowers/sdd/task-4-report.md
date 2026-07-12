@@ -795,3 +795,79 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 15
+
+### Design Decision
+
+- Legacy provider downgrade authority is now an identity-based, non-serialized
+  receipt attached only by `migrate_belief_state_v0_1`. Shallow and deep
+  `model_copy` preserve an authentic in-memory receipt; public
+  `model_dump`/`model_validate` round-trips intentionally drop it and therefore
+  cannot select the legacy route. Core explicitly carries the receipt across
+  its own recursively validated state reconstruction.
+- Provider identity uses one shared exact-plus-NFKC secret-free validator.
+  Model-backed and Python-augmented executors resolve it before their first
+  provider request; Python threads the same resolved identity to reasoning
+  provenance across planning and all repair paths.
+- Core validates every new native event against a recursively valid memory
+  snapshot, matching accepted/discard lifecycle ownership, and the exact
+  canonical digest of the normalized signal named by the event before solver
+  application or ledger writes. Native plain-list results fail closed.
+- Python plan, execution-request, and code-repair validation test nonblankness
+  without replacing the executable string. Sandbox stdin, execution records,
+  SHA-256 audit, and deterministic-root inputs receive the original text.
+
+### Changes
+
+- Added private migration receipt creation, lifecycle resolution, deep-copy
+  stability, and core propagation while retaining both reviewed v0.1 migration
+  markers and strict native seven-field evidence transport.
+- Moved model identity resolution ahead of `complete_structured` in
+  `ModelBackedProbeToolGateway` and ahead of all Python planning, reasoning,
+  plan-repair, and code-repair activity. Exact and NFKC credential-like values
+  raise one generic error without provider, sandbox, process, or state effects.
+- Replaced native core memory fallback with an ownership preflight for new
+  events. Test-only static gates now return complete normalized signals and
+  bound lifecycle memory; the legacy list-return compatibility test remains
+  limited to an explicitly migrated v0.1 input.
+- Preserved leading indentation, trailing newlines, line boundaries, and NFKC-
+  compatible code characters through both normal planning and repaired-code
+  execution, with distinct deterministic roots for every byte-distinct pair.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_migrations.py::test_explicit_migration_receipt_survives_copy_but_not_public_round_trip tests/test_migrations.py::test_native_public_fields_cannot_forge_legacy_migration_authority tests/test_evidence_memory.py::test_invalid_migration_envelope_rejects_before_provider_or_memory tests/test_probe_executor.py::test_model_backed_probe_gateway_rejects_invalid_migration_envelope tests/test_probe_executor.py::test_model_backed_probe_rejects_secret_identity_before_provider_call tests/evaluation/test_python_probe.py::test_invalid_python_migration_envelope_rejects_without_side_effects tests/evaluation/test_python_probe.py::test_python_gateway_rejects_secret_identity_before_every_route tests/evaluation/test_python_probe.py::test_python_plan_path_preserves_byte_exact_code_and_distinct_roots tests/evaluation/test_python_probe.py::test_python_repair_path_preserves_byte_exact_code_and_distinct_roots tests/test_core_cycles.py::test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append tests/test_core_cycles.py::test_native_plain_list_gate_fails_before_state_or_ledger_mutation -q -p no:cacheprovider` -> `22 failed, 37 passed in 0.64s`.
+- Binding-coherence RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py::test_native_gate_wrong_event_signal_binding_fails_before_ledger -q -p no:cacheprovider` -> `1 failed in 0.22s`.
+- Deep-copy RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_migrations.py::test_explicit_migration_receipt_survives_copy_but_not_public_round_trip -q -p no:cacheprovider` -> `2 failed in 0.08s`.
+- GREEN: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_migrations.py::test_explicit_migration_receipt_survives_copy_but_not_public_round_trip tests/test_migrations.py::test_native_public_fields_cannot_forge_legacy_migration_authority tests/test_evidence_memory.py::test_invalid_migration_envelope_rejects_before_provider_or_memory tests/test_probe_executor.py::test_model_backed_probe_gateway_rejects_invalid_migration_envelope tests/test_probe_executor.py::test_model_backed_probe_rejects_secret_identity_before_provider_call tests/evaluation/test_python_probe.py::test_invalid_python_migration_envelope_rejects_without_side_effects tests/evaluation/test_python_probe.py::test_python_gateway_rejects_secret_identity_before_every_route tests/evaluation/test_python_probe.py::test_python_plan_path_preserves_byte_exact_code_and_distinct_roots tests/evaluation/test_python_probe.py::test_python_repair_path_preserves_byte_exact_code_and_distinct_roots tests/test_core_cycles.py::test_invalid_lifecycle_fails_before_provider_or_cycle_ledger_append tests/test_core_cycles.py::test_native_plain_list_gate_fails_before_state_or_ledger_mutation tests/test_core_cycles.py::test_native_gate_wrong_event_signal_binding_fails_before_ledger -q -p no:cacheprovider` -> `60 passed in 0.45s`.
+- Core ownership/refactor: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py -q -p no:cacheprovider` -> `120 passed in 0.68s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `462 passed in 1.31s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `329 passed in 0.36s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1272 passed, 10 skipped in 9.89s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check 67abac9..HEAD` -> clean before and after the Review Fix 15 commit; `git diff --check` and `git diff --cached --check` -> clean before commit.
+
+### Self-Review
+
+- A native state forged with `LEGACY_MIGRATION` and either recognized marker
+  now fails in EvidenceGate, model-backed probe, Python-augmented probe, and
+  core before provider, normalization, sandbox, memory, state, or ledger work.
+  Both real v0.1 migration paths retain v0.1 provider compatibility in memory.
+- Provider identity is resolved once before any route-specific `try` block, so
+  an invalid value cannot be converted into an unverified signal after a model
+  call. Error text contains neither the exact nor NFKC-normalized credential.
+- Native event ownership checks accepted versus discarded lifecycle semantics,
+  recursively validates the memory snapshot, requires a binding, resolves the
+  event's normalized source signal, and recomputes the shared canonical digest.
+  The solver and ledger are downstream of this complete check.
+- No executable-code path assigns a stripped or normalized value. Tests observe
+  exact code in sandbox requests and compare roots after normal execution and
+  after code repair for all four opaque-text distinctions.
+
+### Concerns
+
+No blocking concerns. A serialized migrated v0.2 envelope deliberately loses
+legacy downgrade authority and fails lifecycle resolution; callers that require
+the v0.1 provider contract must retain the in-memory migrated state or re-enter
+through the explicit v0.1 migration function.

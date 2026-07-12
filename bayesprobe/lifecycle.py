@@ -3,7 +3,10 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from bayesprobe.migrations import RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS
+from bayesprobe.migrations import (
+    RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS,
+    _has_v01_migration_receipt,
+)
 from bayesprobe.schemas import BeliefState, FramingMethod
 
 
@@ -53,6 +56,7 @@ def resolve_belief_lifecycle(belief_state: BeliefState) -> BeliefLifecycle:
         if (
             not isinstance(marker, str)
             or marker not in RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS
+            or not _has_v01_migration_receipt(belief_state)
         ):
             raise _invalid_lifecycle_error()
         return BeliefLifecycle.LEGACY_V01_MIGRATION

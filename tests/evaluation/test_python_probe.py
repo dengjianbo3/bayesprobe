@@ -1,5 +1,6 @@
 from copy import deepcopy
 from types import SimpleNamespace
+import unicodedata
 
 import pytest
 
@@ -45,6 +46,7 @@ _NONLEGACY_FRAMING_METHODS = tuple(
 )
 _INVALID_MIGRATION_ENVELOPES = (
     "tag_only",
+    "forged_recognized_marker",
     "v01_belief_state",
     "v01_task_frame",
     "missing_trace",
@@ -52,6 +54,24 @@ _INVALID_MIGRATION_ENVELOPES = (
     "missing_frame_state",
     "missing_evidence_memory",
     "incoherent_frame_state",
+)
+_SECRET_MODEL_IDENTITIES = (
+    "Authorization: Bearer provider-secret-value-123",
+    (
+        "\uff21\uff55\uff54\uff48\uff4f\uff52\uff49\uff5a\uff41\uff54"
+        "\uff49\uff4f\uff4e\uff1a \uff22\uff45\uff41\uff52\uff45\uff52 "
+        "provider-secret-value-123"
+    ),
+)
+_OPAQUE_CODE_PAIRS = (
+    pytest.param("    print('value')", "print('value')", id="leading-indentation"),
+    pytest.param("print('value')\n", "print('value')", id="trailing-newline"),
+    pytest.param(
+        "print('first')\nprint('second')",
+        "print('first'); print('second')",
+        id="line-boundaries",
+    ),
+    pytest.param("print('\u212a')", "print('K')", id="nfkc-compatible"),
 )
 POLICY_SNAPSHOT = {
     "runtime": "docker",
@@ -356,6 +376,26 @@ class FakeSandbox:
         return self.records.pop(0)
 
 
+class EchoCodeSandbox(FakeSandbox):
+    def __init__(self, *, fail_first: bool = False):
+        super().__init__([])
+        self.fail_first = fail_first
+
+    def execute(self, request):
+        self.requests.append(request)
+        failed = self.fail_first and len(self.requests) == 1
+        return execution_record(
+            execution_id=request.execution_id,
+            cycle_id=request.cycle_id,
+            probe_id=request.probe_id,
+            code=request.code,
+            exit_code=1 if failed else 0,
+            stdout="" if failed else "value\n",
+            stderr="RuntimeError: repair requested" if failed else "",
+            repair_attempt_index=request.repair_attempt_index,
+        )
+
+
 class RecordingExecutionObserver:
     def __init__(self):
         self.records = []
@@ -473,6 +513,20 @@ def invalid_python_migration_envelope(
                 )
             }
         )
+    if kind == "forged_recognized_marker":
+        return native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={
+                        "framing_method": FramingMethod.LEGACY_MIGRATION,
+                        "framing_trace": {
+                            **native.task_frame.framing_trace,
+                            "migration": "belief_state_v0.1_to_v0.2",
+                        },
+                    }
+                )
+            }
+        )
     if kind == "v01_belief_state":
         return migrated.model_copy(update={"schema_version": "v0.1"})
     if kind == "v01_task_frame":
@@ -522,6 +576,104 @@ def python_plan(code="print(2 + 2)"):
         "expected_observation": "The output equals one answer choice.",
         "code": code,
     }
+
+
+def _execute_opaque_code(code: str, *, repaired: bool) -> tuple[str, str]:
+    probe, context = probe_context()
+    model = SequenceModelGateway(
+        [
+            python_plan("raise RuntimeError('repair')") if repaired else python_plan(code),
+            *([{"code": code}] if repaired else []),
+        ]
+    )
+    sandbox = EchoCodeSandbox(fail_first=repaired)
+
+    signal = PythonAugmentedProbeToolGateway(model, sandbox).execute_probe(
+        probe=probe,
+        context=context,
+    )[0]
+
+    assert signal.provenance is not None
+    return sandbox.requests[-1].code, signal.provenance.derivation_root_id
+
+
+@pytest.mark.parametrize(("first_code", "second_code"), _OPAQUE_CODE_PAIRS)
+def test_python_plan_path_preserves_byte_exact_code_and_distinct_roots(
+    first_code,
+    second_code,
+):
+    first_executed, first_root = _execute_opaque_code(first_code, repaired=False)
+    second_executed, second_root = _execute_opaque_code(second_code, repaired=False)
+
+    assert first_executed == first_code
+    assert second_executed == second_code
+    assert first_root != second_root
+
+
+@pytest.mark.parametrize(("first_code", "second_code"), _OPAQUE_CODE_PAIRS)
+def test_python_repair_path_preserves_byte_exact_code_and_distinct_roots(
+    first_code,
+    second_code,
+):
+    first_executed, first_root = _execute_opaque_code(first_code, repaired=True)
+    second_executed, second_root = _execute_opaque_code(second_code, repaired=True)
+
+    assert first_executed == first_code
+    assert second_executed == second_code
+    assert first_root != second_root
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["plan", "plan_repair", "reasoning", "code_repair"],
+)
+@pytest.mark.parametrize("model_identity", _SECRET_MODEL_IDENTITIES)
+def test_python_gateway_rejects_secret_identity_before_every_route(
+    route,
+    model_identity,
+):
+    if route == "plan":
+        outcomes = [python_plan()]
+        records = [execution_record()]
+    elif route == "plan_repair":
+        outcomes = [python_plan(""), python_plan()]
+        records = [execution_record()]
+    elif route == "reasoning":
+        outcomes = [
+            {
+                "mode": "reasoning",
+                "purpose": "Use a conceptual argument.",
+                "target_hypotheses": ["A", "B", "C"],
+                "expected_observation": "One option follows logically.",
+                "code": None,
+            },
+            {"raw_content": "This must not be requested."},
+        ]
+        records = []
+    else:
+        outcomes = [python_plan("bad()"), {"code": "print(4)"}]
+        records = [
+            execution_record(exit_code=1, stdout="", stderr="NameError"),
+            execution_record(repair_attempt_index=1),
+        ]
+    model = SequenceModelGateway(outcomes)
+    model.model_identity = model_identity
+    sandbox = FakeSandbox(records)
+    gateway = PythonAugmentedProbeToolGateway(model, sandbox)
+    probe, context = probe_context()
+    prior_state = context.belief_state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="model gateway identity") as exc_info:
+        gateway.execute_probe(probe=probe, context=context)
+
+    error_text = str(exc_info.value)
+    assert model_identity not in error_text
+    assert unicodedata.normalize("NFKC", model_identity) not in error_text
+    assert model.requests == []
+    assert sandbox.preflight_calls == 0
+    assert sandbox.requests == []
+    assert set(gateway.process_metrics.values()) == {0}
+    assert context.belief_state.model_dump(mode="json") == prior_state
 
 
 def test_python_augmented_gateway_converts_successful_execution_to_active_signal():

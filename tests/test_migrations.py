@@ -4,9 +4,12 @@ from bayesprobe.migrations import (
     migrate_belief_state_v0_1,
     migrate_task_frame_v0_1,
 )
+from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
 from bayesprobe.schemas import (
     AnswerRelationship,
+    BeliefState,
     FrameAdequacyStatus,
+    FramingMethod,
     HypothesisCompetition,
     HypothesisCoverage,
 )
@@ -69,6 +72,35 @@ def legacy_independent_frame_payload() -> dict:
     return payload
 
 
+def legacy_belief_state_payload(*, include_task_frame: bool = True) -> dict:
+    return {
+        "belief_state_id": "legacy_belief",
+        "run_id": "run_1",
+        "cycle_id": "cycle_0",
+        "cycle_index": 0,
+        "hypotheses": [
+            {
+                "id": "A",
+                "statement": "Option A is correct.",
+                "scope": "The stated question.",
+                "prior": 0.5,
+                "posterior": 0.6,
+            },
+            {
+                "id": "B",
+                "statement": "Option B is correct.",
+                "scope": "The stated question.",
+                "prior": 0.5,
+                "posterior": 0.4,
+            },
+        ],
+        "posterior_summary": {},
+        "uncertainty_summary": "",
+        "ledger_refs": {},
+        "task_frame": legacy_mcq_frame_payload() if include_task_frame else None,
+    }
+
+
 def test_migrates_legacy_exclusive_frame_to_exclusive_exhaustive():
     migrated = migrate_task_frame_v0_1(legacy_mcq_frame_payload())
 
@@ -115,32 +147,7 @@ def test_migration_rejects_task_kind_absent_from_v01_vocabulary():
 
 
 def test_migrates_belief_state_with_frame_and_empty_memory():
-    payload = {
-        "belief_state_id": "legacy_belief",
-        "run_id": "run_1",
-        "cycle_id": "cycle_0",
-        "cycle_index": 0,
-        "hypotheses": [
-            {
-                "id": "A",
-                "statement": "Option A is correct.",
-                "scope": "The stated question.",
-                "prior": 0.5,
-                "posterior": 0.6,
-            },
-            {
-                "id": "B",
-                "statement": "Option B is correct.",
-                "scope": "The stated question.",
-                "prior": 0.5,
-                "posterior": 0.4,
-            },
-        ],
-        "posterior_summary": {},
-        "uncertainty_summary": "",
-        "ledger_refs": {},
-        "task_frame": legacy_mcq_frame_payload(),
-    }
+    payload = legacy_belief_state_payload()
 
     migrated = migrate_belief_state_v0_1(payload)
 
@@ -153,3 +160,49 @@ def test_migrates_belief_state_with_frame_and_empty_memory():
     assert migrated.evidence_memory.memory_version == 1
     assert migrated.evidence_memory.accepted_evidence_ids == []
     assert [item.answer_value for item in migrated.hypotheses] == [None, None]
+
+
+@pytest.mark.parametrize("include_task_frame", [False, True])
+def test_explicit_migration_receipt_survives_copy_but_not_public_round_trip(
+    include_task_frame,
+):
+    migrated = migrate_belief_state_v0_1(
+        legacy_belief_state_payload(include_task_frame=include_task_frame)
+    )
+
+    assert resolve_belief_lifecycle(migrated) == (
+        BeliefLifecycle.LEGACY_V01_MIGRATION
+    )
+    for copied in (migrated.model_copy(), migrated.model_copy(deep=True)):
+        assert resolve_belief_lifecycle(copied) == (
+            BeliefLifecycle.LEGACY_V01_MIGRATION
+        )
+
+    round_tripped = BeliefState.model_validate(
+        migrated.model_dump(mode="python")
+    )
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        resolve_belief_lifecycle(round_tripped)
+
+
+def test_native_public_fields_cannot_forge_legacy_migration_authority():
+    migrated = migrate_belief_state_v0_1(legacy_belief_state_payload())
+    native_payload = migrated.model_dump(mode="python")
+    native_payload["task_frame"]["framing_method"] = FramingMethod.EXPLICIT
+    native_payload["task_frame"]["framing_trace"] = {"source": "native_fixture"}
+    native = BeliefState.model_validate(native_payload)
+    forged = native.model_copy(
+        update={
+            "task_frame": native.task_frame.model_copy(
+                update={
+                    "framing_method": FramingMethod.LEGACY_MIGRATION,
+                    "framing_trace": {
+                        "migration": "belief_state_v0.1_to_v0.2"
+                    },
+                }
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        resolve_belief_lifecycle(forged)

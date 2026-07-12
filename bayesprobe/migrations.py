@@ -36,6 +36,42 @@ RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS = frozenset(
 )
 
 
+class _V01MigrationReceipt:
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_V01MigrationReceipt":
+        return self
+
+
+_V01_MIGRATION_RECEIPT = _V01MigrationReceipt()
+
+
+def _mark_v01_migration(state: BeliefState) -> BeliefState:
+    state._v01_migration_receipt = _V01_MIGRATION_RECEIPT
+    return state
+
+
+def _has_v01_migration_receipt(state: BeliefState) -> bool:
+    return state._v01_migration_receipt is _V01_MIGRATION_RECEIPT
+
+
+def _carry_v01_migration_receipt(
+    source: BeliefState,
+    target: BeliefState,
+) -> BeliefState:
+    source_frame = source.task_frame
+    target_frame = target.task_frame
+    if (
+        _has_v01_migration_receipt(source)
+        and source_frame is not None
+        and target_frame is not None
+        and source_frame.framing_method == FramingMethod.LEGACY_MIGRATION
+        and target_frame.framing_method == FramingMethod.LEGACY_MIGRATION
+        and source_frame.framing_trace.get("migration")
+        == target_frame.framing_trace.get("migration")
+    ):
+        target._v01_migration_receipt = _V01_MIGRATION_RECEIPT
+    return target
+
+
 class _V01Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -345,7 +381,7 @@ def migrate_belief_state_v0_1(payload: Any) -> BeliefState:
         if hypothesis_frame.coverage == HypothesisCoverage.EXHAUSTIVE
         else FrameAdequacyStatus.PROVISIONAL
     )
-    return BeliefState(
+    migrated = BeliefState(
         schema_version="v0.2",
         belief_state_id=legacy.belief_state_id,
         run_id=legacy.run_id,
@@ -371,6 +407,7 @@ def migrate_belief_state_v0_1(payload: Any) -> BeliefState:
         ),
         evidence_memory=EvidenceMemorySnapshot(),
     )
+    return _mark_v01_migration(migrated)
 
 
 __all__ = [

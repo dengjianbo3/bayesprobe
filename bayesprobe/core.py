@@ -8,10 +8,13 @@ from bayesprobe.belief import (
     summarize_hypotheses,
 )
 from bayesprobe.evidence import EvidenceIntegrationGate, EvidenceIntegrationResult
+from bayesprobe.evidence_memory import canonical_signal_identity_digest
 from bayesprobe.frame_policy import FrameAdequacyDecision, FrameAdequacyPolicy
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.ledger import JsonlLedgerStore
+from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
+from bayesprobe.migrations import _carry_v01_migration_receipt
 from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGateway
 from bayesprobe.schemas import (
     BeliefState,
@@ -20,6 +23,7 @@ from bayesprobe.schemas import (
     CycleRecord,
     CycleSignalShape,
     EvidenceEvent,
+    EvidenceMemorySnapshot,
     ExternalSignal,
     FrameMassUpdate,
     FramingMethod,
@@ -30,6 +34,7 @@ from bayesprobe.schemas import (
     ProbeCandidate,
     ProbeSet,
     SignalKind,
+    decode_discard_history_entry,
     utc_now,
 )
 from bayesprobe.task_framing import migrate_legacy_belief_state
@@ -82,6 +87,7 @@ class BayesProbeCore:
         signals: list[ExternalSignal],
     ) -> CycleResult:
         belief_state = migrate_legacy_belief_state(belief_state)
+        lifecycle = resolve_belief_lifecycle(belief_state)
         self._validate_cycle_boundary(cycle=cycle, belief_state=belief_state, probe_set=probe_set)
         inbox = self._create_signal_inbox(cycle)
         for signal in signals:
@@ -103,7 +109,11 @@ class BayesProbeCore:
             )
         )
         ledger_signals = integration.normalized_signals or normalized_signals
-        next_evidence_memory = integration.evidence_memory or belief_state.evidence_memory
+        next_evidence_memory = _resolve_next_evidence_memory(
+            lifecycle=lifecycle,
+            belief_state=belief_state,
+            integration=integration,
+        )
         evidence_events = mark_replayed_evidence_events(
             belief_state,
             integration.evidence_events,
@@ -231,6 +241,10 @@ class BayesProbeCore:
             }
         )
         updated_state = _deep_revalidate_final_belief_state(updated_state_payload)
+        updated_state = _carry_v01_migration_receipt(
+            belief_state,
+            updated_state,
+        )
         integrated_cycle = closed_cycle.model_copy(
             update={
                 "boundary_status": BoundaryStatus.INTEGRATED,
@@ -404,6 +418,80 @@ def _append_unique(existing: list[str], additions: list[str]) -> list[str]:
             result.append(item)
             seen.add(item)
     return result
+
+
+def _resolve_next_evidence_memory(
+    *,
+    lifecycle: BeliefLifecycle,
+    belief_state: BeliefState,
+    integration: EvidenceIntegrationResult,
+) -> EvidenceMemorySnapshot:
+    prior_ids = belief_state.ledger_refs.get("evidence_events", [])
+    new_events = _canonical_new_evidence_events(
+        prior_ids,
+        integration.evidence_events,
+    )
+    memory = integration.evidence_memory
+    if lifecycle == BeliefLifecycle.NATIVE_V02 and new_events:
+        if memory is None:
+            raise ValueError(
+                "native evidence integration requires coherent evidence memory"
+            )
+        try:
+            memory = EvidenceMemorySnapshot.model_validate(
+                memory.model_dump(mode="python")
+            )
+        except (TypeError, ValueError):
+            raise ValueError(
+                "native evidence integration requires coherent evidence memory"
+            ) from None
+        accepted_ids = set(memory.accepted_evidence_ids)
+        discarded = {
+            event_id: reason
+            for event_id, reason in (
+                decode_discard_history_entry(entry)
+                for entry in memory.discard_and_schema_history
+            )
+        }
+        bindings = memory.event_signal_identity_digests
+        normalized_signals = {
+            signal.id: signal
+            for signal in (integration.normalized_signals or [])
+        }
+        for event in new_events:
+            accepted = event.id in accepted_ids
+            discard_reason = discarded.get(event.id)
+            lifecycle_matches = (
+                event.discard_reason is None
+                and accepted
+                and discard_reason is None
+            ) or (
+                event.discard_reason is not None
+                and not accepted
+                and discard_reason == event.discard_reason
+            )
+            signal = normalized_signals.get(event.derived_from_signal)
+            try:
+                expected_binding = (
+                    None
+                    if signal is None
+                    else canonical_signal_identity_digest(signal)
+                )
+            except (TypeError, ValueError):
+                expected_binding = None
+            if (
+                not lifecycle_matches
+                or expected_binding is None
+                or bindings.get(event.id) != expected_binding
+            ):
+                raise ValueError(
+                    "native evidence integration requires coherent evidence memory"
+                )
+    if memory is None:
+        memory = belief_state.evidence_memory
+    if memory is None:
+        raise ValueError("belief state requires evidence memory")
+    return memory
 
 
 def _canonical_new_evidence_events(

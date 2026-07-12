@@ -119,6 +119,7 @@ class ModelBackedProbeToolGateway:
         provider_version = resolve_belief_lifecycle(
             context.belief_state
         ).provider_version
+        model_identity = model_gateway_identity(self._model_gateway)
         request = StructuredModelRequest(
             task="execute_probe",
             input={
@@ -157,7 +158,6 @@ class ModelBackedProbeToolGateway:
         payload = self._model_gateway.complete_structured(request)
         raw_content = _probe_raw_content(payload)
         adapter_kind = model_gateway_adapter_kind(self._model_gateway)
-        model_identity = model_gateway_identity(self._model_gateway)
         return [
             ExternalSignal(
                 id=f"S_{context.cycle_id}_{probe.id}",

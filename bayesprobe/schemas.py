@@ -13,6 +13,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -420,6 +421,16 @@ def validate_canonical_event_binding_id(value: str) -> str:
             "canonical event binding id must be non-empty, exact, and secret-free"
         )
     return value
+
+
+def validate_secret_free_provider_identity(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or contains_secret_material({value: None})
+    ):
+        raise ValueError("model gateway identity must not contain secret material")
+    return value.strip()
 
 
 def _reject_secret_string(value: str) -> None:
@@ -1283,6 +1294,8 @@ class Hypothesis(BaseModel):
 
 
 class BeliefState(BaseModel):
+    _v01_migration_receipt: object | None = PrivateAttr(default=None)
+
     schema_version: Literal["v0.1", "v0.2"] = "v0.1"
     belief_state_id: str
     run_id: str

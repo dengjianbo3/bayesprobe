@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import unicodedata
 
 import pytest
 
@@ -49,6 +50,7 @@ _NONLEGACY_FRAMING_METHODS = tuple(
 _INVALID_MIGRATION_ENVELOPES = (
     "bare_v01",
     "tag_only",
+    "forged_recognized_marker",
     "v01_belief_state",
     "v01_task_frame",
     "missing_trace",
@@ -56,6 +58,14 @@ _INVALID_MIGRATION_ENVELOPES = (
     "missing_frame_state",
     "missing_evidence_memory",
     "incoherent_frame_state",
+)
+_SECRET_MODEL_IDENTITIES = (
+    "Authorization: Bearer provider-secret-value-123",
+    (
+        "\uff21\uff55\uff54\uff48\uff4f\uff52\uff49\uff5a\uff41\uff54"
+        "\uff49\uff4f\uff4e\uff1a \uff22\uff45\uff41\uff52\uff45\uff52 "
+        "provider-secret-value-123"
+    ),
 )
 
 
@@ -176,6 +186,20 @@ def make_invalid_migration_envelope(kind: str) -> BeliefState:
             update={
                 "task_frame": native.task_frame.model_copy(
                     update={"framing_method": FramingMethod.LEGACY_MIGRATION}
+                )
+            }
+        )
+    if kind == "forged_recognized_marker":
+        return native.model_copy(
+            update={
+                "task_frame": native.task_frame.model_copy(
+                    update={
+                        "framing_method": FramingMethod.LEGACY_MIGRATION,
+                        "framing_trace": {
+                            **native.task_frame.framing_trace,
+                            "migration": "belief_state_v0.1_to_v0.2",
+                        },
+                    }
                 )
             }
         )
@@ -437,6 +461,34 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert signal.raw_content.startswith("A direct comparison")
     assert signal.provenance.provider_model_or_tool_identity == "scripted"
     assert signal.provenance.session_id == "run_exec"
+
+
+@pytest.mark.parametrize("model_identity", _SECRET_MODEL_IDENTITIES)
+def test_model_backed_probe_rejects_secret_identity_before_provider_call(
+    model_identity,
+):
+    model_gateway = ScriptedModelGateway(
+        responses={
+            "execute_probe": {"raw_content": "This must not be requested."}
+        }
+    )
+    model_gateway.model_identity = model_identity
+    state = make_native_belief_state()
+
+    with pytest.raises(ValueError, match="model gateway identity") as exc_info:
+        ModelBackedProbeToolGateway(model_gateway).execute_probe(
+            probe=make_probe("P_secret_identity", ["H1", "H2"]),
+            context=ProbeExecutionContext(
+                run_id="run_exec",
+                cycle_id="run_exec_cycle_1",
+                belief_state=state,
+            ),
+        )
+
+    error_text = str(exc_info.value)
+    assert model_identity not in error_text
+    assert unicodedata.normalize("NFKC", model_identity) not in error_text
+    assert model_gateway.requests == []
 
 
 @pytest.mark.parametrize("invalid_envelope", _INVALID_MIGRATION_ENVELOPES)

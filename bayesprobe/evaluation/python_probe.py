@@ -107,12 +107,14 @@ class PythonExecutionRequest:
     repair_attempt_index: int = 0
 
     def __post_init__(self) -> None:
-        for field_name in ("execution_id", "run_id", "cycle_id", "probe_id", "code"):
+        for field_name in ("execution_id", "run_id", "cycle_id", "probe_id"):
             value = _required_text(
                 getattr(self, field_name),
                 f"Python execution {field_name}",
             )
             object.__setattr__(self, field_name, value)
+        if not isinstance(self.code, str) or not self.code.strip():
+            raise ValueError("Python execution code must not be empty")
         if not isinstance(self.image, ResolvedSandboxImage):
             raise ValueError("Python execution image must be resolved")
         if type(self.repair_attempt_index) is not int or self.repair_attempt_index < 0:
@@ -188,7 +190,6 @@ def python_probe_plan_from_mapping(
     if mode == "python":
         if not isinstance(code, str) or not code.strip():
             raise ValueError("Python probe plan python mode requires non-empty code")
-        code = code.strip()
     elif code is not None:
         raise ValueError("Python probe plan reasoning mode must not contain code")
     return PythonProbePlan(
@@ -449,6 +450,7 @@ class PythonAugmentedProbeToolGateway:
         provider_version = resolve_belief_lifecycle(
             context.belief_state
         ).provider_version
+        model_identity = model_gateway_identity(self._model_gateway)
         try:
             plan = self._plan_probe(
                 probe=probe,
@@ -473,6 +475,7 @@ class PythonAugmentedProbeToolGateway:
                         probe=probe,
                         context=context,
                         provider_version=provider_version,
+                        model_identity=model_identity,
                     )
                 ]
             except Exception:
@@ -590,6 +593,7 @@ class PythonAugmentedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
         provider_version: Literal["v0.1", "v0.2"],
+        model_identity: str,
     ) -> ExternalSignal:
         payload = self._model_gateway.complete_structured(
             StructuredModelRequest(
@@ -610,7 +614,6 @@ class PythonAugmentedProbeToolGateway:
                 "reasoning probe signal raw_content must not be empty"
             )
         adapter_kind = model_gateway_adapter_kind(self._model_gateway)
-        model_identity = model_gateway_identity(self._model_gateway)
         return ExternalSignal(
             id=f"S_{context.cycle_id}_{probe.id}",
             cycle_id=context.cycle_id,
@@ -706,7 +709,7 @@ class PythonAugmentedProbeToolGateway:
         if not isinstance(payload, Mapping) or set(payload) != {"code"}:
             return None
         code = payload.get("code")
-        return code.strip() if isinstance(code, str) and code.strip() else None
+        return code if isinstance(code, str) and code.strip() else None
 
     def _resolved_image(self) -> ResolvedSandboxImage:
         if self._image is None:
