@@ -36,6 +36,11 @@ _MIGRATION_MARKERS = (
     "belief_state_v0.1_to_v0.2",
     "task_frame_v0.1_to_v0.2",
 )
+_NONLEGACY_FRAMING_METHODS = tuple(
+    method
+    for method in FramingMethod
+    if method != FramingMethod.LEGACY_MIGRATION
+)
 _INVALID_MIGRATION_ENVELOPES = (
     "tag_only",
     "v01_belief_state",
@@ -68,6 +73,15 @@ class CountingGateway:
             "interpretation": "The source favors A over B.",
             "quality_overrides": {},
         }
+
+
+class RecordingProvenanceNormalizer(SignalProvenanceNormalizer):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def normalize(self, signal, *, run_id):
+        self.calls.append(signal.id)
+        return super().normalize(signal, run_id=run_id)
 
 
 def _state():
@@ -1584,10 +1598,14 @@ def test_model_origin_caps_provider_labeled_source_claim_and_overrides():
 def test_native_judgment_request_contains_full_semantics_provenance_and_memory():
     gateway = CountingGateway()
     gate = EvidenceIntegrationGate(model_gateway=gateway)
+    state = _state()
+
+    assert state.task_frame.framing_trace == {"source": "answer_choices"}
+    assert "migration" not in state.task_frame.framing_trace
 
     result = gate.integrate(
         cycle=_cycle(1),
-        belief_state=_state(),
+        belief_state=state,
         probe_set=_probe_set(1),
         signals=[_signal("S_context", "The audited value supports A.")],
     )
@@ -1684,6 +1702,81 @@ def test_explicit_migration_route_completes_exact_legacy_shape_auditably(
     assert event.model_trace["metadata"]["judgment_route"] == (
         "legacy_v0.1_migration"
     )
+
+
+@pytest.mark.parametrize("framing_method", _NONLEGACY_FRAMING_METHODS)
+def test_migrated_marker_with_nonlegacy_method_rejects_before_evidence_side_effects(
+    framing_method,
+):
+    state = _migrated_state("belief_state_v0.1_to_v0.2")
+    state = state.model_copy(
+        update={
+            "task_frame": state.task_frame.model_copy(
+                update={"framing_method": framing_method}
+            )
+        }
+    )
+    gateway = CountingGateway()
+    normalizer = RecordingProvenanceNormalizer()
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        EvidenceIntegrationGate(
+            model_gateway=gateway,
+            provenance_normalizer=normalizer,
+        ).integrate(
+            cycle=_cycle(1),
+            belief_state=state,
+            probe_set=_probe_set(1),
+            signals=[_signal("S_migration_method_conflict", "Must not be judged.")],
+        )
+
+    assert gateway.requests == []
+    assert normalizer.calls == []
+    assert state.model_dump(mode="json") == prior_state
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        pytest.param("belief_state_v0.1_to_v0.2", id="recognized"),
+        pytest.param("caller_asserted", id="fake"),
+        pytest.param("", id="empty"),
+        pytest.param(7, id="non_string"),
+    ],
+)
+def test_native_migration_trace_key_rejects_before_evidence_side_effects(marker):
+    state = _state()
+    state = state.model_copy(
+        update={
+            "task_frame": state.task_frame.model_copy(
+                update={
+                    "framing_trace": {
+                        **state.task_frame.framing_trace,
+                        "migration": marker,
+                    }
+                }
+            )
+        }
+    )
+    gateway = CountingGateway()
+    normalizer = RecordingProvenanceNormalizer()
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        EvidenceIntegrationGate(
+            model_gateway=gateway,
+            provenance_normalizer=normalizer,
+        ).integrate(
+            cycle=_cycle(1),
+            belief_state=state,
+            probe_set=_probe_set(1),
+            signals=[_signal("S_native_migration_trace", "Must not be judged.")],
+        )
+
+    assert gateway.requests == []
+    assert normalizer.calls == []
+    assert state.model_dump(mode="json") == prior_state
 
 
 @pytest.mark.parametrize("invalid_envelope", _INVALID_MIGRATION_ENVELOPES)

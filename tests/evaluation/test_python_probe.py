@@ -38,6 +38,11 @@ _MIGRATION_MARKERS = (
     "belief_state_v0.1_to_v0.2",
     "task_frame_v0.1_to_v0.2",
 )
+_NONLEGACY_FRAMING_METHODS = tuple(
+    method
+    for method in FramingMethod
+    if method != FramingMethod.LEGACY_MIGRATION
+)
 _INVALID_MIGRATION_ENVELOPES = (
     "tag_only",
     "v01_belief_state",
@@ -933,6 +938,43 @@ def test_explicit_migration_uses_v01_for_every_python_model_route(
     assert migrated_state.task_frame.framing_trace["migration"] == migration_marker
     assert {request.prompt_version for request in requests} == {"v0.1"}
     assert {request.schema_version for request in requests} == {"v0.1"}
+
+
+@pytest.mark.parametrize("framing_method", _NONLEGACY_FRAMING_METHODS)
+def test_python_gateway_rejects_migrated_marker_with_nonlegacy_method(
+    framing_method,
+):
+    probe, context = probe_context()
+    state = migrated_python_belief_state(
+        context.belief_state,
+        "belief_state_v0.1_to_v0.2",
+    )
+    state = state.model_copy(
+        update={
+            "task_frame": state.task_frame.model_copy(
+                update={"framing_method": framing_method}
+            )
+        }
+    )
+    invalid_context = ProbeExecutionContext(
+        run_id=context.run_id,
+        cycle_id=context.cycle_id,
+        belief_state=state,
+        metadata=dict(context.metadata),
+    )
+    model = SequenceModelGateway([python_plan()])
+    sandbox = FakeSandbox([execution_record()])
+    gateway = PythonAugmentedProbeToolGateway(model, sandbox)
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        gateway.execute_probe(probe=probe, context=invalid_context)
+
+    assert model.requests == []
+    assert sandbox.preflight_calls == 0
+    assert sandbox.requests == []
+    assert set(gateway.process_metrics.values()) == {0}
+    assert state.model_dump(mode="json") == prior_state
 
 
 @pytest.mark.parametrize("invalid_envelope", _INVALID_MIGRATION_ENVELOPES)

@@ -47,12 +47,15 @@ def resolve_belief_lifecycle(belief_state: BeliefState) -> BeliefLifecycle:
     task_frame = validated.task_frame
     if task_frame is None:
         raise _invalid_lifecycle_error()
-    if task_frame.framing_method != FramingMethod.LEGACY_MIGRATION:
-        return BeliefLifecycle.NATIVE_V02
+    has_migration_marker = "migration" in task_frame.framing_trace
     marker = task_frame.framing_trace.get("migration")
-    if (
-        not isinstance(marker, str)
-        or marker not in RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS
-    ):
+    if task_frame.framing_method == FramingMethod.LEGACY_MIGRATION:
+        if (
+            not isinstance(marker, str)
+            or marker not in RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS
+        ):
+            raise _invalid_lifecycle_error()
+        return BeliefLifecycle.LEGACY_V01_MIGRATION
+    if has_migration_marker:
         raise _invalid_lifecycle_error()
-    return BeliefLifecycle.LEGACY_V01_MIGRATION
+    return BeliefLifecycle.NATIVE_V02

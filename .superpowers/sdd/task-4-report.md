@@ -660,3 +660,47 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 12
+
+### Changes
+
+- Made the shared lifecycle resolver inspect migration-key presence after deep
+  runtime-envelope validation and before selecting either provider route.
+- Kept legacy routing exact: `LEGACY_MIGRATION` requires a string marker from
+  `RECOGNIZED_V01_TO_V02_MIGRATION_MARKERS`. Every non-legacy framing method
+  now requires the `migration` key to be absent, regardless of its value.
+- Added concise parameterized consumer regressions for `EXPLICIT`, `MODEL`, and
+  `RECORDED` mutations of a real migrated state, plus recognized, fake, empty,
+  and non-string migration values on a native state.
+- Retained positive coverage for non-migration native trace metadata at v0.2
+  and both migration-writer markers at v0.1 across evidence, model-backed probe,
+  and Python-augmented probe routes.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_migrated_marker_with_nonlegacy_method_rejects_before_evidence_side_effects tests/test_evidence_memory.py::test_native_migration_trace_key_rejects_before_evidence_side_effects tests/test_evidence_memory.py::test_native_judgment_request_contains_full_semantics_provenance_and_memory tests/test_evidence_memory.py::test_explicit_migration_route_completes_exact_legacy_shape_auditably tests/test_probe_executor.py::test_model_backed_probe_rejects_migrated_marker_with_nonlegacy_method tests/test_probe_executor.py::test_model_backed_probe_gateway_uses_v01_only_for_explicit_migration tests/evaluation/test_python_probe.py::test_python_gateway_rejects_migrated_marker_with_nonlegacy_method tests/evaluation/test_python_probe.py::test_python_augmented_gateway_converts_successful_execution_to_active_signal tests/evaluation/test_python_probe.py::test_explicit_migration_uses_v01_for_every_python_model_route -q -p no:cacheprovider` -> `13 failed, 8 passed in 0.37s`.
+- GREEN: the same focused command -> `21 passed in 0.24s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `405 passed in 1.06s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `320 passed in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1206 passed, 10 skipped in 9.64s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- EvidenceGate rejects incoherent states before provenance normalization,
+  provider requests, or memory changes. ModelBackedProbe rejects before its
+  request, and PythonAugmented rejects before model, sandbox preflight,
+  execution, or process counters; every fixture also remains unchanged by
+  serialized state comparison.
+- The native check uses key membership, so recognized, fake, empty, non-string,
+  and null-like future values cannot select or masquerade as native. Other trace
+  metadata remains allowed because only the exact `migration` key is reserved.
+- Real migrated envelopes retain their original method and recognized marker,
+  and both migration paths continue to emit v0.1 requests. Ordinary native
+  envelopes without the key continue to emit v0.2 requests.
+
+### Concerns
+
+No blocking concerns.

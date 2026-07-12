@@ -41,6 +41,11 @@ _MIGRATION_MARKERS = (
     "belief_state_v0.1_to_v0.2",
     "task_frame_v0.1_to_v0.2",
 )
+_NONLEGACY_FRAMING_METHODS = tuple(
+    method
+    for method in FramingMethod
+    if method != FramingMethod.LEGACY_MIGRATION
+)
 _INVALID_MIGRATION_ENVELOPES = (
     "bare_v01",
     "tag_only",
@@ -481,6 +486,37 @@ def test_model_backed_probe_gateway_uses_v01_only_for_explicit_migration(
     assert migrated.task_frame.framing_trace["migration"] == migration_marker
     assert model_gateway.requests[0].prompt_version == "v0.1"
     assert model_gateway.requests[0].schema_version == "v0.1"
+
+
+@pytest.mark.parametrize("framing_method", _NONLEGACY_FRAMING_METHODS)
+def test_model_backed_probe_rejects_migrated_marker_with_nonlegacy_method(
+    framing_method,
+):
+    state = make_migrated_belief_state("belief_state_v0.1_to_v0.2")
+    state = state.model_copy(
+        update={
+            "task_frame": state.task_frame.model_copy(
+                update={"framing_method": framing_method}
+            )
+        }
+    )
+    model_gateway = ScriptedModelGateway(
+        responses={"execute_probe": {"raw_content": "Must not execute."}}
+    )
+    prior_state = state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        ModelBackedProbeToolGateway(model_gateway).execute_probe(
+            probe=make_probe("P_migration_method_conflict", ["H1", "H2"]),
+            context=ProbeExecutionContext(
+                run_id="run_exec",
+                cycle_id="run_exec_cycle_1",
+                belief_state=state,
+            ),
+        )
+
+    assert model_gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
 
 
 def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_empty():
