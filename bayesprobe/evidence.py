@@ -277,6 +277,10 @@ class EvidenceIntegrationGate:
                 native_v02=_is_native_v02_state(belief_state),
             )
             if event_id in prior_evidence_ids:
+                working_memory = self._memory_manager.remember_signal_identity(
+                    working_memory,
+                    signal,
+                )
                 evidence_events.append(
                     self._replayed_event(
                         event_id=event_id,

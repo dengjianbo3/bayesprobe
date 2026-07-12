@@ -150,5 +150,6 @@ def test_migrates_belief_state_with_frame_and_empty_memory():
     assert migrated.frame_state.active_hypothesis_ids == ["A", "B"]
     assert migrated.frame_state.adequacy_status == FrameAdequacyStatus.ADEQUATE
     assert migrated.evidence_memory is not None
+    assert migrated.evidence_memory.memory_version == 1
     assert migrated.evidence_memory.accepted_evidence_ids == []
     assert [item.answer_value for item in migrated.hypotheses] == [None, None]

@@ -2929,49 +2929,114 @@ def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
 
     assert len(gateway.requests) == 1
     assert replayed.evidence_events[0].discard_reason == "duplicate evidence event id"
-    assert replayed.belief_state.evidence_memory == prior_memory
+    replayed_memory = replayed.belief_state.evidence_memory
+    assert set(replayed_memory.content_fingerprints) == {"S_replay_1", "S_replay_2"}
+    assert replayed_memory.accepted_evidence_ids == prior_memory.accepted_evidence_ids
+    assert replayed_memory.discard_and_schema_history == prior_memory.discard_and_schema_history
+    assert replayed_memory.correlation_credit == prior_memory.correlation_credit
     assert replayed.belief_updates == []
     assert [
         record["payload"]["id"] for record in ledger.read_all("evidence_event")
     ] == [first.evidence_events[0].id]
 
 
-def test_replayed_signal_id_lineage_conflict_is_atomic_and_skips_provider(
+@pytest.mark.parametrize("conflict", ["source", "content", "root", "group"])
+def test_replayed_new_signal_identity_is_persisted_then_conflict_fails_atomically(
     tmp_path: Path,
+    conflict: str,
 ):
     gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
     ledger_path = tmp_path / "lineage-conflict-replay-ledger.jsonl"
     ledger = JsonlLedgerStore(ledger_path)
     core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
     cycle = make_cycle("cycle_lineage_conflict_replay")
-    signal = _memory_signal("S_reused_replay", "Stable audit result.", root="root-stable")
+    first_signal = _memory_signal(
+        "S_replay_original",
+        "Stable audit result.",
+        root="root-stable",
+    )
     first = core.integrate_cycle(
         cycle=cycle,
         belief_state=make_exact_belief_state(),
         probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[signal],
+        signals=[first_signal],
     )
-    prior_memory = first.belief_state.evidence_memory
-    prior_memory_payload = prior_memory.model_dump(mode="json")
-    prior_ledger = ledger_path.read_bytes()
-    conflicting_signal = signal.model_copy(
+    first_memory = first.belief_state.evidence_memory
+    replay_signal = _memory_signal(
+        "S_replay_new_identity",
+        "Stable audit result.",
+        root="root-stable",
+    )
+    replay_signal = replay_signal.model_copy(
         update={
-            "provenance": signal.provenance.model_copy(
-                update={"correlation_group": "changed-supplied-group"}
+            "provenance": replay_signal.provenance.model_copy(
+                update={"correlation_group": "replay-supplied-group"}
             )
         }
     )
+    replayed = core.integrate_cycle(
+        cycle=cycle.model_copy(update={"cycle_index": 2}),
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[replay_signal],
+    )
+    replayed_memory = replayed.belief_state.evidence_memory
+
+    assert len(gateway.requests) == 1
+    assert replayed.evidence_events[0].discard_reason == "duplicate evidence event id"
+    assert set(replayed_memory.content_fingerprints) == {
+        first_signal.id,
+        replay_signal.id,
+    }
+    assert json.loads(
+        replayed_memory.source_content_fingerprints[replay_signal.id]
+    )[2:] == ["source.example/audit", "replay-supplied-group"]
+    assert replayed_memory.accepted_evidence_ids == first_memory.accepted_evidence_ids
+    assert replayed_memory.discard_and_schema_history == first_memory.discard_and_schema_history
+    assert replayed_memory.correlation_credit == first_memory.correlation_credit
+
+    replayed_again = core.integrate_cycle(
+        cycle=cycle.model_copy(update={"cycle_index": 3}),
+        belief_state=replayed.belief_state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[replay_signal],
+    )
+
+    assert len(gateway.requests) == 1
+    assert replayed_again.belief_state.evidence_memory == replayed_memory
+
+    prior_memory_payload = replayed_again.belief_state.evidence_memory.model_dump(
+        mode="json"
+    )
+    prior_ledger = ledger_path.read_bytes()
+    signal_updates = {}
+    provenance_updates = {}
+    if conflict == "source":
+        provenance_updates["source_identity"] = "source.example/changed"
+    elif conflict == "content":
+        signal_updates["raw_content"] = "Changed audit result."
+    elif conflict == "root":
+        provenance_updates["derivation_root_id"] = "root-changed"
+    else:
+        provenance_updates["correlation_group"] = "changed-supplied-group"
+    signal_updates["provenance"] = replay_signal.provenance.model_copy(
+        update=provenance_updates
+    )
+    conflicting_signal = replay_signal.model_copy(update=signal_updates)
 
     with pytest.raises(ValueError, match="signal id lineage conflict"):
         core.integrate_cycle(
-            cycle=cycle.model_copy(update={"cycle_index": 2}),
-            belief_state=first.belief_state,
+            cycle=cycle.model_copy(update={"cycle_index": 4}),
+            belief_state=replayed_again.belief_state,
             probe_set=make_empty_probe_set(cycle.cycle_id),
             signals=[conflicting_signal],
         )
 
     assert len(gateway.requests) == 1
-    assert first.belief_state.evidence_memory.model_dump(mode="json") == prior_memory_payload
+    assert (
+        replayed_again.belief_state.evidence_memory.model_dump(mode="json")
+        == prior_memory_payload
+    )
     assert ledger_path.read_bytes() == prior_ledger
 
 

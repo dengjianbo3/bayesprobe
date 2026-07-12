@@ -498,6 +498,89 @@ def test_evidence_memory_discard_history_has_canonical_round_trip():
     assert restored.discard_and_schema_history == [entry]
 
 
+def test_v2_evidence_memory_preserves_canonical_and_supplied_groups():
+    fingerprint = "sha256:" + "a" * 64
+    identity = (
+        '["source.example/report","'
+        + fingerprint
+        + '","canonical-group","caller-supplied-group"]'
+    )
+    snapshot = EvidenceMemorySnapshot(
+        memory_version=2,
+        content_fingerprints={"S1": fingerprint},
+        source_content_fingerprints={"S1": identity},
+        derivation_roots={"S1": "root-1"},
+        correlation_credit={"canonical-group|H1|confirming": 0.4},
+    )
+
+    restored = EvidenceMemorySnapshot.model_validate(
+        snapshot.model_dump(mode="python")
+    )
+
+    assert restored == snapshot
+    assert restored.source_content_fingerprints["S1"] == identity
+
+
+def test_v2_evidence_memory_rejects_legacy_three_part_identity():
+    fingerprint = "sha256:" + "a" * 64
+
+    with pytest.raises(ValueError, match="source_content_fingerprints"):
+        EvidenceMemorySnapshot(
+            memory_version=2,
+            content_fingerprints={"S1": fingerprint},
+            source_content_fingerprints={
+                "S1": '["source.example/report","'
+                + fingerprint
+                + '","canonical-group"]'
+            },
+            derivation_roots={"S1": "root-1"},
+        )
+
+
+def test_v2_evidence_memory_keeps_canonical_source_group_invariant():
+    first_fingerprint = "sha256:" + "a" * 64
+    second_fingerprint = "sha256:" + "b" * 64
+
+    with pytest.raises(
+        ValueError,
+        match="source identity has conflicting canonical correlation groups",
+    ):
+        EvidenceMemorySnapshot(
+            memory_version=2,
+            content_fingerprints={
+                "S1": first_fingerprint,
+                "S2": second_fingerprint,
+            },
+            source_content_fingerprints={
+                "S1": '["shared-source","'
+                + first_fingerprint
+                + '","canonical-1","supplied-1"]',
+                "S2": '["shared-source","'
+                + second_fingerprint
+                + '","canonical-2","supplied-2"]',
+            },
+            derivation_roots={"S1": "root-1", "S2": "root-2"},
+        )
+
+
+def test_v1_evidence_memory_identity_remains_compatible():
+    fingerprint = "sha256:" + "a" * 64
+    identity = (
+        '["source.example/report","'
+        + fingerprint
+        + '","legacy-canonical-group"]'
+    )
+
+    snapshot = EvidenceMemorySnapshot(
+        memory_version=1,
+        content_fingerprints={"S1": fingerprint},
+        source_content_fingerprints={"S1": identity},
+        derivation_roots={"S1": "root-1"},
+    )
+
+    assert snapshot.source_content_fingerprints["S1"] == identity
+
+
 @pytest.mark.parametrize("value", [["E1", " e1 "], [""]])
 def test_evidence_memory_rejects_invalid_nested_counterevidence_ids(value):
     with pytest.raises(ValueError, match="counterevidence_ids_by_hypothesis"):

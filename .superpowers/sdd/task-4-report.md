@@ -390,3 +390,45 @@ instance changed.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 6
+
+### Changes
+
+- Versioned source-content identity memory from the legacy v1 triple to a v2
+  four-part value containing source, content fingerprint, stable canonical
+  credit group, and supplied provenance group. Legacy v1 triples remain
+  recursively valid and upgrade on the next identity write.
+- Added one identity-only `EvidenceMemoryManager` operation used by normal
+  commit and event-id replay. Replay now persists a previously unseen signal id
+  without changing accepted/discard history, directional credit, or provider
+  calls.
+- Kept canonical source/root accounting and credit keys on the stable canonical
+  group while validating signal-id continuity against the separately persisted
+  supplied group.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_supplied_group_replay_is_idempotent_while_credit_stays_canonical tests/test_core_cycles.py::test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record tests/test_core_cycles.py::test_replayed_new_signal_identity_is_persisted_then_conflict_fails_atomically tests/test_schemas.py::test_v2_evidence_memory_preserves_canonical_and_supplied_groups tests/test_schemas.py::test_v2_evidence_memory_rejects_legacy_three_part_identity tests/test_schemas.py::test_v1_evidence_memory_identity_remains_compatible tests/test_migrations.py::test_migrates_belief_state_with_frame_and_empty_memory -q -p no:cacheprovider` -> `5 failed, 2 passed in 0.33s`.
+- GREEN: the same command -> `7 passed in 0.25s`.
+- Strengthened regressions: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py::test_replayed_new_signal_identity_is_persisted_then_conflict_fails_atomically tests/test_evidence_memory.py::test_supplied_group_replay_is_idempotent_while_credit_stays_canonical tests/test_schemas.py::test_v2_evidence_memory_preserves_canonical_and_supplied_groups tests/test_schemas.py::test_v2_evidence_memory_rejects_legacy_three_part_identity tests/test_schemas.py::test_v2_evidence_memory_keeps_canonical_source_group_invariant tests/test_schemas.py::test_v1_evidence_memory_identity_remains_compatible tests/test_migrations.py::test_migrates_belief_state_with_frame_and_empty_memory -q -p no:cacheprovider` -> `10 passed in 0.27s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py -q -p no:cacheprovider` -> `305 passed in 0.69s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `303 passed in 0.41s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1114 passed, 10 skipped in 8.87s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- New-id event replay writes only the three identity maps and memory version;
+  accepted/discard lifecycle refs, directional credit, discovery/counterevidence
+  refs, and provider count remain unchanged. The returned belief state carries
+  S2, and changed S2 lineage fails before provider or ledger mutation.
+- Canonical and supplied groups remain distinct: source/root conflict checks and
+  all credit keys use the canonical field, identical supplied-group replay is
+  idempotent, and changing the supplied group for a recorded id fails closed.
+  V1 migration/default snapshots remain loadable and upgrade to exact v2 shape.
+
+### Concerns
+
+No blocking concerns.

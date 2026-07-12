@@ -872,6 +872,71 @@ def test_same_source_changing_declared_groups_shares_cumulative_credit():
     } == {"canonical-source-group"}
 
 
+def test_supplied_group_replay_is_idempotent_while_credit_stays_canonical():
+    manager = EvidenceMemoryManager()
+    normalizer = SignalProvenanceNormalizer()
+    memory = EvidenceMemorySnapshot()
+
+    signals = []
+    events = []
+    for index, supplied_group in enumerate(
+        ["canonical-source-group", "caller-supplied-group"],
+        start=1,
+    ):
+        raw_signal = _signal(
+            f"S_group_identity_{index}",
+            f"Distinct group identity observation {index}.",
+            root=f"root-group-identity-{index}",
+        )
+        raw_signal = raw_signal.model_copy(
+            update={
+                "provenance": raw_signal.provenance.model_copy(
+                    update={"correlation_group": supplied_group}
+                )
+            }
+        )
+        signal = normalizer.normalize(raw_signal, run_id="run_memory")
+        decision = manager.classify(
+            memory,
+            signal,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+            base_effective_weight=0.25,
+        )
+        event = EvidenceEvent(
+            id=f"E_group_identity_{index}",
+            derived_from_signal=signal.id,
+            target_hypotheses=["A"],
+            evidence_type=EvidenceType.SUPPORTING,
+            content=signal.raw_content,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+            correlation_status=decision.correlation_status,
+            effective_update_weight=decision.effective_update_weight,
+        )
+        memory = manager.commit(memory, signal=signal, event=event, decision=decision)
+        signals.append(signal)
+        events.append(event)
+
+    second_identity = json.loads(
+        memory.source_content_fingerprints[signals[1].id]
+    )
+    recommitted = manager.commit(
+        memory,
+        signal=signals[1],
+        event=events[1],
+        decision=manager.classify(memory, signals[1]),
+    )
+
+    assert memory.memory_version == 2
+    assert second_identity[2:] == [
+        "canonical-source-group",
+        "caller-supplied-group",
+    ]
+    assert memory.correlation_credit == {
+        "canonical-source-group|A|confirming": 0.5
+    }
+    assert recommitted == memory
+
+
 @pytest.mark.parametrize(
     ("source_identities", "derivation_roots", "expected_message"),
     [

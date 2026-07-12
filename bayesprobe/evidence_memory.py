@@ -30,6 +30,8 @@ CorrelationStatus = Literal[
     "correlated_novel",
 ]
 
+_CURRENT_MEMORY_VERSION = 2
+
 
 @dataclass(frozen=True)
 class EvidenceMemoryDecision:
@@ -152,13 +154,11 @@ class EvidenceMemoryManager:
             return
 
         prior_identity = _source_content_identity_parts(prior_source_content)
-        supplied_identity = (
-            provenance.source_identity,
-            provenance.canonical_content_fingerprint,
-            provenance.correlation_group,
-        )
         if (
-            prior_identity != supplied_identity
+            prior_identity is None
+            or prior_identity[0] != provenance.source_identity
+            or prior_identity[1] != provenance.canonical_content_fingerprint
+            or prior_identity[3] != provenance.correlation_group
             or prior_content != provenance.canonical_content_fingerprint
             or prior_root != provenance.derivation_root_id
             or (
@@ -168,6 +168,67 @@ class EvidenceMemoryManager:
             )
         ):
             raise ValueError("signal id lineage conflict")
+
+    def remember_signal_identity(
+        self,
+        snapshot: EvidenceMemorySnapshot,
+        signal: ExternalSignal,
+        *,
+        canonical_correlation_group: str | None = None,
+    ) -> EvidenceMemorySnapshot:
+        provenance = _required_provenance(signal)
+        prior_identities = {
+            signal_id: parts
+            for signal_id, value in snapshot.source_content_fingerprints.items()
+            if (parts := _source_content_identity_parts(value)) is not None
+        }
+        canonical_group = canonical_correlation_group or _canonical_correlation_group(
+            snapshot=snapshot,
+            provenance=provenance,
+            prior_identities=prior_identities,
+        )
+        self.validate_signal_lineage(
+            snapshot,
+            signal,
+            canonical_correlation_group=canonical_group,
+        )
+
+        content_fingerprints = dict(snapshot.content_fingerprints)
+        source_content_fingerprints = {
+            signal_id: _source_content_identity_from_parts(parts)
+            for signal_id, value in snapshot.source_content_fingerprints.items()
+            if (parts := _source_content_identity_parts(value)) is not None
+        }
+        derivation_roots = dict(snapshot.derivation_roots)
+        content_fingerprints[signal.id] = provenance.canonical_content_fingerprint
+        source_content_fingerprints[signal.id] = _source_content_identity(
+            provenance,
+            correlation_group=canonical_group,
+        )
+        derivation_roots[signal.id] = provenance.derivation_root_id
+
+        if (
+            snapshot.memory_version >= _CURRENT_MEMORY_VERSION
+            and content_fingerprints == snapshot.content_fingerprints
+            and source_content_fingerprints == snapshot.source_content_fingerprints
+            and derivation_roots == snapshot.derivation_roots
+        ):
+            return snapshot
+
+        return EvidenceMemorySnapshot(
+            memory_version=max(snapshot.memory_version, _CURRENT_MEMORY_VERSION),
+            accepted_evidence_ids=list(snapshot.accepted_evidence_ids),
+            content_fingerprints=content_fingerprints,
+            source_content_fingerprints=source_content_fingerprints,
+            derivation_roots=derivation_roots,
+            correlation_credit=dict(snapshot.correlation_credit),
+            discovery_evidence_ids=list(snapshot.discovery_evidence_ids),
+            counterevidence_ids_by_hypothesis={
+                hypothesis_id: list(evidence_ids)
+                for hypothesis_id, evidence_ids in snapshot.counterevidence_ids_by_hypothesis.items()
+            },
+            discard_and_schema_history=list(snapshot.discard_and_schema_history),
+        )
 
     def classify(
         self,
@@ -283,8 +344,7 @@ class EvidenceMemoryManager:
         event: EvidenceEvent,
         decision: EvidenceMemoryDecision,
     ) -> EvidenceMemorySnapshot:
-        provenance = _required_provenance(signal)
-        self.validate_signal_lineage(
+        snapshot = self.remember_signal_identity(
             snapshot,
             signal,
             canonical_correlation_group=decision.canonical_correlation_group,
@@ -305,16 +365,6 @@ class EvidenceMemoryManager:
                 encode_discard_history_entry(event.id, event.discard_reason)
             )
 
-        content_fingerprints = dict(snapshot.content_fingerprints)
-        source_content_fingerprints = dict(snapshot.source_content_fingerprints)
-        derivation_roots = dict(snapshot.derivation_roots)
-        content_fingerprints[signal.id] = provenance.canonical_content_fingerprint
-        source_content_fingerprints[signal.id] = _source_content_identity(
-            provenance,
-            correlation_group=decision.canonical_correlation_group,
-        )
-        derivation_roots[signal.id] = provenance.derivation_root_id
-
         cap = self._policy.max_cumulative_effective_weight_per_direction
         correlation_credit = dict(snapshot.correlation_credit)
         if event.discard_reason is None and decision.effective_update_weight > 0:
@@ -333,9 +383,9 @@ class EvidenceMemoryManager:
         return EvidenceMemorySnapshot(
             memory_version=snapshot.memory_version,
             accepted_evidence_ids=accepted_ids,
-            content_fingerprints=content_fingerprints,
-            source_content_fingerprints=source_content_fingerprints,
-            derivation_roots=derivation_roots,
+            content_fingerprints=dict(snapshot.content_fingerprints),
+            source_content_fingerprints=dict(snapshot.source_content_fingerprints),
+            derivation_roots=dict(snapshot.derivation_roots),
             correlation_credit=correlation_credit,
             discovery_evidence_ids=list(snapshot.discovery_evidence_ids),
             counterevidence_ids_by_hypothesis=counterevidence,
@@ -474,31 +524,41 @@ def _source_content_identity(
             provenance.source_identity,
             provenance.canonical_content_fingerprint,
             correlation_group or provenance.correlation_group,
+            provenance.correlation_group,
         ],
         ensure_ascii=False,
         separators=(",", ":"),
     )
 
 
-def _source_content_identity_parts(value: str) -> tuple[str, str, str] | None:
+def _source_content_identity_parts(
+    value: str,
+) -> tuple[str, str, str, str] | None:
     try:
         parsed = json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return None
     if (
         not isinstance(parsed, list)
-        or len(parsed) != 3
+        or len(parsed) not in {3, 4}
         or not all(isinstance(item, str) for item in parsed)
     ):
         return None
-    return parsed[0], parsed[1], parsed[2]
+    supplied_group = parsed[3] if len(parsed) == 4 else parsed[2]
+    return parsed[0], parsed[1], parsed[2], supplied_group
+
+
+def _source_content_identity_from_parts(
+    parts: tuple[str, str, str, str],
+) -> str:
+    return json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
 
 
 def _canonical_correlation_group(
     *,
     snapshot: EvidenceMemorySnapshot,
     provenance: SignalProvenance,
-    prior_identities: dict[str, tuple[str, str, str]],
+    prior_identities: dict[str, tuple[str, str, str, str]],
 ) -> str:
     known_groups = {
         prior_identities[signal_id][2]

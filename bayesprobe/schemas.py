@@ -577,28 +577,37 @@ def _is_canonical_content_fingerprint(value: str) -> bool:
 
 def _canonical_source_content_identity_parts(
     value: str,
-) -> tuple[str, str, str] | None:
+    *,
+    memory_version: int,
+) -> tuple[str, str, str, str] | None:
     try:
         parsed = json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return None
     if (
         not isinstance(parsed, list)
-        or len(parsed) != 3
+        or len(parsed) != (3 if memory_version == 1 else 4)
         or not all(
             isinstance(item, str) and item.strip() == item and item
             for item in parsed
         )
     ):
         return None
-    source_identity, fingerprint, correlation_group = parsed
+    source_identity, fingerprint, correlation_group = parsed[:3]
+    supplied_correlation_group = parsed[3] if len(parsed) == 4 else correlation_group
     if (
         not _is_canonical_content_fingerprint(fingerprint)
         or "|" in correlation_group
+        or "|" in supplied_correlation_group
         or json.dumps(parsed, ensure_ascii=False, separators=(",", ":")) != value
     ):
         return None
-    return source_identity, fingerprint, correlation_group
+    return (
+        source_identity,
+        fingerprint,
+        correlation_group,
+        supplied_correlation_group,
+    )
 
 
 def _valid_correlation_credit_key(value: str) -> bool:
@@ -735,12 +744,15 @@ class EvidenceMemorySnapshot(StrictTaskModel):
                     "content_fingerprints must use canonical SHA-256 identities"
                 )
             identity = self.source_content_fingerprints[signal_id]
-            parts = _canonical_source_content_identity_parts(identity)
+            parts = _canonical_source_content_identity_parts(
+                identity,
+                memory_version=self.memory_version,
+            )
             if parts is None or parts[1] != fingerprint:
                 raise ValueError(
                     "source_content_fingerprints must use exact canonical identities"
                 )
-            source_identity, _, correlation_group = parts
+            source_identity, _, correlation_group, _ = parts
             groups_by_source.setdefault(source_identity, set()).add(correlation_group)
             groups_by_root.setdefault(self.derivation_roots[signal_id], set()).add(
                 correlation_group
