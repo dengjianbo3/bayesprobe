@@ -2247,18 +2247,34 @@ def _commit_self_declared_transition(
     credit_key = (
         f"{canonical.canonical_correlation_group}|H1|confirming"
     )
-    declared = evidence_memory.EvidenceMemoryDecision(
-        correlation_status=event.correlation_status,
-        effective_update_weight=event.effective_update_weight,
-        discard_reason=event.discard_reason,
-        remaining_credit={credit_key: 1.0 - resulting_used_credit},
+    identity_memory = manager.remember_signal_identity(
+        prior_memory,
+        signal,
         canonical_correlation_group=canonical.canonical_correlation_group,
     )
-    return manager.commit(
-        prior_memory,
-        signal=signal,
-        event=event,
-        decision=declared,
+    accepted_ids = list(identity_memory.accepted_evidence_ids)
+    discard_history = list(identity_memory.discard_and_schema_history)
+    if event.discard_reason is None:
+        accepted_ids.append(event.id)
+    else:
+        discard_history.append(
+            encode_discard_history_entry(event.id, event.discard_reason)
+        )
+    bindings = dict(identity_memory.event_signal_identity_digests)
+    bindings[event.id] = evidence_memory.canonical_signal_identity_digest(
+        signal
+    )
+    correlation_credit = dict(identity_memory.correlation_credit)
+    correlation_credit[credit_key] = resulting_used_credit
+    return EvidenceMemorySnapshot.model_validate(
+        identity_memory.model_copy(
+            update={
+                "accepted_evidence_ids": accepted_ids,
+                "discard_and_schema_history": discard_history,
+                "event_signal_identity_digests": bindings,
+                "correlation_credit": correlation_credit,
+            }
+        ).model_dump(mode="python")
     )
 
 
@@ -3050,6 +3066,193 @@ def test_core_default_credit_policy_behavior_is_unchanged():
 
     assert result.evidence_events[0].effective_update_weight == pytest.approx(
         0.4608
+    )
+
+
+def _directional_projection_transition_fixture(*, cumulative: bool):
+    policy = CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=0.15
+    )
+    state = make_exact_belief_state()
+    manager = evidence_memory.EvidenceMemoryManager(policy)
+    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
+        ExternalSignal(
+            id="S_core_directional_projection",
+            cycle_id="pending",
+            signal_kind=SignalKind.ACTIVE,
+            source_type="external_agent_projection",
+            source="agent-a",
+            raw_content="Agent A and cited source X both support H1.",
+            initial_target_hypotheses=["H1"],
+        ),
+        run_id=state.run_id,
+    )
+    likelihoods = {"H1": LikelihoodBand.MODERATELY_CONFIRMING}
+    event_specs = [
+        (
+            "E_core_directional_projection",
+            EvidenceType.SENDER_JUDGMENT,
+            {
+                "reliability": 0.55,
+                "independence": 0.45,
+                "relevance": 0.75,
+                "novelty": 0.6,
+                "specificity": 0.6,
+                "verifiability": 0.4,
+            },
+        ),
+        (
+            "E_core_directional_projection_source",
+            EvidenceType.SOURCE_CLAIM,
+            {
+                "reliability": 0.5,
+                "independence": 0.45,
+                "relevance": 0.7,
+                "novelty": 0.6,
+                "specificity": 0.6,
+                "verifiability": 0.4,
+            },
+        ),
+    ]
+    prior = state.evidence_memory
+    working = prior
+    events = []
+
+    for event_id, event_type, quality in event_specs:
+        credit_kwargs = {"credit_snapshot": working} if cumulative else {}
+        decision = manager.classify(
+            prior,
+            signal,
+            likelihoods=likelihoods,
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            frame_version=state.frame_state.frame_version,
+            base_effective_weight=(
+                quality["reliability"]
+                * quality["independence"]
+                * quality["relevance"]
+                * quality["novelty"]
+            ),
+            **credit_kwargs,
+        )
+        event = EvidenceEvent(
+            schema_version="v0.2",
+            id=event_id,
+            derived_from_signal=signal.id,
+            epistemic_origin=signal.provenance.epistemic_origin,
+            derivation_root_id=signal.provenance.derivation_root_id,
+            target_hypotheses=["H1"],
+            evidence_type=event_type,
+            content=signal.raw_content,
+            likelihoods=likelihoods,
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            frame_fit=FrameFit.UNDERDETERMINED,
+            interpretation="Directional projection transition fixture.",
+            correlation_status=decision.correlation_status,
+            effective_update_weight=decision.effective_update_weight,
+            discard_reason=decision.discard_reason,
+            **quality,
+        )
+        events.append(event)
+        if cumulative:
+            working = manager.commit(
+                working,
+                signal=signal,
+                event=event,
+                decision=decision,
+            )
+
+    if not cumulative:
+        identity_memory = manager.remember_signal_identity(prior, signal)
+        digest = evidence_memory.canonical_signal_identity_digest(signal)
+        credit_key = (
+            f"{signal.provenance.correlation_group}|H1|confirming"
+        )
+        working = EvidenceMemorySnapshot.model_validate(
+            identity_memory.model_copy(
+                update={
+                    "accepted_evidence_ids": [event.id for event in events],
+                    "event_signal_identity_digests": {
+                        event.id: digest for event in events
+                    },
+                    "correlation_credit": {
+                        credit_key: events[-1].effective_update_weight
+                    },
+                }
+            ).model_dump(mode="python")
+        )
+
+    return policy, state, signal, events, working
+
+
+def test_core_accepts_cumulative_projection_credit_and_bounds_solver_weight(
+    tmp_path: Path,
+):
+    policy, state, signal, events, candidate = (
+        _directional_projection_transition_fixture(cumulative=True)
+    )
+    core = SuppliedIntegrationCore(
+        EvidenceIntegrationResult(
+            evidence_events=events,
+            probe_candidates=[],
+            evidence_memory=candidate,
+            normalized_signals=[signal],
+        ),
+        ledger=JsonlLedgerStore(tmp_path / "cumulative-projection-credit.jsonl"),
+        correlation_credit_policy=policy,
+    )
+    real_solver = core._belief_solver
+
+    class CapturingSolver:
+        received_weights = []
+
+        def solve(self, belief_state, received_events, **kwargs):
+            self.received_weights = [
+                event.effective_update_weight for event in received_events
+            ]
+            return real_solver.solve(belief_state, received_events, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_solver, name)
+
+    solver = CapturingSolver()
+    core._belief_solver = solver
+    cycle = make_cycle("cycle_cumulative_projection_credit")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[signal],
+    )
+
+    assert solver.received_weights == pytest.approx([0.111375, 0.038625])
+    assert sum(solver.received_weights) == pytest.approx(0.15)
+    assert result.belief_state.evidence_memory == candidate
+    assert list(candidate.correlation_credit.values()) == [pytest.approx(0.15)]
+
+
+def test_core_rejects_stale_multi_event_credit_pair_atomically(tmp_path: Path):
+    policy, state, signal, events, stale_candidate = (
+        _directional_projection_transition_fixture(cumulative=False)
+    )
+
+    assert [event.effective_update_weight for event in events] == pytest.approx(
+        [0.111375, 0.0945]
+    )
+    assert list(stale_candidate.correlation_credit.values()) == [
+        pytest.approx(0.0945)
+    ]
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name="stale_multi_event_credit_pair",
+        state=state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=events,
+            probe_candidates=[],
+            evidence_memory=stale_candidate,
+            normalized_signals=[signal],
+        ),
+        correlation_credit_policy=policy,
     )
 
 

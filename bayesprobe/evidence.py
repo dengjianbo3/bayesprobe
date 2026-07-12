@@ -233,7 +233,8 @@ class EvidenceIntegrationGate:
                     event=event,
                     signal=signal,
                     belief_state=belief_state,
-                    snapshot=classification_snapshot,
+                    identity_snapshot=classification_snapshot,
+                    credit_snapshot=working_memory,
                 )
                 working_memory = self._memory_manager.commit(
                     working_memory,
@@ -397,11 +398,13 @@ class EvidenceIntegrationGate:
         event: EvidenceEvent,
         signal: ExternalSignal,
         belief_state: BeliefState,
-        snapshot: EvidenceMemorySnapshot,
+        identity_snapshot: EvidenceMemorySnapshot,
+        credit_snapshot: EvidenceMemorySnapshot,
     ) -> tuple[EvidenceEvent, EvidenceMemoryDecision]:
         decision = self._memory_manager.classify(
-            snapshot,
+            identity_snapshot,
             signal,
+            credit_snapshot=credit_snapshot,
             likelihoods=event.likelihoods,
             unresolved_likelihood=event.unresolved_likelihood,
             frame_version=(

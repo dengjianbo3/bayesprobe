@@ -135,3 +135,7 @@
 ## Twenty-first full-range re-review finding
 
 1. Every model-backed execution path must derive and validate the complete model-origin machine provenance keys before its first provider call. Do not interpolate the raw audit identity into a provisional `correlation_group`: an otherwise valid exact model identifier containing the reserved `|` delimiter must use the same digest-based source/group keys as final normalization and must not fail only after provider work. Cover direct probe execution and Python planning/reasoning/repair call order with zero-call preflight regressions.
+
+## Twenty-second full-range re-review finding
+
+1. Multi-event projection signals must consume directional correlation credit cumulatively across every accepted event. Preserve one pre-signal identity snapshot so all events share the intended same-signal correlation classification, but calculate each event's remaining directional credit from the memory produced by prior events. A later event cannot overwrite consumed credit with an absolute value derived from a stale snapshot; combined solver weight and persisted credit must remain bounded by the configured cross-cycle cap in both production and Core transition reconstruction.

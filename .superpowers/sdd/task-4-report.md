@@ -1850,3 +1850,102 @@ performed work, while all shared source cases failed because the API was absent.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 27
+
+### Design Decision
+
+- `EvidenceMemoryManager.classify` now treats its existing `snapshot` argument
+  as the pre-signal identity/classification snapshot and accepts an optional
+  `credit_snapshot`. Omitting the new argument preserves the prior one-snapshot
+  API; supplying it reads directional balances from the current working memory
+  without allowing the first event from a signal to make later events look like
+  `duplicate_exact`.
+- `EvidenceIntegrationGate` freezes one identity snapshot before processing a
+  signal's events and passes the memory produced by each prior event as the next
+  credit snapshot. `EvidenceMemoryManager.validate_transition` reconstructs the
+  transaction through the same interface and order.
+- `commit` no longer writes the absolute value `cap - remaining`. It derives
+  each next balance as `prior_used + effective_update_weight`, verifies the
+  decision's remaining credit against that cumulative result, rejects an
+  over-cap or stale decision, and preserves every untouched key. Existing-event
+  replay still returns before credit commitment, and accepted neutral evidence
+  with no directional keys still leaves all balances unchanged.
+
+### Changed Files
+
+- `bayesprobe/evidence_memory.py`
+- `bayesprobe/evidence.py`
+- `tests/test_evidence_memory.py`
+- `tests/test_core_cycles.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_same_signal_events_freeze_identity_but_advance_directional_credit tests/test_evidence_memory.py::test_same_signal_multi_hypothesis_credit_uses_shared_current_minimum tests/test_evidence_memory.py::test_same_signal_opposite_directions_use_independent_credit_keys tests/test_evidence_memory.py::test_direct_commit_rejects_stale_directional_credit_decision tests/test_evidence_memory.py::test_memory_transition_reconstructs_projection_credit_cumulatively tests/test_evidence_memory.py::test_memory_transition_validator_accepts_projection_two_event_reconstruction tests/test_core_cycles.py::test_core_accepts_cumulative_projection_credit_and_bounds_solver_weight tests/test_core_cycles.py::test_core_rejects_stale_multi_event_credit_pair_atomically -q --tb=short -p no:cacheprovider
+```
+
+Result: `8 failed, 1 passed in 0.51s`. Six cases failed because `classify`
+did not accept a current credit snapshot, direct `commit` accepted a stale
+decision, and Core accepted a self-consistent primary/source pair whose two
+solver weights exceeded the configured cap while persisted used credit rolled
+back from `0.111375` to `0.0945`. The unchanged neutral production projection
+control passed.
+
+- GREEN/refactor: the same focused command -> `9 passed in 0.34s`.
+- The first directly affected suite run exposed two older adversarial fixtures
+  that used production `commit` to manufacture impossible over-cap snapshots:
+  `2 failed, 358 passed in 1.90s`. Those fixtures now construct their invalid
+  candidate snapshots explicitly so Core remains independently tested while
+  manager-level fail-closed behavior stays intact.
+- Final directly affected suites:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_core_cycles.py tests/test_probe_executor.py -q --tb=short -p
+  no:cacheprovider` -> `360 passed in 1.92s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_probe_executor.py tests/evaluation/test_python_probe.py
+  tests/test_evidence_memory.py tests/test_core_cycles.py -q -p
+  no:cacheprovider` -> `520 passed in 2.29s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.41s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1414 passed, 10 skipped in 11.79s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before the
+  report; both are repeated after the report and the range check after commit.
+
+### Self-Review
+
+- Default cap, configured `0.2`/`0.15` caps, prior cross-cycle usage, and
+  saturation are covered. For one signal/direction, accepted event weights plus
+  prior usage reach but never exceed the configured cap; the next event is
+  ledger-visible with zero weight and `correlation_credit_saturated` discard
+  semantics.
+- Multi-hypothesis decisions still use the minimum remaining balance shared by
+  all affected subjects. Confirming and disconfirming keys remain independent.
+  Exact duplicate, same-root restatement, replay, low-reliability, same-batch
+  duplicate, and ordinary projection regressions remain green in the focused
+  and full suites.
+- Both events from the custom projection retain the same pre-signal `novel`
+  classification. The accepted transition advances weights to `0.111375` and
+  `0.038625`, persists exactly `0.15`, and Core's captured solver input sums to
+  the same cap.
+- The stale custom pair declares `0.111375` and `0.0945` while persisting only
+  `0.0945`; transition reconstruction rejects it before solver, state, or
+  ledger mutation. Direct manager commitment independently rejects equivalent
+  stale remaining-credit arithmetic.
+- Production projection source claims remain neutral, and neutral events do not
+  touch directional balances. Existing-event replay still performs only its
+  established identity-only operation before returning.
+
+### Concerns
+
+No blocking concerns.

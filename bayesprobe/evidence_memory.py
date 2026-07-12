@@ -605,6 +605,7 @@ class EvidenceMemoryManager:
                 decision = self.classify(
                     classification_snapshot,
                     signal,
+                    credit_snapshot=expected,
                     likelihoods=event.likelihoods,
                     unresolved_likelihood=event.unresolved_likelihood,
                     frame_version=frame_version,
@@ -661,12 +662,16 @@ class EvidenceMemoryManager:
         snapshot: EvidenceMemorySnapshot,
         signal: ExternalSignal,
         *,
+        credit_snapshot: EvidenceMemorySnapshot | None = None,
         likelihoods: dict[str, LikelihoodBand] | None = None,
         unresolved_likelihood: LikelihoodBand | None = None,
         frame_version: int = 1,
         base_effective_weight: float = 0.0,
     ) -> EvidenceMemoryDecision:
         _require_supported_memory_version(snapshot)
+        if credit_snapshot is None:
+            credit_snapshot = snapshot
+        _require_supported_memory_version(credit_snapshot)
         provenance = _required_provenance(signal)
         prior_identities = {
             signal_id: parts
@@ -721,13 +726,16 @@ class EvidenceMemoryManager:
         )
         if credit_keys:
             remaining_before = {
-                key: max(cap - snapshot.correlation_credit.get(key, 0.0), 0.0)
+                key: max(
+                    cap - credit_snapshot.correlation_credit.get(key, 0.0),
+                    0.0,
+                )
                 for key in credit_keys
             }
         elif likelihoods is None and unresolved_likelihood is None:
             remaining_before = {
                 key: max(cap - used, 0.0)
-                for key, used in snapshot.correlation_credit.items()
+                for key, used in credit_snapshot.correlation_credit.items()
                 if key.startswith(group_prefix)
             }
         else:
@@ -795,11 +803,11 @@ class EvidenceMemoryManager:
         )
         event_signal_identity_digests[event.id] = signal_identity_digest
 
-        cap = self._policy.max_cumulative_effective_weight_per_direction
-        correlation_credit = dict(snapshot.correlation_credit)
-        if event.discard_reason is None and decision.effective_update_weight > 0:
-            for key, remaining in decision.remaining_credit.items():
-                correlation_credit[key] = cap - remaining
+        correlation_credit = self._commit_correlation_credit(
+            snapshot,
+            event=event,
+            decision=decision,
+        )
 
         counterevidence = {
             hypothesis_id: list(evidence_ids)
@@ -822,6 +830,53 @@ class EvidenceMemoryManager:
             counterevidence_ids_by_hypothesis=counterevidence,
             discard_and_schema_history=discard_history,
         )
+
+    def _commit_correlation_credit(
+        self,
+        snapshot: EvidenceMemorySnapshot,
+        *,
+        event: EvidenceEvent,
+        decision: EvidenceMemoryDecision,
+    ) -> dict[str, float]:
+        correlation_credit = dict(snapshot.correlation_credit)
+        if (
+            event.discard_reason is not None
+            or decision.effective_update_weight <= 0
+            or not decision.remaining_credit
+        ):
+            return correlation_credit
+
+        cap = self._policy.max_cumulative_effective_weight_per_direction
+        weight = decision.effective_update_weight
+        for key, remaining in decision.remaining_credit.items():
+            prior_used = correlation_credit.get(key, 0.0)
+            used_after = prior_used + weight
+            if used_after > cap and not math.isclose(
+                used_after,
+                cap,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "directional correlation credit decision is inconsistent"
+                )
+            used_after = min(used_after, cap)
+            expected_remaining = max(cap - used_after, 0.0)
+            if not math.isclose(
+                remaining,
+                expected_remaining,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "directional correlation credit decision is inconsistent"
+                )
+            if used_after < prior_used:
+                raise ValueError(
+                    "directional correlation credit decision is inconsistent"
+                )
+            correlation_credit[key] = used_after
+        return correlation_credit
 
 
 def _origin_for(signal: ExternalSignal) -> EpistemicOrigin:

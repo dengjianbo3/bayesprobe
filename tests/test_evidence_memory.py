@@ -25,6 +25,7 @@ from bayesprobe.schemas import (
     EvidenceType,
     ExternalSignal,
     FramingMethod,
+    FrameFit,
     LikelihoodBand,
     ProbeSet,
     SignalKind,
@@ -1097,7 +1098,110 @@ def test_memory_transition_validator_accepts_projection_two_event_reconstruction
     )
 
     assert len(result.evidence_events) == 2
+    sender_event, source_event = result.evidence_events
+    assert sender_event.correlation_status == source_event.correlation_status
+    assert set(source_event.likelihoods.values()) == {LikelihoodBand.NEUTRAL}
     assert validated == result.evidence_memory
+
+
+def test_memory_transition_reconstructs_projection_credit_cumulatively():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.15
+        )
+    )
+    prior = EvidenceMemorySnapshot()
+    signal = SignalProvenanceNormalizer().normalize(
+        ExternalSignal(
+            id="S_directional_projection_transition",
+            cycle_id="pending",
+            signal_kind=SignalKind.PASSIVE,
+            source_type="external_agent_projection",
+            source="agent-a",
+            raw_content="Agent A cites source X and both claims support A.",
+            initial_target_hypotheses=["A"],
+        ),
+        run_id="run_memory",
+    )
+    likelihoods = {"A": LikelihoodBand.MODERATELY_CONFIRMING}
+    event_specs = [
+        (
+            "E_directional_projection_transition",
+            EvidenceType.SENDER_JUDGMENT,
+            {
+                "reliability": 0.55,
+                "independence": 0.45,
+                "relevance": 0.75,
+                "novelty": 0.6,
+                "specificity": 0.6,
+                "verifiability": 0.4,
+            },
+        ),
+        (
+            "E_directional_projection_transition_source",
+            EvidenceType.SOURCE_CLAIM,
+            {
+                "reliability": 0.5,
+                "independence": 0.45,
+                "relevance": 0.7,
+                "novelty": 0.6,
+                "specificity": 0.6,
+                "verifiability": 0.4,
+            },
+        ),
+    ]
+    identity_snapshot = prior
+    working = prior
+    events = []
+
+    for event_id, event_type, quality in event_specs:
+        decision = manager.classify(
+            identity_snapshot,
+            signal,
+            credit_snapshot=working,
+            likelihoods=likelihoods,
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            base_effective_weight=(
+                quality["reliability"]
+                * quality["independence"]
+                * quality["relevance"]
+                * quality["novelty"]
+            ),
+        )
+        event = _directional_memory_event(
+            signal=signal,
+            event_id=event_id,
+            decision=decision,
+            likelihoods=likelihoods,
+            event_type=event_type,
+            quality=quality,
+        )
+        working = manager.commit(
+            working,
+            signal=signal,
+            event=event,
+            decision=decision,
+        )
+        events.append(event)
+
+    validated = manager.validate_transition(
+        prior,
+        working,
+        evidence_events=events,
+        normalized_signals=[signal],
+        existing_evidence_ids=[],
+        frame_version=1,
+    )
+
+    assert [event.correlation_status for event in events] == ["novel", "novel"]
+    assert [event.effective_update_weight for event in events] == pytest.approx(
+        [0.111375, 0.038625]
+    )
+    assert validated.correlation_credit == {
+        f"{signal.provenance.correlation_group}|A|confirming": pytest.approx(
+            0.15
+        )
+    }
 
 
 def test_memory_transition_rejects_each_projection_event_content_rewrite():
@@ -1458,6 +1562,288 @@ def test_credit_keys_include_direction_subject_and_internal_unresolved_subject()
         f"{group}|frame:3:unresolved|confirming": 0.4,
     }
     assert "H_other" not in repr(decision.remaining_credit)
+
+
+def _directional_memory_event(
+    *,
+    signal: ExternalSignal,
+    event_id: str,
+    decision: evidence_memory.EvidenceMemoryDecision,
+    likelihoods: dict[str, LikelihoodBand],
+    event_type: EvidenceType = EvidenceType.SUPPORTING,
+    quality: dict[str, float] | None = None,
+) -> EvidenceEvent:
+    return EvidenceEvent(
+        schema_version="v0.2",
+        id=event_id,
+        derived_from_signal=signal.id,
+        epistemic_origin=signal.provenance.epistemic_origin,
+        derivation_root_id=signal.provenance.derivation_root_id,
+        target_hypotheses=list(likelihoods),
+        evidence_type=event_type,
+        content=signal.raw_content,
+        likelihoods=likelihoods,
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        frame_fit=FrameFit.UNDERDETERMINED,
+        interpretation="Directional memory-credit regression.",
+        correlation_status=decision.correlation_status,
+        effective_update_weight=decision.effective_update_weight,
+        discard_reason=decision.discard_reason,
+        **(quality or {}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("cap", "prior_used", "base_weights", "expected_weights"),
+    [
+        pytest.param(1.0, 0.0, [0.75, 0.75], [0.75, 0.25], id="default"),
+        pytest.param(
+            0.2,
+            0.05,
+            [0.1, 0.1, 0.1],
+            [0.1, 0.05, 0.0],
+            id="custom-with-prior",
+        ),
+    ],
+)
+def test_same_signal_events_freeze_identity_but_advance_directional_credit(
+    cap,
+    prior_used,
+    base_weights,
+    expected_weights,
+):
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=cap
+        )
+    )
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_multi_event_credit",
+            "One projection yields multiple directional events.",
+            root="root-multi-event-credit",
+        ),
+        run_id="run_memory",
+    )
+    credit_key = f"{signal.provenance.correlation_group}|A|confirming"
+    prior = EvidenceMemorySnapshot(
+        correlation_credit=({credit_key: prior_used} if prior_used else {})
+    )
+    identity_snapshot = prior
+    working = prior
+    decisions = []
+
+    for index, base_weight in enumerate(base_weights, start=1):
+        decision = manager.classify(
+            identity_snapshot,
+            signal,
+            credit_snapshot=working,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            base_effective_weight=base_weight,
+        )
+        event = _directional_memory_event(
+            signal=signal,
+            event_id=(
+                "E_multi_event_credit"
+                if index == 1
+                else f"E_multi_event_credit_source_{index}"
+            ),
+            decision=decision,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+        )
+        working = manager.commit(
+            working,
+            signal=signal,
+            event=event,
+            decision=decision,
+        )
+        decisions.append(decision)
+
+    expected_status = "correlated_novel" if prior_used else "novel"
+    assert [decision.correlation_status for decision in decisions] == [
+        expected_status
+    ] * len(decisions)
+    assert [decision.effective_update_weight for decision in decisions] == (
+        pytest.approx(expected_weights)
+    )
+    assert working.correlation_credit == {credit_key: pytest.approx(cap)}
+    assert sum(
+        decision.effective_update_weight
+        for decision in decisions
+        if decision.discard_reason is None
+    ) == pytest.approx(cap - prior_used)
+    if expected_weights[-1] == 0.0:
+        assert decisions[-1].discard_reason == "correlation_credit_saturated"
+
+
+def test_same_signal_multi_hypothesis_credit_uses_shared_current_minimum():
+    manager = EvidenceMemoryManager()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_multi_subject_credit",
+            "One projection bears on two hypotheses.",
+            root="root-multi-subject-credit",
+        ),
+        run_id="run_memory",
+    )
+    group = signal.provenance.correlation_group
+    keys = {
+        "A": f"{group}|A|confirming",
+        "B": f"{group}|B|confirming",
+    }
+    prior = EvidenceMemorySnapshot(
+        correlation_credit={keys["A"]: 0.2, keys["B"]: 0.8}
+    )
+    likelihoods = {
+        "A": LikelihoodBand.MODERATELY_CONFIRMING,
+        "B": LikelihoodBand.MODERATELY_CONFIRMING,
+    }
+    working = prior
+    decisions = []
+
+    for index in (1, 2):
+        decision = manager.classify(
+            prior,
+            signal,
+            credit_snapshot=working,
+            likelihoods=likelihoods,
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            base_effective_weight=0.4,
+        )
+        working = manager.commit(
+            working,
+            signal=signal,
+            event=_directional_memory_event(
+                signal=signal,
+                event_id=f"E_multi_subject_credit_{index}",
+                decision=decision,
+                likelihoods=likelihoods,
+            ),
+            decision=decision,
+        )
+        decisions.append(decision)
+
+    assert [decision.effective_update_weight for decision in decisions] == (
+        pytest.approx([0.2, 0.0])
+    )
+    assert decisions[1].discard_reason == "correlation_credit_saturated"
+    assert working.correlation_credit == {
+        keys["A"]: pytest.approx(0.4),
+        keys["B"]: pytest.approx(1.0),
+    }
+
+
+def test_same_signal_opposite_directions_use_independent_credit_keys():
+    manager = EvidenceMemoryManager()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_opposite_direction_credit",
+            "One projection contains claims in opposite directions.",
+            root="root-opposite-direction-credit",
+        ),
+        run_id="run_memory",
+    )
+    identity_snapshot = EvidenceMemorySnapshot()
+    working = identity_snapshot
+    decisions = []
+
+    for index, band in enumerate(
+        (
+            LikelihoodBand.MODERATELY_CONFIRMING,
+            LikelihoodBand.MODERATELY_DISCONFIRMING,
+        ),
+        start=1,
+    ):
+        likelihoods = {"A": band}
+        decision = manager.classify(
+            identity_snapshot,
+            signal,
+            credit_snapshot=working,
+            likelihoods=likelihoods,
+            unresolved_likelihood=LikelihoodBand.NEUTRAL,
+            base_effective_weight=0.7,
+        )
+        working = manager.commit(
+            working,
+            signal=signal,
+            event=_directional_memory_event(
+                signal=signal,
+                event_id=f"E_opposite_direction_credit_{index}",
+                decision=decision,
+                likelihoods=likelihoods,
+            ),
+            decision=decision,
+        )
+        decisions.append(decision)
+
+    group = signal.provenance.correlation_group
+    assert [decision.correlation_status for decision in decisions] == [
+        "novel",
+        "novel",
+    ]
+    assert [decision.effective_update_weight for decision in decisions] == (
+        pytest.approx([0.7, 0.7])
+    )
+    assert working.correlation_credit == {
+        f"{group}|A|confirming": pytest.approx(0.7),
+        f"{group}|A|disconfirming": pytest.approx(0.7),
+    }
+
+
+def test_direct_commit_rejects_stale_directional_credit_decision():
+    manager = EvidenceMemoryManager()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal(
+            "S_stale_multi_event_credit",
+            "One projection emits two supporting events.",
+            root="root-stale-multi-event-credit",
+        ),
+        run_id="run_memory",
+    )
+    initial = EvidenceMemorySnapshot()
+    likelihoods = {"A": LikelihoodBand.MODERATELY_CONFIRMING}
+    first_decision = manager.classify(
+        initial,
+        signal,
+        likelihoods=likelihoods,
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=0.75,
+    )
+    stale_second_decision = manager.classify(
+        initial,
+        signal,
+        likelihoods=likelihoods,
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        base_effective_weight=0.25,
+    )
+    first = manager.commit(
+        initial,
+        signal=signal,
+        event=_directional_memory_event(
+            signal=signal,
+            event_id="E_stale_multi_event_credit",
+            decision=first_decision,
+            likelihoods=likelihoods,
+        ),
+        decision=first_decision,
+    )
+    prior = first.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="directional correlation credit"):
+        manager.commit(
+            first,
+            signal=signal,
+            event=_directional_memory_event(
+                signal=signal,
+                event_id="E_stale_multi_event_credit_source",
+                decision=stale_second_decision,
+                likelihoods=likelihoods,
+            ),
+            decision=stale_second_decision,
+        )
+
+    assert first.model_dump(mode="json") == prior
 
 
 def test_accepted_neutral_event_preserves_existing_directional_credit():
