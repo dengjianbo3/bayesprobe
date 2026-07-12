@@ -97,6 +97,15 @@ from bayesprobe.probe_design import (
     ProbeDesignResult,
     ProbeDesigner,
 )
+from bayesprobe.hypothesis_expansion import (
+    HypothesisExpansionAdapter,
+    HypothesisExpansionError,
+    HypothesisExpansionProposal,
+    HypothesisExpansionRequest,
+    HypothesisExpansionResult,
+    HypothesisExpansionService,
+    ModelHypothesisExpansionAdapter,
+)
 from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunResult,
@@ -208,6 +217,12 @@ __all__ = [
     "FramedHypothesis",
     "FramingMethod",
     "Hypothesis",
+    "HypothesisExpansionAdapter",
+    "HypothesisExpansionError",
+    "HypothesisExpansionProposal",
+    "HypothesisExpansionRequest",
+    "HypothesisExpansionResult",
+    "HypothesisExpansionService",
     "HypothesisFrame",
     "HypothesisCompetition",
     "HypothesisCoverage",
@@ -217,6 +232,7 @@ __all__ = [
     "InitializeRunInput",
     "JsonlLedgerStore",
     "ModelGateway",
+    "ModelHypothesisExpansionAdapter",
     "ModelBackedProbeToolGateway",
     "ModelProbeDesigner",
     "ModelGatewayConfig",

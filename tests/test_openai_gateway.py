@@ -14,6 +14,7 @@ from bayesprobe.model_gateway import (
 from bayesprobe.openai_gateway import (
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
     EVIDENCE_JUDGMENT_V01_JSON_SCHEMA,
+    HYPOTHESIS_EXPANSION_JSON_SCHEMA,
     OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA,
     PROBE_DESIGN_JSON_SCHEMA,
     PROBE_SIGNAL_JSON_SCHEMA,
@@ -59,6 +60,23 @@ PROBE_DESIGN_REQUIRED_KEYS = [
     "required_capability",
 ]
 FORBIDDEN_PROBE_DESIGN_FIELDS = ["id", "priority", "prior", "posterior"]
+HYPOTHESIS_EXPANSION_REQUIRED_KEYS = [
+    "statement",
+    "type",
+    "scope",
+    "falsifiers",
+    "predictions",
+    "answer_value",
+    "why_current_frame_missed",
+    "required_next_probe",
+]
+FORBIDDEN_HYPOTHESIS_EXPANSION_FIELDS = [
+    "id",
+    "prior",
+    "posterior",
+    "frame_status",
+    "unresolved_mass",
+]
 OPENAI_MODEL_IDENTITY_PREFIX = "openai_model_identity:v1:"
 
 
@@ -206,6 +224,27 @@ def make_probe_design_request(
     )
 
 
+def make_hypothesis_expansion_request(
+    *, task: str = "expand_hypotheses"
+) -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task=task,
+        input={
+            "task_frame": {"task_frame_id": "frame_1"},
+            "frame_state": {"frame_id": "frame_1", "frame_version": 1},
+            "hypotheses": [{"id": "H1", "statement": "First account."}],
+            "triggering_evidence": [{"id": "E1", "frame_fit": "supports_unresolved"}],
+            "expansion_reason": "Evidence supports an unresolved alternative.",
+            "answer_value_type": "integer",
+            "proposal_count": {"minimum": 1, "maximum": 3},
+        },
+        prompt_id="hypothesis_expansion",
+        prompt_version="v0.2",
+        schema_name="HypothesisExpansion",
+        schema_version="v0.2",
+    )
+
+
 def make_task_admission_request(
     *, task: str = "assess_task_admission"
 ) -> StructuredModelRequest:
@@ -296,6 +335,20 @@ def assert_probe_design_schema(schema: dict) -> None:
         assert f'"{field}"' not in serialized_schema
 
 
+def assert_hypothesis_expansion_schema(schema: dict) -> None:
+    assert schema == HYPOTHESIS_EXPANSION_JSON_SCHEMA
+    assert schema["required"] == ["candidates"]
+    candidates = schema["properties"]["candidates"]
+    assert candidates["minItems"] == 1
+    assert candidates["maxItems"] == 3
+    candidate_schema = candidates["items"]
+    assert candidate_schema["required"] == HYPOTHESIS_EXPANSION_REQUIRED_KEYS
+    assert set(candidate_schema["properties"]) == set(HYPOTHESIS_EXPANSION_REQUIRED_KEYS)
+    serialized_schema = json.dumps(schema).lower()
+    for field in FORBIDDEN_HYPOTHESIS_EXPANSION_FIELDS:
+        assert f'"{field}"' not in serialized_schema
+
+
 @pytest.mark.parametrize(
     "model_request",
     [
@@ -331,6 +384,43 @@ def test_chat_probe_design_uses_exact_semantic_schema(model_request):
     assert required_output["type"] == "ProbeDesign"
     assert required_output["required_keys"] == ["proposals"]
     assert_probe_design_schema(required_output["json_schema"])
+
+
+@pytest.mark.parametrize(
+    "model_request",
+    [
+        make_hypothesis_expansion_request(),
+        make_hypothesis_expansion_request(task="repair_hypothesis_expansion"),
+    ],
+)
+def test_responses_hypothesis_expansion_uses_strict_semantic_schema(model_request):
+    payload = build_openai_request_payload(model_request, model="test-model")
+
+    assert payload["text"]["format"] == {
+        "type": "json_schema",
+        "name": "HypothesisExpansion",
+        "strict": True,
+        "schema": HYPOTHESIS_EXPANSION_JSON_SCHEMA,
+    }
+    assert_hypothesis_expansion_schema(payload["text"]["format"]["schema"])
+
+
+@pytest.mark.parametrize(
+    "model_request",
+    [
+        make_hypothesis_expansion_request(),
+        make_hypothesis_expansion_request(task="repair_hypothesis_expansion"),
+    ],
+)
+def test_chat_hypothesis_expansion_uses_exact_semantic_schema(model_request):
+    payload = build_openai_chat_completions_payload(model_request, model="test-model")
+    required_output = json.loads(payload["messages"][1]["content"])[
+        "required_output"
+    ]
+
+    assert required_output["type"] == "HypothesisExpansion"
+    assert required_output["required_keys"] == ["candidates"]
+    assert_hypothesis_expansion_schema(required_output["json_schema"])
 
 
 def test_build_openai_payload_for_open_question_frame():

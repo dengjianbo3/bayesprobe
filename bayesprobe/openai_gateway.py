@@ -189,6 +189,61 @@ PROBE_DESIGN_JSON_SCHEMA: dict[str, Any] = {
     },
 }
 
+HYPOTHESIS_EXPANSION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["candidates"],
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "statement",
+                    "type",
+                    "scope",
+                    "falsifiers",
+                    "predictions",
+                    "answer_value",
+                    "why_current_frame_missed",
+                    "required_next_probe",
+                ],
+                "properties": {
+                    "statement": {"type": "string", "minLength": 1},
+                    "type": {"type": "string", "minLength": 1},
+                    "scope": {"type": "string", "minLength": 1},
+                    "falsifiers": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                    "predictions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                    "answer_value": {
+                        "anyOf": [
+                            {"type": "string", "minLength": 1},
+                            {"type": "integer"},
+                            {"type": "number"},
+                            {"type": "null"},
+                        ]
+                    },
+                    "why_current_frame_missed": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "required_next_probe": {"type": "string", "minLength": 1},
+                },
+            },
+        }
+    },
+}
+
 TASK_ADMISSION_DECISION_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -1067,6 +1122,18 @@ def _instruction_for_task(task: str) -> str:
             "Return only semantic probe proposals without ids, priorities, priors, "
             "or posteriors."
         )
+    if task == "expand_hypotheses":
+        return (
+            "Propose one to three semantic hypotheses for a bounded BayesProbe frame "
+            "expansion. Return only claim semantics; do not assign ids, priors, "
+            "posteriors, frame status, or unresolved mass."
+        )
+    if task == "repair_hypothesis_expansion":
+        return (
+            "Repair the malformed BayesProbe hypothesis expansion. Return only "
+            "semantic candidates without ids, priors, posteriors, frame status, "
+            "or unresolved mass."
+        )
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -1101,6 +1168,8 @@ def _structured_output_for_task(
         return "OpenQuestionTaskFrame", OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA
     if task in {"design_probes", "repair_probe_design"}:
         return "ProbeDesign", PROBE_DESIGN_JSON_SCHEMA
+    if task in {"expand_hypotheses", "repair_hypothesis_expansion"}:
+        return "HypothesisExpansion", HYPOTHESIS_EXPANSION_JSON_SCHEMA
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -1167,6 +1236,13 @@ def _chat_instruction_for_task(
             "keys: purpose, target_hypotheses, inquiry_goal, expected_observation, "
             "support_condition, weaken_condition, reframe_condition, "
             "required_capability. Do not include markdown."
+        )
+    if task in {"expand_hypotheses", "repair_hypothesis_expansion"}:
+        return (
+            f"{base_instruction} Return only one JSON object with exactly one "
+            "top-level key: candidates. Each candidate must contain exactly these "
+            "keys: statement, type, scope, falsifiers, predictions, answer_value, "
+            "why_current_frame_missed, required_next_probe. Do not include markdown."
         )
     raise ValueError(f"unsupported openai model task: {task}")
 
@@ -1275,6 +1351,16 @@ def _required_output_for_task(
             "notes": [
                 "proposals contain semantics only; the server assigns ids and priority",
                 "do not assign priors or posteriors",
+            ],
+        }
+    if task in {"expand_hypotheses", "repair_hypothesis_expansion"}:
+        return {
+            "type": "HypothesisExpansion",
+            "required_keys": ["candidates"],
+            "json_schema": HYPOTHESIS_EXPANSION_JSON_SCHEMA,
+            "notes": [
+                "candidates contain semantic hypothesis fields only",
+                "the server assigns ids, priors, posteriors, frame state, and mass",
             ],
         }
     raise ValueError(f"unsupported openai model task: {task}")
@@ -1514,6 +1600,7 @@ def _sanitize_provider_error(message: str, api_key: str) -> str:
 __all__ = [
     "EVIDENCE_JUDGMENT_JSON_SCHEMA",
     "EVIDENCE_JUDGMENT_V01_JSON_SCHEMA",
+    "HYPOTHESIS_EXPANSION_JSON_SCHEMA",
     "MULTIPLE_CHOICE_ANSWER_JSON_SCHEMA",
     "PYTHON_CODE_REPAIR_JSON_SCHEMA",
     "PYTHON_PROBE_PLAN_JSON_SCHEMA",
