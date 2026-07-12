@@ -26,6 +26,7 @@ from bayesprobe.openai_gateway import (
     parse_openai_structured_response,
 )
 from bayesprobe.provider_telemetry import ProviderInvocationRecord
+from bayesprobe.schemas import validate_secret_free_provider_identity
 
 
 OPEN_QUESTION_TASK_FRAME_REQUIRED_KEYS = [
@@ -306,6 +307,140 @@ def test_openai_model_gateway_config_accepts_base_url():
     )
 
     assert config.base_url == "https://provider.example/v1"
+
+
+@pytest.mark.parametrize(
+    ("gateway_type", "adapter_kind"),
+    [
+        (OpenAIResponsesModelGateway, "openai"),
+        (
+            OpenAIChatCompletionsModelGateway,
+            "openai_chat_completions",
+        ),
+    ],
+)
+def test_openai_model_identity_includes_adapter_provider_and_model(
+    gateway_type,
+    adapter_kind,
+):
+    default_gateway = gateway_type(
+        config=OpenAIModelGatewayConfig(model="provider/model-a")
+    )
+    explicit_default_gateway = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="provider/model-a",
+            base_url="https://API.OPENAI.COM:443/other/path?region=west#ignored",
+        )
+    )
+
+    expected = f"{adapter_kind}:https://api.openai.com:provider/model-a"
+    assert default_gateway.model_identity == expected
+    assert explicit_default_gateway.model_identity == expected
+    assert validate_secret_free_provider_identity(expected) == expected
+
+
+@pytest.mark.parametrize(
+    "gateway_type",
+    [OpenAIResponsesModelGateway, OpenAIChatCompletionsModelGateway],
+)
+def test_openai_model_identity_normalizes_provider_origin_without_url_secrets(
+    gateway_type,
+):
+    credential = "credential-value"
+    query_value = "query-value"
+    configured_url = (
+        "HTTPS://alice:credential-value@Provider.Example:443/v1/private"
+        "?api_key=query-value#private-fragment"
+    )
+    configured = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="same-model",
+            base_url=configured_url,
+        )
+    )
+    equivalent = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="same-model",
+            base_url="https://provider.example/different/path",
+        )
+    )
+    nondefault_port = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="same-model",
+            base_url="https://provider.example:8443/v1",
+        )
+    )
+    different_provider = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="same-model",
+            base_url="https://other.example/v1",
+        )
+    )
+
+    assert configured.config.base_url == configured_url
+    assert configured.model_identity == equivalent.model_identity
+    assert configured.model_identity != nondefault_port.model_identity
+    assert configured.model_identity != different_provider.model_identity
+    assert "https://provider.example" in configured.model_identity
+    assert credential not in configured.model_identity
+    assert query_value not in configured.model_identity
+    assert "alice" not in configured.model_identity
+    assert "/v1/private" not in configured.model_identity
+    assert "private-fragment" not in configured.model_identity
+    assert (
+        validate_secret_free_provider_identity(configured.model_identity)
+        == configured.model_identity
+    )
+
+
+@pytest.mark.parametrize(
+    "gateway_type",
+    [OpenAIResponsesModelGateway, OpenAIChatCompletionsModelGateway],
+)
+def test_openai_model_identity_normalizes_http_default_port(gateway_type):
+    implicit = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="same-model",
+            base_url="http://provider.example/v1",
+        )
+    )
+    explicit = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="same-model",
+            base_url="http://provider.example:80/another/path",
+        )
+    )
+
+    assert implicit.model_identity == explicit.model_identity
+    assert "http://provider.example" in implicit.model_identity
+
+
+@pytest.mark.parametrize(
+    "gateway_type",
+    [OpenAIResponsesModelGateway, OpenAIChatCompletionsModelGateway],
+)
+def test_openai_model_identity_rejects_invalid_provider_url_without_echo(
+    gateway_type,
+):
+    credential = "credential-value"
+    invalid_url = (
+        "https://alice:credential-value@provider.example:not-a-port/v1"
+        "?api_key=query-value"
+    )
+    gateway = gateway_type(
+        config=OpenAIModelGatewayConfig(
+            model="same-model",
+            base_url=invalid_url,
+        )
+    )
+
+    with pytest.raises(ValueError, match="provider URL is invalid") as exc_info:
+        _ = gateway.model_identity
+
+    error_text = str(exc_info.value)
+    assert credential not in error_text
+    assert "query-value" not in error_text
+    assert invalid_url not in error_text
 
 
 @pytest.mark.parametrize(

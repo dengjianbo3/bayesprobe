@@ -1425,3 +1425,91 @@ controls passed.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 23
+
+### Design Decision
+
+- Added one OpenAI-compatible provider-origin canonicalizer, shared by the
+  Responses and Chat Completions `model_identity` properties. Identity is now
+  `adapter_kind:scheme://host[:nondefault-port]:model`; a missing `base_url`
+  resolves to the explicit stable origin `https://api.openai.com`.
+- Canonicalization uses `urllib.parse.urlsplit`, lowercases scheme and host,
+  removes a terminal DNS dot, omits `:443` for HTTPS and `:80` for HTTP, and
+  retains every non-default port. Path, query, fragment, and user information
+  are never copied into identity text.
+- Chose accepted-but-redacted user information for compatibility. The original
+  configured `base_url` remains unchanged for request construction, while only
+  its sanitized origin contributes to persisted provenance. Malformed origins
+  and secret-like final identities raise generic errors without URL text.
+- Both adapters pass the complete adapter/provider/model identity through the
+  existing exact-and-NFKC secret-free provider-identity validator. Probe
+  provenance therefore receives different source identities and canonical
+  correlation groups for equal models served by different provider hosts.
+
+### Changed Files
+
+- `bayesprobe/openai_gateway.py`
+- `tests/test_openai_gateway.py`
+- `tests/test_model_gateway.py`
+- `tests/test_probe_executor.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py::test_openai_model_identity_includes_adapter_provider_and_model tests/test_openai_gateway.py::test_openai_model_identity_normalizes_provider_origin_without_url_secrets tests/test_openai_gateway.py::test_openai_model_identity_normalizes_http_default_port tests/test_openai_gateway.py::test_openai_model_identity_rejects_invalid_provider_url_without_echo tests/test_probe_executor.py::test_model_probe_provenance_distinguishes_openai_provider_and_model_identity -q --tb=short -p no:cacheprovider
+```
+
+Result: `9 failed in 0.21s`. Both adapters omitted provider origin, equal
+models on distinct hosts collapsed, default-port identity was absent, malformed
+provider URLs did not fail, and probe provenance used the old adapter/model
+identity.
+
+- GREEN/refactor: the same focused command -> `9 passed in 0.13s`.
+- Direct adapter/factory/provenance suites:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_model_gateway.py tests/test_probe_executor.py -q --tb=short -p
+  no:cacheprovider` -> `190 passed in 0.29s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_openai_gateway.py
+  tests/test_probe_executor.py tests/evaluation/test_python_probe.py
+  tests/test_evidence_memory.py tests/test_core_cycles.py -q -p
+  no:cacheprovider` -> `483 passed in 1.99s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1377 passed, 10 skipped in 11.33s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before
+  report/commit; both checks are repeated after report and the range check after
+  commit.
+
+### Self-Review
+
+- Responses and Chat Completions have distinct adapter prefixes but share the
+  same provider-origin rules. `base_url=None` and an explicit OpenAI URL with
+  case differences, `:443`, path, query, or fragment resolve identically.
+- Equal model names on different hosts produce different `model_identity`,
+  `SignalProvenance.source_identity`, provider/model identity, and normalized
+  correlation group. Equivalent URLs for one host remain correlated.
+- User information is deliberately accepted for existing OpenAI-compatible
+  request behavior but omitted from identity alongside path, query, and
+  fragment. Tests include credential-shaped URL components and prove the final
+  identity passes `validate_secret_free_provider_identity`.
+- HTTP `:80` and HTTPS `:443` normalize to omitted ports; `:8443` remains part
+  of the endpoint identity. Invalid ports fail with one generic message that
+  contains no configured URL, user information, or query value.
+- Existing request-scoped key handling, custom `base_url` request forwarding,
+  factory construction, telemetry, native v0.2 provenance, and all earlier
+  evidence-memory/lifecycle invariants remain covered by the passing suites.
+
+### Concerns
+
+No blocking concerns.

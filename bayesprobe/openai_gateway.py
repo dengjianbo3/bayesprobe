@@ -14,14 +14,19 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from types import SimpleNamespace
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from bayesprobe.model_gateway import (
     ModelGatewayValidationError,
     ProviderRequestControls,
     StructuredModelRequest,
 )
-from bayesprobe.schemas import EvidenceType, FrameFit, LikelihoodBand
+from bayesprobe.schemas import (
+    EvidenceType,
+    FrameFit,
+    LikelihoodBand,
+    validate_secret_free_provider_identity,
+)
 from bayesprobe.provider_telemetry import (
     ProviderInvocationContext,
     ProviderInvocationObserver,
@@ -359,6 +364,7 @@ EVIDENCE_JUDGMENT_SCHEMA_KEYS = frozenset(
     {"evidence_type", "likelihoods", "interpretation", "quality_overrides"}
 )
 MAX_PROVIDER_ATTEMPTS = 3
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 class ProviderHTTPError(RuntimeError):
@@ -427,6 +433,45 @@ class OpenAIModelGatewayConfig:
         object.__setattr__(self, "api_key_env", self.api_key_env.strip())
 
 
+def _openai_model_identity(
+    *,
+    adapter_kind: str,
+    config: OpenAIModelGatewayConfig,
+) -> str:
+    provider_identity = _normalized_openai_provider_identity(config.base_url)
+    return validate_secret_free_provider_identity(
+        f"{adapter_kind}:{provider_identity}:{config.model}"
+    )
+
+
+def _normalized_openai_provider_identity(base_url: str | None) -> str:
+    configured_url = base_url or DEFAULT_OPENAI_BASE_URL
+    try:
+        parsed = urlsplit(configured_url)
+        scheme = parsed.scheme.casefold()
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, UnicodeError, ValueError):
+        raise ValueError("openai model gateway provider URL is invalid") from None
+
+    if scheme not in {"http", "https"} or hostname is None:
+        raise ValueError("openai model gateway provider URL is invalid")
+    normalized_hostname = hostname.casefold().rstrip(".")
+    if not normalized_hostname or any(
+        character.isspace() or ord(character) < 32
+        for character in normalized_hostname
+    ):
+        raise ValueError("openai model gateway provider URL is invalid")
+
+    if ":" in normalized_hostname:
+        normalized_hostname = f"[{normalized_hostname}]"
+    default_port = 443 if scheme == "https" else 80
+    authority = normalized_hostname
+    if port is not None and port != default_port:
+        authority = f"{authority}:{port}"
+    return validate_secret_free_provider_identity(f"{scheme}://{authority}")
+
+
 class OpenAIResponsesModelGateway:
     adapter_kind = "openai"
 
@@ -467,7 +512,10 @@ class OpenAIResponsesModelGateway:
 
     @property
     def model_identity(self) -> str:
-        return f"{self.adapter_kind}:{self.config.model}"
+        return _openai_model_identity(
+            adapter_kind=self.adapter_kind,
+            config=self.config,
+        )
 
     @property
     def invocation_observer(self) -> ProviderInvocationObserver | None:
@@ -525,7 +573,10 @@ class OpenAIChatCompletionsModelGateway:
 
     @property
     def model_identity(self) -> str:
-        return f"{self.adapter_kind}:{self.config.model}"
+        return _openai_model_identity(
+            adapter_kind=self.adapter_kind,
+            config=self.config,
+        )
 
     @property
     def invocation_observer(self) -> ProviderInvocationObserver | None:
@@ -750,10 +801,10 @@ def _provider_base_host(
     if config.base_url is not None:
         base_url = config.base_url
     elif adapter_kind == "openai_chat_completions":
-        base_url = "https://api.openai.com/v1"
+        base_url = DEFAULT_OPENAI_BASE_URL
     else:
-        base_url = "https://api.openai.com/v1"
-    return urlparse(base_url).hostname
+        base_url = DEFAULT_OPENAI_BASE_URL
+    return urlsplit(base_url).hostname
 
 
 def _request_metadata_text(
@@ -1263,7 +1314,7 @@ def _build_default_openai_chat_client(
         )
     return _StdlibOpenAIChatClient(
         api_key=resolved_api_key,
-        base_url=config.base_url or "https://api.openai.com/v1",
+        base_url=config.base_url or DEFAULT_OPENAI_BASE_URL,
         timeout_seconds=config.timeout_seconds,
     )
 

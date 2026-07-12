@@ -119,3 +119,7 @@
 
 1. Core's authoritative Evidence Memory transition validator and the production EvidenceGate cannot share a mutable EvidenceMemoryManager authority. A gate-side mutation of the manager policy or validator must not redefine the policy Core uses after the gate call. Preserve the configured CorrelationCreditPolicy consistently while isolating the gate's mutable manager object from Core's authoritative validator.
 2. Native transition validation must bind every Evidence Event's content exactly to the authoritative closed signal identified by `derived_from_signal`. A gate cannot return the owned signal unchanged while rewriting only `EvidenceEvent.content`; such a transition must fail before solver, state, or ledger mutation.
+
+## Eighteenth full-range re-review finding
+
+1. OpenAI-compatible `model_identity` must include a stable, normalized, secret-free configured-provider identity in addition to adapter kind and model. Different provider hosts using the same model cannot collapse into one provenance source/correlation group; equivalent URLs for the same provider should normalize to the same identity, and URL paths, queries, fragments, or user information must never enter persisted identity text.

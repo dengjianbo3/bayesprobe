@@ -626,7 +626,7 @@ def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_emp
     assert result.signals[0].provenance.provider_model_or_tool_identity == "scripted"
 
 
-def test_model_probe_provenance_distinguishes_openai_compatible_models():
+def test_model_probe_provenance_distinguishes_openai_provider_and_model_identity():
     class StubOpenAICompatibleGateway(OpenAIChatCompletionsModelGateway):
         def complete_structured(self, request):
             return {"raw_content": "A model-backed probe observation."}
@@ -646,9 +646,9 @@ def test_model_probe_provenance_distinguishes_openai_compatible_models():
         belief_state=initialized.belief_state,
     )
 
-    def execute(model: str):
+    def execute(model: str, base_url: str):
         gateway = StubOpenAICompatibleGateway(
-            config=OpenAIModelGatewayConfig(model=model)
+            config=OpenAIModelGatewayConfig(model=model, base_url=base_url)
         )
         return ProbeExecutor(
             ModelBackedProbeToolGateway(gateway)
@@ -657,23 +657,56 @@ def test_model_probe_provenance_distinguishes_openai_compatible_models():
             context=context,
         ).signals[0]
 
-    first = execute("provider/model-a")
-    same_model = execute("provider/model-a")
-    second = execute("provider/model-b")
+    first = execute("provider/model-a", "https://provider-a.example/v1")
+    same_provider_model = execute(
+        "provider/model-a",
+        "https://user:ignored@PROVIDER-A.EXAMPLE:443/other?ignored=value#fragment",
+    )
+    different_provider = execute(
+        "provider/model-a",
+        "https://provider-b.example/v1",
+    )
+    different_model = execute(
+        "provider/model-b",
+        "https://provider-a.example/v1",
+    )
     normalizer = SignalProvenanceNormalizer()
     first = normalizer.normalize(first, run_id=context.run_id)
-    same_model = normalizer.normalize(same_model, run_id=context.run_id)
-    second = normalizer.normalize(second, run_id=context.run_id)
+    same_provider_model = normalizer.normalize(
+        same_provider_model,
+        run_id=context.run_id,
+    )
+    different_provider = normalizer.normalize(
+        different_provider,
+        run_id=context.run_id,
+    )
+    different_model = normalizer.normalize(
+        different_model,
+        run_id=context.run_id,
+    )
 
-    assert first.source == second.source == "model_gateway:openai_chat_completions"
+    assert first.source == different_provider.source == (
+        "model_gateway:openai_chat_completions"
+    )
     assert first.provenance.provider_model_or_tool_identity == (
-        "openai_chat_completions:provider/model-a"
+        "openai_chat_completions:https://provider-a.example:provider/model-a"
     )
-    assert second.provenance.provider_model_or_tool_identity == (
-        "openai_chat_completions:provider/model-b"
+    assert different_provider.provenance.provider_model_or_tool_identity == (
+        "openai_chat_completions:https://provider-b.example:provider/model-a"
     )
-    assert first.provenance.correlation_group == same_model.provenance.correlation_group
-    assert first.provenance.correlation_group != second.provenance.correlation_group
+    assert first.provenance.source_identity == (
+        "model_gateway:"
+        "openai_chat_completions:https://provider-a.example:provider/model-a"
+    )
+    assert first.provenance.correlation_group == (
+        same_provider_model.provenance.correlation_group
+    )
+    assert first.provenance.correlation_group != (
+        different_provider.provenance.correlation_group
+    )
+    assert first.provenance.correlation_group != (
+        different_model.provenance.correlation_group
+    )
 
 
 def test_recorded_probe_provenance_distinguishes_fixture_and_model_identity():
