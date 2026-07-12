@@ -217,6 +217,32 @@ def _signal(
     )
 
 
+def _derived_signal(
+    signal_id: str,
+    content: str,
+    *,
+    parent_id: str,
+    root: str,
+) -> ExternalSignal:
+    return ExternalSignal(
+        id=signal_id,
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="derived_summary",
+        source="summary-worker",
+        raw_content=content,
+        initial_target_hypotheses=["A", "B"],
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.DERIVED_SUMMARY,
+            source_identity="summary-worker",
+            parent_signal_ids=[parent_id],
+            derivation_root_id=root,
+            correlation_group="summary-worker",
+            canonical_content_fingerprint="to-be-normalized",
+        ),
+    )
+
+
 def test_deterministic_computation_root_canonicalizes_object_key_order_only():
     first = derive_deterministic_computation_root(
         tool_identity="deterministic probe gateway",
@@ -1379,6 +1405,29 @@ def test_canonical_group_is_map_order_independent_and_stays_saturated():
     ]
 
 
+def test_unknown_external_parent_remains_correlated_and_nonindependent():
+    gateway = CountingGateway()
+    signal = _derived_signal(
+        "S_unknown_external_parent",
+        "A summary whose external parent is not in local memory.",
+        parent_id="S_external_parent",
+        root="root-declared-by-summary",
+    )
+
+    result = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=_cycle(1),
+        belief_state=_state(),
+        probe_set=_probe_set(1),
+        signals=[signal],
+    )
+
+    event = result.evidence_events[0]
+    assert event.correlation_status == "correlated_restatement"
+    assert event.independence == 0.0
+    assert event.effective_update_weight == 0.0
+    assert len(gateway.requests) == 1
+
+
 def test_unknown_parent_is_ledger_visible_but_receives_zero_independent_credit():
     manager = EvidenceMemoryManager()
     signal = SignalProvenanceNormalizer().normalize(
@@ -1430,7 +1479,8 @@ def test_unknown_parent_is_ledger_visible_but_receives_zero_independent_credit()
     assert memory.correlation_credit == {}
 
 
-def test_known_derived_parent_cannot_change_derivation_root():
+@pytest.mark.parametrize("operation", ["remember", "classify"])
+def test_direct_memory_operations_reject_known_parent_root_mismatch(operation):
     manager = EvidenceMemoryManager()
     normalizer = SignalProvenanceNormalizer()
     parent = normalizer.normalize(
@@ -1471,7 +1521,10 @@ def test_known_derived_parent_cannot_change_derivation_root():
     derived = normalizer.normalize(derived, run_id="run_memory")
 
     with pytest.raises(ValueError, match="preserve parent derivation root"):
-        manager.classify(memory, derived)
+        if operation == "remember":
+            manager.remember_signal_identity(memory, derived)
+        else:
+            manager.classify(memory, derived)
 
 
 def test_prejudgment_classification_reports_existing_group_credit():

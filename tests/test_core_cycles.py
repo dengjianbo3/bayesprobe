@@ -2957,6 +2957,32 @@ def _memory_signal(signal_id: str, content: str, *, root: str) -> ExternalSignal
     )
 
 
+def _derived_memory_signal(
+    signal_id: str,
+    content: str,
+    *,
+    parent_id: str,
+    root: str,
+) -> ExternalSignal:
+    return ExternalSignal(
+        id=signal_id,
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="derived_summary",
+        source="summary-worker",
+        raw_content=content,
+        initial_target_hypotheses=["H1", "H2"],
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.DERIVED_SUMMARY,
+            source_identity="summary-worker",
+            parent_signal_ids=[parent_id],
+            derivation_root_id=root,
+            correlation_group="summary-worker",
+            canonical_content_fingerprint="normalize-me",
+        ),
+    )
+
+
 def _model_memory_signal(
     signal_id: str,
     content: str,
@@ -3396,6 +3422,153 @@ def test_model_supplied_group_is_audited_and_changed_reuse_fails_atomically(
     assert len(gateway.requests) == 1
     assert replayed.belief_state.evidence_memory.model_dump(mode="json") == prior_memory_payload
     assert ledger_path.read_bytes() == prior_ledger
+
+
+def test_prior_known_parent_root_conflict_preflights_before_novel_provider(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    ledger_path = tmp_path / "prior-parent-root-preflight-ledger.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    parent_cycle = make_cycle("cycle_prior_parent")
+    parent = _memory_signal(
+        "S_prior_parent",
+        "The prior parent observation.",
+        root="root-prior-parent",
+    )
+    first = core.integrate_cycle(
+        cycle=parent_cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(parent_cycle.cycle_id),
+        signals=[parent],
+    )
+    next_cycle = make_cycle("cycle_prior_parent_conflict").model_copy(
+        update={"cycle_index": 2}
+    )
+    prior_state = first.belief_state.model_dump(mode="json")
+    prior_memory = first.belief_state.evidence_memory.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+    prior_provider_calls = len(gateway.requests)
+
+    with pytest.raises(ValueError, match="preserve parent derivation root"):
+        core.integrate_cycle(
+            cycle=next_cycle,
+            belief_state=first.belief_state,
+            probe_set=make_empty_probe_set(next_cycle.cycle_id),
+            signals=[
+                _memory_signal(
+                    "S_novel_before_bad_child",
+                    "A novel signal before the invalid child.",
+                    root="root-novel-before-child",
+                ),
+                _derived_memory_signal(
+                    "S_bad_prior_child",
+                    "A child that changes its known parent's root.",
+                    parent_id=parent.id,
+                    root="root-changed-child",
+                ),
+            ],
+        )
+
+    assert len(gateway.requests) == prior_provider_calls
+    assert first.belief_state.model_dump(mode="json") == prior_state
+    assert first.belief_state.evidence_memory.model_dump(mode="json") == prior_memory
+    assert ledger_path.read_bytes() == prior_ledger
+
+
+@pytest.mark.parametrize("order", ["parent_first", "child_first"])
+def test_same_batch_parent_root_conflict_preflights_before_provider(
+    tmp_path: Path,
+    order: str,
+):
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    ledger_path = tmp_path / f"same-batch-parent-root-{order}.jsonl"
+    ledger_path.touch()
+    core = BayesProbeCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    parent = _memory_signal(
+        f"S_batch_parent_{order}",
+        "The same-batch parent observation.",
+        root="root-same-batch-parent",
+    )
+    child = _derived_memory_signal(
+        f"S_batch_child_{order}",
+        "A same-batch child with a conflicting root.",
+        parent_id=parent.id,
+        root="root-same-batch-child-conflict",
+    )
+    signals = [parent, child] if order == "parent_first" else [child, parent]
+    cycle = make_cycle(f"cycle_same_batch_parent_{order}")
+
+    with pytest.raises(ValueError, match="preserve parent derivation root"):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=signals,
+        )
+
+    assert gateway.requests == []
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+@pytest.mark.parametrize("order", ["parent_first", "child_first"])
+def test_matching_parent_root_succeeds_with_zero_independence_in_both_orders(
+    order: str,
+):
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = BayesProbeCore(model_gateway=gateway)
+    parent = _memory_signal(
+        f"S_matching_parent_{order}",
+        "The matching parent observation.",
+        root="root-matching-parent",
+    )
+    child = _derived_memory_signal(
+        f"S_matching_child_{order}",
+        "A child that preserves its parent's root.",
+        parent_id=parent.id,
+        root="root-matching-parent",
+    )
+    signals = [parent, child] if order == "parent_first" else [child, parent]
+    cycle = make_cycle(f"cycle_matching_parent_{order}")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=signals,
+    )
+
+    child_event = next(
+        event
+        for event in result.evidence_events
+        if event.derived_from_signal == child.id
+    )
+    parent_event = next(
+        event
+        for event in result.evidence_events
+        if event.derived_from_signal == parent.id
+    )
+    assert child_event.discard_reason is None
+    assert child_event.correlation_status == "correlated_restatement"
+    assert child_event.independence == 0.0
+    assert child_event.effective_update_weight == 0.0
+    assert parent_event.correlation_status == (
+        "novel" if order == "parent_first" else "correlated_restatement"
+    )
+    assert len(gateway.requests) == 2
 
 
 def test_later_cross_cycle_batch_conflict_preflights_before_provider_or_ledger(

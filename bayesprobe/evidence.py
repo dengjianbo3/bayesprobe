@@ -284,6 +284,13 @@ class EvidenceIntegrationGate:
                 preflight_memory,
                 signal,
             )
+
+        for planned in planned_signals:
+            signal = planned.signal
+            self._memory_manager.validate_signal_lineage(
+                preflight_memory,
+                signal,
+            )
             for event_id in planned.event_ids:
                 if event_id in prior_evidence_ids:
                     self._memory_manager.validate_event_signal_identity(

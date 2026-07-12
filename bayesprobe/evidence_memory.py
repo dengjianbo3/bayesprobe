@@ -171,24 +171,33 @@ class EvidenceMemoryManager:
             value is not None
             for value in (prior_source_content, prior_content, prior_root)
         )
-        if not identity_present:
-            return
+        if identity_present:
+            prior_identity = _source_content_identity_parts(prior_source_content)
+            if (
+                prior_identity is None
+                or prior_identity[0] != provenance.source_identity
+                or prior_identity[1] != provenance.canonical_content_fingerprint
+                or prior_identity[3] != _supplied_correlation_group(provenance)
+                or prior_content != provenance.canonical_content_fingerprint
+                or prior_root != provenance.derivation_root_id
+                or (
+                    canonical_correlation_group is not None
+                    and prior_identity is not None
+                    and prior_identity[2] != canonical_correlation_group
+                )
+            ):
+                raise ValueError("signal id lineage conflict")
 
-        prior_identity = _source_content_identity_parts(prior_source_content)
-        if (
-            prior_identity is None
-            or prior_identity[0] != provenance.source_identity
-            or prior_identity[1] != provenance.canonical_content_fingerprint
-            or prior_identity[3] != _supplied_correlation_group(provenance)
-            or prior_content != provenance.canonical_content_fingerprint
-            or prior_root != provenance.derivation_root_id
-            or (
-                canonical_correlation_group is not None
-                and prior_identity is not None
-                and prior_identity[2] != canonical_correlation_group
-            )
+        known_parent_roots = [
+            snapshot.derivation_roots[parent_id]
+            for parent_id in provenance.parent_signal_ids
+            if parent_id in snapshot.derivation_roots
+        ]
+        if any(
+            parent_root != provenance.derivation_root_id
+            for parent_root in known_parent_roots
         ):
-            raise ValueError("signal id lineage conflict")
+            raise ValueError("derived signals must preserve parent derivation root")
 
     def remember_signal_identity(
         self,
@@ -293,6 +302,16 @@ class EvidenceMemoryManager:
             for signal_id, value in snapshot.source_content_fingerprints.items()
             if (parts := _source_content_identity_parts(value)) is not None
         }
+        canonical_group = _canonical_correlation_group(
+            snapshot=snapshot,
+            provenance=provenance,
+            prior_identities=prior_identities,
+        )
+        self.validate_signal_lineage(
+            snapshot,
+            signal,
+            canonical_correlation_group=canonical_group,
+        )
         exact = any(
             prior_identity[0] == provenance.source_identity
             and prior_identity[1] == provenance.canonical_content_fingerprint
@@ -301,21 +320,6 @@ class EvidenceMemoryManager:
             for signal_id, prior_identity in prior_identities.items()
         )
         same_root = provenance.derivation_root_id in snapshot.derivation_roots.values()
-        known_parent_roots = [
-            snapshot.derivation_roots[parent_id]
-            for parent_id in provenance.parent_signal_ids
-            if parent_id in snapshot.derivation_roots
-        ]
-        if any(
-            parent_root != provenance.derivation_root_id
-            for parent_root in known_parent_roots
-        ):
-            raise ValueError("derived signals must preserve parent derivation root")
-        canonical_group = _canonical_correlation_group(
-            snapshot=snapshot,
-            provenance=provenance,
-            prior_identities=prior_identities,
-        )
         group_prefix = f"{canonical_group}|"
         same_group = any(
             key.startswith(group_prefix) for key in snapshot.correlation_credit

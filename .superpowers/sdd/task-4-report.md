@@ -704,3 +704,49 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 13
+
+### Changes
+
+- Centralized reused signal-id and locally known parent-root coherence in
+  `EvidenceMemoryManager.validate_signal_lineage`. Both identity writes and
+  classification now invoke that path; the duplicate parent check was removed
+  from `classify`.
+- Split EvidenceGate preflight into two passes. The first builds the identity-only
+  shadow for every normalized signal; the second validates every lineage and
+  existing event binding against the completed shadow before formal processing.
+- Preserved formal semantics: classification and commitment still begin from the
+  original working memory and proceed in signal order; the preflight shadow is
+  never used as classification memory.
+- Added prior-memory and both-order same-batch conflict regressions, both-order
+  matching-root success, direct manager checks, and an explicit regression that
+  unknown external parents remain non-independent.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_direct_memory_operations_reject_known_parent_root_mismatch tests/test_evidence_memory.py::test_unknown_external_parent_remains_correlated_and_nonindependent tests/test_evidence_memory.py::test_unknown_parent_is_ledger_visible_but_receives_zero_independent_credit tests/test_evidence_memory.py::test_batch_preflight_normalizes_once_and_stops_before_provider tests/test_core_cycles.py::test_prior_known_parent_root_conflict_preflights_before_novel_provider tests/test_core_cycles.py::test_same_batch_parent_root_conflict_preflights_before_provider tests/test_core_cycles.py::test_matching_parent_root_succeeds_with_zero_independence_in_both_orders tests/test_core_cycles.py::test_later_cross_cycle_batch_conflict_preflights_before_provider_or_ledger tests/test_core_cycles.py::test_same_batch_reused_signal_conflict_preflights_atomically tests/test_core_cycles.py::test_later_positional_conflict_preflights_before_novel_provider tests/test_core_cycles.py::test_replayed_new_signal_identity_is_persisted_then_conflict_fails_atomically -q -p no:cacheprovider` -> `4 failed, 16 passed in 0.45s`.
+- GREEN: the same focused command -> `20 passed in 0.36s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `412 passed in 1.11s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `320 passed in 0.40s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1213 passed, 10 skipped in 9.68s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- A child mismatching a prior parent, an earlier same-batch parent, or a later
+  same-batch parent fails before any new provider request. Core assertions prove
+  unchanged belief state, evidence memory, and ledger bytes.
+- Matching-root parent/child batches succeed in both orders. The parent remains
+  novel only when formally processed first and becomes correlated when processed
+  after the child, proving the completed preflight shadow does not leak into
+  classification. The child is always a zero-independence correlated restatement.
+- Unknown parent ids absent from prior and full-batch memory remain allowed but
+  classify as correlated restatements with zero independence and zero effective
+  weight. Earlier signal-id, event-binding, and batch-atomicity regressions remain
+  included in the focused GREEN command.
+
+### Concerns
+
+No blocking concerns.
