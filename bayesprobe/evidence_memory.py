@@ -14,6 +14,8 @@ from bayesprobe.schemas import (
     ExternalSignal,
     LikelihoodBand,
     SignalProvenance,
+    decode_discard_history_entry,
+    encode_discard_history_entry,
     is_forbidden_secret_key_name,
     is_secret_like_value,
 )
@@ -213,7 +215,7 @@ class EvidenceMemoryManager:
         decision: EvidenceMemoryDecision,
     ) -> EvidenceMemorySnapshot:
         if event.id in snapshot.accepted_evidence_ids or any(
-            item.partition(":")[0] == event.id
+            decode_discard_history_entry(item)[0] == event.id
             for item in snapshot.discard_and_schema_history
         ):
             return snapshot
@@ -224,7 +226,9 @@ class EvidenceMemoryManager:
         if event.discard_reason is None:
             accepted_ids.append(event.id)
         else:
-            discard_history.append(f"{event.id}:{event.discard_reason}")
+            discard_history.append(
+                encode_discard_history_entry(event.id, event.discard_reason)
+            )
 
         content_fingerprints = dict(snapshot.content_fingerprints)
         source_content_fingerprints = dict(snapshot.source_content_fingerprints)
@@ -356,15 +360,25 @@ def _canonical_correlation_group(
     provenance: SignalProvenance,
     prior_identities: dict[str, tuple[str, str, str]],
 ) -> str:
-    for signal_id, root in snapshot.derivation_roots.items():
-        if root == provenance.derivation_root_id and signal_id in prior_identities:
-            return prior_identities[signal_id][2]
-    for parent_id in provenance.parent_signal_ids:
-        if parent_id in prior_identities:
-            return prior_identities[parent_id][2]
-    for prior_identity in prior_identities.values():
-        if prior_identity[0] == provenance.source_identity:
-            return prior_identity[2]
+    known_groups = {
+        prior_identities[signal_id][2]
+        for signal_id, root in snapshot.derivation_roots.items()
+        if root == provenance.derivation_root_id and signal_id in prior_identities
+    }
+    known_groups.update(
+        prior_identities[parent_id][2]
+        for parent_id in provenance.parent_signal_ids
+        if parent_id in prior_identities
+    )
+    known_groups.update(
+        prior_identity[2]
+        for prior_identity in prior_identities.values()
+        if prior_identity[0] == provenance.source_identity
+    )
+    if len(known_groups) > 1:
+        raise ValueError("signal lineage has conflicting canonical correlation groups")
+    if known_groups:
+        return known_groups.pop()
     return provenance.correlation_group
 
 

@@ -471,6 +471,33 @@ def test_evidence_memory_rejects_invalid_identity_lists(field, value):
         EvidenceMemorySnapshot(**{field: value})
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "E1:duplicate_exact",
+        '["E1"]',
+        '["E1","duplicate_exact","extra"]',
+        ' ["E1","duplicate_exact"] ',
+        '["","duplicate_exact"]',
+    ],
+)
+def test_evidence_memory_rejects_ambiguous_or_noncanonical_discard_history(entry):
+    with pytest.raises(ValueError, match="discard_and_schema_history"):
+        EvidenceMemorySnapshot(discard_and_schema_history=[entry])
+
+
+def test_evidence_memory_discard_history_has_canonical_round_trip():
+    entry = '["event:with:colons","schema_violation:invalid judgment"]'
+    snapshot = EvidenceMemorySnapshot(discard_and_schema_history=[entry])
+
+    restored = EvidenceMemorySnapshot.model_validate(
+        snapshot.model_dump(mode="python")
+    )
+
+    assert restored == snapshot
+    assert restored.discard_and_schema_history == [entry]
+
+
 @pytest.mark.parametrize("value", [["E1", " e1 "], [""]])
 def test_evidence_memory_rejects_invalid_nested_counterevidence_ids(value):
     with pytest.raises(ValueError, match="counterevidence_ids_by_hypothesis"):
@@ -478,14 +505,15 @@ def test_evidence_memory_rejects_invalid_nested_counterevidence_ids(value):
 
 
 def _signal_provenance(**overrides) -> SignalProvenance:
-    return SignalProvenance(
-        epistemic_origin=EpistemicOrigin.RETRIEVED_SOURCE,
-        source_identity="source-1",
-        derivation_root_id="root-1",
-        correlation_group="group-1",
-        canonical_content_fingerprint="sha256:abc",
-        **overrides,
-    )
+    payload = {
+        "epistemic_origin": EpistemicOrigin.RETRIEVED_SOURCE,
+        "source_identity": "source-1",
+        "derivation_root_id": "root-1",
+        "correlation_group": "group-1",
+        "canonical_content_fingerprint": "sha256:abc",
+    }
+    payload.update(overrides)
+    return SignalProvenance(**payload)
 
 
 @pytest.mark.parametrize(
@@ -500,6 +528,25 @@ def _signal_provenance(**overrides) -> SignalProvenance:
 def test_signal_provenance_rejects_invalid_identity_lists(field, value):
     with pytest.raises(ValueError, match=field):
         _signal_provenance(**{field: value})
+
+
+def test_signal_provenance_reserves_credit_key_delimiter_from_group():
+    with pytest.raises(ValueError, match="correlation_group must not contain"):
+        _signal_provenance(correlation_group="group|injected")
+
+
+@pytest.mark.parametrize("hypothesis_id", ["H|injected", "frame:7:unresolved"])
+def test_named_hypothesis_ids_reserve_credit_key_syntax(hypothesis_id):
+    with pytest.raises(ValueError, match="reserved credit"):
+        FramedHypothesis(
+            id=hypothesis_id,
+            statement="Candidate one explains the observation.",
+            type="candidate",
+            scope="The stated task.",
+            initial_prior=0.5,
+            falsifiers=["Contradictory evidence appears."],
+            predictions=["The observation is reproduced."],
+        )
 
 
 @pytest.mark.parametrize(

@@ -83,7 +83,11 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
                         "likelihoods": {
                             "H1": "moderately_confirming",
                         },
+                        "unresolved_likelihood": None,
+                        "frame_fit": "explained_by_named",
+                        "unexplained_observation": None,
                         "interpretation": "Scripted artifact judgment.",
+                        "quality_overrides": {},
                     },
                     "repair_evidence_judgment": {
                         "evidence_type": "supporting",
@@ -91,7 +95,11 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
                             "H1": "moderately_confirming",
                             "H2": "moderately_disconfirming",
                         },
+                        "unresolved_likelihood": None,
+                        "frame_fit": "explained_by_named",
+                        "unexplained_observation": None,
                         "interpretation": "Scripted artifact repair judgment.",
+                        "quality_overrides": {},
                     }
                 },
             },
@@ -167,30 +175,17 @@ def test_run_benchmark_experiment_writes_artifact_bundle(tmp_path: Path):
     assert "kept" in artifact_text
     assert manifest["model_invocations_path"] == str(model_invocations_path)
     assert manifest["model_invocation_count"] == 4
-    assert manifest["model_invocation_summary"] == [
-        {
-            "task": "judge_evidence",
-            "adapter_kind": "scripted",
-            "prompt_id": "evidence_judgment",
-            "prompt_version": "v0.1",
-            "schema_name": "EvidenceJudgment",
-            "schema_version": "v0.1",
-                "repair_attempt_index": None,
-                "metadata": {},
-                "occurrence_count": 2,
-            },
-            {
-                "task": "repair_evidence_judgment",
-                "adapter_kind": "scripted",
-                "prompt_id": "evidence_judgment_repair",
-                "prompt_version": "v0.1",
-                "schema_name": "EvidenceJudgment",
-                "schema_version": "v0.1",
-                "repair_attempt_index": 1,
-                "metadata": {},
-                "occurrence_count": 2,
-            }
-        ]
+    invocation_summary = manifest["model_invocation_summary"]
+    assert sum(item["occurrence_count"] for item in invocation_summary) == 4
+    assert {item["task"] for item in invocation_summary} == {
+        "judge_evidence",
+        "repair_evidence_judgment",
+    }
+    assert all(item["schema_version"] == "v0.2" for item in invocation_summary)
+    assert all(
+        item["metadata"]["judgment_route"] == "native_v0.2"
+        for item in invocation_summary
+    )
     assert model_invocations == {
         "artifact_version": "0.1",
         "invocation_count": 4,
@@ -287,6 +282,9 @@ def test_run_benchmark_experiment_uses_model_gateway_config(tmp_path: Path):
                     "judge_evidence": {
                         "evidence_type": "boundary_condition",
                         "likelihoods": {"H1": "weakly_disconfirming"},
+                        "unresolved_likelihood": None,
+                        "frame_fit": "explained_by_named",
+                        "unexplained_observation": None,
                         "interpretation": "Experiment configured scripted judgment.",
                         "quality_overrides": {"reliability": 0.62},
                     }
@@ -319,14 +317,22 @@ def test_run_benchmark_experiment_uses_judgment_repair_policy_config(tmp_path: P
                     "judge_evidence": {
                         "evidence_type": "not_a_type",
                         "likelihoods": {"H1": "neutral"},
+                        "unresolved_likelihood": None,
+                        "frame_fit": "underdetermined",
+                        "unexplained_observation": None,
                         "interpretation": "Invalid evidence type.",
+                        "quality_overrides": {},
                     },
                     "repair_evidence_judgment": {
                         "evidence_type": "supporting",
                         "likelihoods": {
                             "H1": "moderately_confirming",
                         },
+                        "unresolved_likelihood": None,
+                        "frame_fit": "explained_by_named",
+                        "unexplained_observation": None,
                         "interpretation": "Experiment repaired judgment.",
+                        "quality_overrides": {},
                     },
                 },
             },

@@ -1679,6 +1679,9 @@ class FakeChoiceAwareChatCompletions:
                             {
                                 "evidence_type": "supporting",
                                 "likelihoods": likelihoods,
+                                "unresolved_likelihood": None,
+                                "frame_fit": "explained_by_named",
+                                "unexplained_observation": None,
                                 "interpretation": "Choice D is the well-behaved graph class.",
                                 "quality_overrides": {},
                             }
@@ -1725,6 +1728,9 @@ class FakeProbeAwareChatCompletions:
                     )
                     for target in targets
                 },
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
                 "interpretation": "The model-generated probe signal favors D.",
                 "quality_overrides": {},
             }

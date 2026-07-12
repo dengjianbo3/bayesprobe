@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -249,6 +251,12 @@ class EvidenceIntegrationGate:
         prior_evidence_ids = set(
             belief_state.ledger_refs.get("evidence_events", [])
         )
+        _reject_unverifiable_migrated_cycle_replay(
+            cycle=cycle,
+            belief_state=belief_state,
+            prior_evidence_ids=prior_evidence_ids,
+        )
+        identity_occurrences: dict[str, int] = {}
 
         for index, raw_signal in enumerate(signals, start=1):
             signal = self._provenance_normalizer.normalize(
@@ -256,7 +264,17 @@ class EvidenceIntegrationGate:
                 run_id=cycle.run_id,
             )
             closed_signals.append(signal)
-            event_id = f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}"
+            signal_identity = _canonical_signal_identity(signal)
+            identity_occurrences[signal_identity] = (
+                identity_occurrences.get(signal_identity, 0) + 1
+            )
+            event_id = _event_id_for_signal(
+                cycle=cycle,
+                signal_identity=signal_identity,
+                index=index,
+                occurrence=identity_occurrences[signal_identity],
+                native_v02=_is_native_v02_state(belief_state),
+            )
             if event_id in prior_evidence_ids:
                 evidence_events.append(
                     self._replayed_event(
@@ -280,11 +298,10 @@ class EvidenceIntegrationGate:
                 event_result = EvidenceIntegrationResult(
                     evidence_events=[
                         self._duplicate_exact_event(
-                            index=index,
+                            event_id=event_id,
                             signal=signal,
                             belief_state=belief_state,
                             probe_set=probe_set,
-                            cycle=cycle,
                         )
                     ],
                     probe_candidates=[],
@@ -295,7 +312,7 @@ class EvidenceIntegrationGate:
                     seen_signatures=seen_signatures,
                 )
                 event_result = self._build_signal_events(
-                    index=index,
+                    event_id=event_id,
                     signal=signal,
                     belief_state=belief_state,
                     probe_set=probe_set,
@@ -394,11 +411,10 @@ class EvidenceIntegrationGate:
     def _duplicate_exact_event(
         self,
         *,
-        index: int,
+        event_id: str,
         signal: ExternalSignal,
         belief_state: BeliefState,
         probe_set: ProbeSet,
-        cycle: CycleRecord,
     ) -> EvidenceEvent:
         hypothesis_ids = self._resolve_target_hypotheses(
             signal=signal,
@@ -413,7 +429,7 @@ class EvidenceIntegrationGate:
         ):
             unresolved_likelihood = LikelihoodBand.NEUTRAL
         return self._event(
-            event_id=f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}",
+            event_id=event_id,
             signal=signal,
             hypothesis_ids=hypothesis_ids,
             evidence_type=EvidenceType.NEUTRAL,
@@ -485,7 +501,7 @@ class EvidenceIntegrationGate:
     def _build_signal_events(
         self,
         *,
-        index: int,
+        event_id: str,
         signal: ExternalSignal,
         belief_state: BeliefState,
         probe_set: ProbeSet,
@@ -495,11 +511,10 @@ class EvidenceIntegrationGate:
     ) -> EvidenceIntegrationResult:
         if signal.source_type == "external_agent_projection":
             sender_event = self._build_projection_sender_event(
-                index=index,
+                event_id=event_id,
                 signal=signal,
                 belief_state=belief_state,
                 probe_set=probe_set,
-                cycle=cycle,
                 is_duplicate=is_duplicate,
             )
             if not self._projection_decomposer.should_decompose(signal):
@@ -508,11 +523,10 @@ class EvidenceIntegrationGate:
                     probe_candidates=[],
                 )
             source_event = self._build_source_claim_event(
-                index=index,
+                event_id=f"{event_id}_source",
                 signal=signal,
                 belief_state=belief_state,
                 probe_set=probe_set,
-                cycle=cycle,
                 is_duplicate=is_duplicate,
             )
             return EvidenceIntegrationResult(
@@ -523,7 +537,7 @@ class EvidenceIntegrationGate:
         return EvidenceIntegrationResult(
             evidence_events=[
                 self._build_direct_evidence_event(
-                    index=index,
+                    event_id=event_id,
                     signal=signal,
                     belief_state=belief_state,
                     probe_set=probe_set,
@@ -538,7 +552,7 @@ class EvidenceIntegrationGate:
     def _build_direct_evidence_event(
         self,
         *,
-        index: int,
+        event_id: str,
         signal: ExternalSignal,
         belief_state: BeliefState,
         probe_set: ProbeSet,
@@ -563,9 +577,8 @@ class EvidenceIntegrationGate:
             judgment, model_trace = self._evidence_judgment_with_repair(request=request)
         except _EvidenceJudgmentFailure as failure:
             return self._schema_violation_event(
-                index=index,
+                event_id=event_id,
                 signal=signal,
-                cycle=cycle,
                 hypothesis_ids=hypothesis_ids,
                 is_duplicate=is_duplicate,
                 error=failure.error,
@@ -573,7 +586,7 @@ class EvidenceIntegrationGate:
             )
 
         return self._event(
-            event_id=f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}",
+            event_id=event_id,
             signal=signal,
             hypothesis_ids=hypothesis_ids,
             evidence_type=judgment.evidence_type,
@@ -597,7 +610,8 @@ class EvidenceIntegrationGate:
         belief_state: BeliefState,
         memory_decision: EvidenceMemoryDecision,
     ) -> StructuredModelRequest:
-        native_v02 = _is_native_v02_state(belief_state)
+        judgment_route = _judgment_route_for_state(belief_state)
+        native_v02 = judgment_route == "native_v0.2"
         if native_v02:
             hypotheses_by_id = belief_state.hypotheses_by_id()
             hypotheses = [
@@ -678,6 +692,32 @@ class EvidenceIntegrationGate:
                     "allowed_frame_fits": [frame_fit.value for frame_fit in FrameFit],
                 }
             )
+        route_metadata = {
+            "judgment_route": judgment_route,
+            "lifecycle_schema_version": belief_state.schema_version,
+            "frame_competition": (
+                belief_state.frame_state.competition.value
+                if belief_state.frame_state is not None
+                else HypothesisCompetition.EXCLUSIVE.value
+            ),
+            "frame_coverage": (
+                belief_state.frame_state.coverage.value
+                if belief_state.frame_state is not None
+                else HypothesisCoverage.EXHAUSTIVE.value
+            ),
+        }
+        if belief_state.task_frame is not None:
+            route_metadata["framing_method"] = (
+                belief_state.task_frame.framing_method.value
+            )
+        if native_v02:
+            route_metadata.update(
+                {
+                    "run_id": cycle.run_id,
+                    "cycle_id": cycle.cycle_id,
+                    "signal_id": signal.id,
+                }
+            )
         return StructuredModelRequest(
             task="judge_evidence",
             input=request_input,
@@ -685,15 +725,7 @@ class EvidenceIntegrationGate:
             prompt_version="v0.2" if native_v02 else "v0.1",
             schema_name="EvidenceJudgment",
             schema_version="v0.2" if native_v02 else "v0.1",
-            metadata=(
-                {
-                    "run_id": cycle.run_id,
-                    "cycle_id": cycle.cycle_id,
-                    "signal_id": signal.id,
-                }
-                if native_v02
-                else {}
-            ),
+            metadata=route_metadata,
         )
 
     def _evidence_judgment_with_repair(
@@ -756,7 +788,12 @@ class EvidenceIntegrationGate:
                             "quality_overrides",
                         ]
                         if original_request.schema_version == "v0.2"
-                        else ["evidence_type", "likelihoods", "interpretation"]
+                        else [
+                            "evidence_type",
+                            "likelihoods",
+                            "interpretation",
+                            "quality_overrides",
+                        ]
                     ),
                     "allowed_frame_fits": [
                         frame_fit.value for frame_fit in FrameFit
@@ -766,7 +803,10 @@ class EvidenceIntegrationGate:
                 prompt_version=original_request.prompt_version,
                 schema_name="EvidenceJudgment",
                 schema_version=original_request.schema_version,
-                metadata={"repair_attempt_index": attempt_index},
+                metadata={
+                    **original_request.metadata,
+                    "repair_attempt_index": attempt_index,
+                },
             )
             repair_trace = self._model_trace_for_request(repair_request)
             try:
@@ -798,18 +838,39 @@ class EvidenceIntegrationGate:
     ) -> EvidenceJudgment:
         frame = original_request.input.get("frame")
         if original_request.schema_version == "v0.2":
-            payload = _migrate_v01_judgment_payload(
-                payload,
-                competition=HypothesisCompetition(frame["competition"]),
-                coverage=HypothesisCoverage(frame["coverage"]),
-            )
+            if original_request.metadata.get("judgment_route") != "native_v0.2":
+                raise ModelGatewayValidationError(
+                    "native evidence judgment requires the native v0.2 route"
+                )
             judgment = evidence_judgment_from_mapping(
                 payload,
                 competition=HypothesisCompetition(frame["competition"]),
                 coverage=HypothesisCoverage(frame["coverage"]),
             )
         else:
-            judgment = evidence_judgment_from_mapping(payload)
+            if (
+                original_request.metadata.get("judgment_route")
+                != "legacy_v0.1_migration"
+            ):
+                raise ModelGatewayValidationError(
+                    "legacy evidence judgment requires an explicit migration route"
+                )
+            competition = HypothesisCompetition(
+                original_request.metadata["frame_competition"]
+            )
+            coverage = HypothesisCoverage(
+                original_request.metadata["frame_coverage"]
+            )
+            payload = _migrate_v01_judgment_payload(
+                payload,
+                competition=competition,
+                coverage=coverage,
+            )
+            judgment = evidence_judgment_from_mapping(
+                payload,
+                competition=competition,
+                coverage=coverage,
+            )
         expected_targets = {
             str(hypothesis_id)
             for hypothesis_id in original_request.input.get(
@@ -828,16 +889,15 @@ class EvidenceIntegrationGate:
     def _schema_violation_event(
         self,
         *,
-        index: int,
+        event_id: str,
         signal: ExternalSignal,
-        cycle: CycleRecord,
         hypothesis_ids: list[str],
         is_duplicate: bool,
         error: ModelGatewayValidationError,
         model_trace: ModelInvocationTrace | None = None,
     ) -> EvidenceEvent:
         return self._event(
-            event_id=f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}",
+            event_id=event_id,
             signal=signal,
             hypothesis_ids=hypothesis_ids,
             evidence_type=EvidenceType.NEUTRAL,
@@ -852,11 +912,10 @@ class EvidenceIntegrationGate:
     def _build_projection_sender_event(
         self,
         *,
-        index: int,
+        event_id: str,
         signal: ExternalSignal,
         belief_state: BeliefState,
         probe_set: ProbeSet,
-        cycle: CycleRecord,
         is_duplicate: bool,
     ) -> EvidenceEvent:
         hypothesis_ids = self._resolve_target_hypotheses(
@@ -870,7 +929,7 @@ class EvidenceIntegrationGate:
             likelihoods[endorsed_hypothesis] = LikelihoodBand.WEAKLY_CONFIRMING
 
         return self._event(
-            event_id=f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}",
+            event_id=event_id,
             signal=signal,
             hypothesis_ids=hypothesis_ids,
             evidence_type=EvidenceType.SENDER_JUDGMENT,
@@ -882,11 +941,10 @@ class EvidenceIntegrationGate:
     def _build_source_claim_event(
         self,
         *,
-        index: int,
+        event_id: str,
         signal: ExternalSignal,
         belief_state: BeliefState,
         probe_set: ProbeSet,
-        cycle: CycleRecord,
         is_duplicate: bool,
     ) -> EvidenceEvent:
         hypothesis_ids = self._resolve_target_hypotheses(
@@ -895,7 +953,7 @@ class EvidenceIntegrationGate:
             probe_set=probe_set,
         )
         return self._event(
-            event_id=f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E{index}_source",
+            event_id=event_id,
             signal=signal,
             hypothesis_ids=hypothesis_ids,
             evidence_type=EvidenceType.SOURCE_CLAIM,
@@ -1105,6 +1163,56 @@ def _scoped_cycle_key(run_id: str, cycle_id: str) -> str:
     return f"{run_id}_{cycle_id}"
 
 
+def _event_id_for_signal(
+    *,
+    cycle: CycleRecord,
+    signal_identity: str,
+    index: int,
+    occurrence: int,
+    native_v02: bool,
+) -> str:
+    scoped_cycle = _scoped_cycle_key(cycle.run_id, cycle.cycle_id)
+    if not native_v02:
+        return f"{scoped_cycle}_E{index}"
+    return f"{scoped_cycle}_E_{signal_identity}_{occurrence}"
+
+
+def _canonical_signal_identity(signal: ExternalSignal) -> str:
+    provenance = signal.provenance
+    canonical_identity = json.dumps(
+        [
+            provenance.canonical_content_fingerprint,
+            provenance.derivation_root_id,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
+
+
+def _reject_unverifiable_migrated_cycle_replay(
+    *,
+    cycle: CycleRecord,
+    belief_state: BeliefState,
+    prior_evidence_ids: set[str],
+) -> None:
+    task_frame = belief_state.task_frame
+    if (
+        task_frame is None
+        or task_frame.framing_method != FramingMethod.LEGACY_MIGRATION
+        or not prior_evidence_ids
+    ):
+        return
+    memory = belief_state.evidence_memory
+    if memory is not None and memory.source_content_fingerprints:
+        return
+    event_prefix = f"{_scoped_cycle_key(cycle.run_id, cycle.cycle_id)}_E"
+    if any(event_id.startswith(event_prefix) for event_id in prior_evidence_ids):
+        raise ValueError(
+            "cannot replay an already-used cycle without signal identity memory"
+        )
+
+
 def _is_native_v02_state(belief_state: BeliefState) -> bool:
     return (
         belief_state.schema_version == "v0.2"
@@ -1112,9 +1220,11 @@ def _is_native_v02_state(belief_state: BeliefState) -> bool:
         and belief_state.frame_state is not None
         and belief_state.evidence_memory is not None
         and belief_state.task_frame.framing_method != FramingMethod.LEGACY_MIGRATION
-        and belief_state.task_frame.framing_trace.get("source")
-        != "hypothesis_seeds"
     )
+
+
+def _judgment_route_for_state(belief_state: BeliefState) -> str:
+    return "native_v0.2" if _is_native_v02_state(belief_state) else "legacy_v0.1_migration"
 
 
 def _migrate_v01_judgment_payload(
@@ -1132,8 +1242,10 @@ def _migrate_v01_judgment_payload(
         "interpretation",
         "quality_overrides",
     }
-    if not set(payload).issubset(v01_fields):
-        return payload
+    if set(payload) != v01_fields:
+        raise ModelGatewayValidationError(
+            "legacy evidence judgment requires exactly the reviewed four fields"
+        )
     migrated = dict(payload)
     migrated.setdefault("quality_overrides", {})
     exclusive_open = (

@@ -240,6 +240,9 @@ def test_benchmark_harness_passes_model_gateway_to_created_core(tmp_path: Path):
             "judge_evidence": {
                 "evidence_type": "boundary_condition",
                 "likelihoods": {"H1": "weakly_disconfirming", "H2": "neutral"},
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
                 "interpretation": "Harness configured scripted judgment.",
                 "quality_overrides": {"reliability": 0.62},
             }
@@ -284,7 +287,11 @@ def test_benchmark_harness_records_model_trace_in_evidence_ledger(tmp_path: Path
                     "H1": "moderately_confirming",
                     "H2": "moderately_disconfirming",
                 },
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
                 "interpretation": "Harness trace judgment.",
+                "quality_overrides": {},
             }
         }
     )
@@ -309,15 +316,14 @@ def test_benchmark_harness_records_model_trace_in_evidence_ledger(tmp_path: Path
     harness.run_sample(sample)
 
     evidence_payload = ledger.read_all("evidence_event")[0]["payload"]
-    assert evidence_payload["model_trace"] == {
-        "task": "judge_evidence",
-        "adapter_kind": "scripted",
-        "prompt_id": "evidence_judgment",
-        "prompt_version": "v0.1",
-        "schema_name": "EvidenceJudgment",
-        "schema_version": "v0.1",
-        "metadata": {},
-    }
+    trace = evidence_payload["model_trace"]
+    assert trace["task"] == "judge_evidence"
+    assert trace["adapter_kind"] == "scripted"
+    assert trace["prompt_id"] == "evidence_judgment"
+    assert trace["prompt_version"] == "v0.2"
+    assert trace["schema_name"] == "EvidenceJudgment"
+    assert trace["schema_version"] == "v0.2"
+    assert trace["metadata"]["judgment_route"] == "native_v0.2"
 
 
 def test_benchmark_harness_passes_judgment_repair_policy_to_created_core(tmp_path: Path):
@@ -327,7 +333,11 @@ def test_benchmark_harness_passes_judgment_repair_policy_to_created_core(tmp_pat
             "judge_evidence": {
                 "evidence_type": "not_a_type",
                 "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "unresolved_likelihood": None,
+                "frame_fit": "underdetermined",
+                "unexplained_observation": None,
                 "interpretation": "Invalid evidence type.",
+                "quality_overrides": {},
             },
             "repair_evidence_judgment": {
                 "evidence_type": "supporting",
@@ -335,7 +345,11 @@ def test_benchmark_harness_passes_judgment_repair_policy_to_created_core(tmp_pat
                     "H1": "moderately_confirming",
                     "H2": "moderately_disconfirming",
                 },
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
                 "interpretation": "Harness repaired judgment.",
+                "quality_overrides": {},
             },
         }
     )

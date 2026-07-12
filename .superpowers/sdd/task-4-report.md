@@ -177,3 +177,64 @@ memory/provenance hardening wave from reviewed HEAD `d6032b2`.
 No blocking concerns. Model identity deliberately excludes base URLs, API-key
 environment names, request headers, and credentials; custom gateways without an
 explicit safe identity fall back to their stable adapter identity.
+
+## Review Fix 2
+
+### Status
+
+Complete. All five Task 4 re-review findings were addressed from reviewed HEAD
+`92b496b` without adding dependencies or Task 5/6, search, retrieval, or WebUI
+runtime behavior.
+
+### Changes
+
+- Made persisted canonical groups provable: a source identity and a derivation
+  root may each map to exactly one group. Runtime lineage resolution now uses a
+  candidate set, so map insertion order cannot select a group and conflicting
+  lineage joins fail closed. Reordered snapshots preserve cumulative saturation.
+- Replaced native positional Evidence Event ids with scoped cycle ids containing
+  a SHA-256 identity over canonical source/content identity and derivation root,
+  plus a per-identity occurrence for true duplicates. Inserted or reordered
+  unrelated signals cannot change event identity. Already-used migrated cycles
+  with empty identity memory now fail before provider judgment or credit commit.
+- Reserved `|` in correlation groups and every named hypothesis-id constructor,
+  and reserved the exact `frame:<positive-version>:unresolved` namespace from
+  named hypotheses. Snapshot grammar and generated `group|subject|direction`
+  keys now share the same component domain.
+- Removed legacy completion from native v0.2 judgment validation. Native requests
+  require the exact seven-field payload; exact four-field completion runs only on
+  the explicit v0.1 migration route. Request and repair traces persist the route,
+  lifecycle schema, and frame contract. Deterministic and recorded fixtures emit
+  the schema version requested without weakening either OpenAI transport schema.
+- Replaced colon-concatenated discard history with strict compact JSON pairs
+  `[event_id,reason]`. Snapshot validation requires canonical parse/round-trip,
+  and idempotency lookup decodes the exact event id even when it contains colons.
+
+### RED Evidence
+
+1. Canonical-lineage regressions produced `2 failed, 1 passed`: conflicting
+   source/root groups were accepted before snapshot validation was tightened.
+2. Replay regressions produced `3 failed`: native ids moved under insertion and
+   reorder, duplicate occurrences lacked stable identity, and migration-empty
+   replay still proceeded. A later same-content/different-root regression also
+   failed until derivation root entered the hashed identity.
+3. Credit-domain regressions produced `5 failed`: correlation groups, named
+   hypotheses, seed ids, and MCQ labels accepted reserved key syntax.
+4. Route regressions produced `2 failed`: native v0.2 silently completed an exact
+   legacy payload and migrated requests lacked an auditable route marker.
+5. Discard regressions produced `7 failed, 1 passed`: legacy concatenation was
+   accepted and colon-bearing event ids could not be recommitted idempotently.
+
+### GREEN Evidence
+
+- Exact Task 4 focused suite: `278 passed in 0.53s`.
+- Schema, migration, and framing compatibility suite: `271 passed in 0.36s`.
+- Full offline Python suite: `1076 passed, 10 skipped in 8.55s`.
+- Node WebUI stream regression: `15 passed, 0 failed`.
+- `git diff --check`: clean.
+
+### Concerns
+
+No blocking concerns. Legacy four-field judgment completion is intentionally
+unavailable to every native v0.2 route; stale provider fixtures were upgraded to
+the seven-field contract rather than receiving compatibility preprocessing.

@@ -207,6 +207,51 @@ def _required_text(value: str, field_name: str) -> str:
     return value.strip()
 
 
+_UNRESOLVED_CREDIT_SUBJECT_PATTERN = re.compile(
+    r"frame:(?P<version>[1-9][0-9]*):unresolved"
+)
+
+
+def validate_credit_subject_hypothesis_id(value: str, field_name: str) -> str:
+    clean_value = _required_text(value, field_name)
+    if "|" in clean_value or _UNRESOLVED_CREDIT_SUBJECT_PATTERN.fullmatch(
+        clean_value
+    ):
+        raise ValueError(f"{field_name} must not use reserved credit key syntax")
+    return clean_value
+
+
+def encode_discard_history_entry(event_id: str, reason: str) -> str:
+    clean_event_id = _required_text(event_id, "discard event id")
+    clean_reason = _required_text(reason, "discard reason")
+    if clean_event_id != event_id or clean_reason != reason:
+        raise ValueError("discard history components must use exact canonical text")
+    return json.dumps(
+        [clean_event_id, clean_reason],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def decode_discard_history_entry(value: str) -> tuple[str, str]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError(
+            "discard_and_schema_history entries must be canonical JSON pairs"
+        ) from error
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 2
+        or not all(isinstance(item, str) and item for item in parsed)
+        or encode_discard_history_entry(parsed[0], parsed[1]) != value
+    ):
+        raise ValueError(
+            "discard_and_schema_history entries must be canonical JSON pairs"
+        )
+    return parsed[0], parsed[1]
+
+
 def _normalized_semantic_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
@@ -526,11 +571,6 @@ class FrameState(StrictTaskModel):
 
 
 _CANONICAL_FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
-_UNRESOLVED_CREDIT_SUBJECT_PATTERN = re.compile(
-    r"frame:(?P<version>[1-9][0-9]*):unresolved"
-)
-
-
 def _is_canonical_content_fingerprint(value: str) -> bool:
     return bool(_CANONICAL_FINGERPRINT_PATTERN.fullmatch(value))
 
@@ -601,11 +641,24 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     @field_validator(
         "accepted_evidence_ids",
         "discovery_evidence_ids",
-        "discard_and_schema_history",
     )
     @classmethod
     def clean_identity_lists(cls, value: list[str], info: ValidationInfo) -> list[str]:
         return _unique_optional_semantic_texts(value, info.field_name)
+
+    @field_validator("discard_and_schema_history")
+    @classmethod
+    def validate_discard_history(cls, value: list[str]) -> list[str]:
+        seen_event_ids: set[str] = set()
+        for entry in value:
+            event_id, _ = decode_discard_history_entry(entry)
+            semantic_id = event_id.casefold()
+            if semantic_id in seen_event_ids:
+                raise ValueError(
+                    "discard_and_schema_history event ids must be unique"
+                )
+            seen_event_ids.add(semantic_id)
+        return list(value)
 
     @field_validator("counterevidence_ids_by_hypothesis")
     @classmethod
@@ -674,6 +727,8 @@ class EvidenceMemorySnapshot(StrictTaskModel):
         }
         if len(identity_key_sets) != 1:
             raise ValueError("evidence memory identity map keys must match exactly")
+        groups_by_source: dict[str, set[str]] = {}
+        groups_by_root: dict[str, set[str]] = {}
         for signal_id, fingerprint in self.content_fingerprints.items():
             if not _is_canonical_content_fingerprint(fingerprint):
                 raise ValueError(
@@ -685,6 +740,19 @@ class EvidenceMemorySnapshot(StrictTaskModel):
                 raise ValueError(
                     "source_content_fingerprints must use exact canonical identities"
                 )
+            source_identity, _, correlation_group = parts
+            groups_by_source.setdefault(source_identity, set()).add(correlation_group)
+            groups_by_root.setdefault(self.derivation_roots[signal_id], set()).add(
+                correlation_group
+            )
+        if any(len(groups) != 1 for groups in groups_by_source.values()):
+            raise ValueError(
+                "source identity has conflicting canonical correlation groups"
+            )
+        if any(len(groups) != 1 for groups in groups_by_root.values()):
+            raise ValueError(
+                "derivation root has conflicting canonical correlation groups"
+            )
         return self
 
 
@@ -709,7 +777,10 @@ class SignalProvenance(StrictTaskModel):
     )
     @classmethod
     def clean_required_text(cls, value: str, info: ValidationInfo) -> str:
-        return _required_text(value, info.field_name)
+        clean_value = _required_text(value, info.field_name)
+        if info.field_name == "correlation_group" and "|" in clean_value:
+            raise ValueError("correlation_group must not contain the reserved '|' delimiter")
+        return clean_value
 
     @field_validator("parent_signal_ids", "citations", "artifact_refs")
     @classmethod
@@ -779,7 +850,10 @@ class AnswerChoice(StrictTaskModel):
     @field_validator("label")
     @classmethod
     def clean_label(cls, value: str) -> str:
-        return _required_text(value, "answer choice label").upper()
+        return validate_credit_subject_hypothesis_id(
+            value,
+            "answer choice label",
+        ).upper()
 
     @field_validator("text")
     @classmethod
@@ -819,10 +893,15 @@ class FramedHypothesis(StrictTaskModel):
     predictions: list[str]
     answer_value: str | int | float | None = None
 
-    @field_validator("id", "statement", "type", "scope")
+    @field_validator("statement", "type", "scope")
     @classmethod
     def clean_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _required_text(value, info.field_name)
+
+    @field_validator("id")
+    @classmethod
+    def validate_credit_subject_id(cls, value: str) -> str:
+        return validate_credit_subject_hypothesis_id(value, "hypothesis id")
 
     @field_validator("initial_prior")
     @classmethod
@@ -1081,6 +1160,11 @@ class Hypothesis(BaseModel):
     created_by: Literal["initial", "spawned", "split", "reframed"] = "initial"
     why_existing_hypotheses_failed: str | None = None
     answer_value: str | int | float | None = None
+
+    @field_validator("id")
+    @classmethod
+    def validate_credit_subject_id(cls, value: str) -> str:
+        return validate_credit_subject_hypothesis_id(value, "hypothesis id")
 
     @field_validator(
         "prior",

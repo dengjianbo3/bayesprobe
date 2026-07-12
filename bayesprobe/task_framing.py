@@ -31,6 +31,7 @@ from bayesprobe.schemas import (
     is_forbidden_secret_key_name,
     is_secret_like_value,
     redact_secret_material,
+    validate_credit_subject_hypothesis_id,
 )
 from bayesprobe.task_admission import (
     TaskAdmissionError,
@@ -1255,7 +1256,10 @@ def _normalize_seed_id(value: str | None) -> str | None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise TaskFramingError("hypothesis seed id must be a non-empty string")
-    return value.strip()
+    try:
+        return validate_credit_subject_hypothesis_id(value, "hypothesis seed id")
+    except ValueError as error:
+        raise TaskFramingError(str(error)) from None
 
 
 def _normalize_seed_scope(value: str | None) -> str | None:

@@ -534,7 +534,7 @@ class DeterministicModelGateway:
                 frame_fit = FrameFit.SUPPORTS_UNRESOLVED
                 unresolved_likelihood = LikelihoodBand.MODERATELY_CONFIRMING.value
 
-        return {
+        payload = {
             "evidence_type": evidence_type.value,
             "likelihoods": likelihoods,
             "unresolved_likelihood": unresolved_likelihood,
@@ -543,6 +543,17 @@ class DeterministicModelGateway:
             "interpretation": f"Deterministic v0.2 interpretation for {source_type}.",
             "quality_overrides": {},
         }
+        if request.schema_version == "v0.1":
+            return {
+                key: payload[key]
+                for key in (
+                    "evidence_type",
+                    "likelihoods",
+                    "interpretation",
+                    "quality_overrides",
+                )
+            }
+        return payload
 
 
 def _deterministic_target_hypothesis(

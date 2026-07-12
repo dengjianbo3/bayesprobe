@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -205,6 +206,15 @@ def make_cycle(cycle_id: str = "cycle_repair") -> CycleRecord:
         cycle_index=1,
         signal_shape=CycleSignalShape.ACTIVE_ONLY,
     )
+
+
+def legacy_judgment_route_metadata() -> dict[str, str]:
+    return {
+        "judgment_route": "legacy_v0.1_migration",
+        "lifecycle_schema_version": "v0.1",
+        "frame_competition": "exclusive",
+        "frame_coverage": "exhaustive",
+    }
 
 
 def make_empty_probe_set(cycle_id: str = "cycle_repair") -> ProbeSet:
@@ -499,6 +509,7 @@ def test_direct_signal_schema_violation_does_not_attempt_repair_by_default():
                 "evidence_type": "not_a_type",
                 "likelihoods": {"H1": "neutral", "H2": "neutral"},
                 "interpretation": "Invalid evidence type.",
+                "quality_overrides": {},
             },
             "repair_evidence_judgment": {
                 "evidence_type": "supporting",
@@ -532,6 +543,7 @@ def test_direct_signal_repair_success_produces_normal_evidence():
                 "evidence_type": "not_a_type",
                 "likelihoods": {"H1": "neutral", "H2": "neutral"},
                 "interpretation": "Invalid evidence type.",
+                "quality_overrides": {},
             },
             "repair_evidence_judgment": {
                 "evidence_type": "supporting",
@@ -573,6 +585,7 @@ def test_direct_signal_repair_success_produces_normal_evidence():
         "evidence_type",
         "likelihoods",
         "interpretation",
+        "quality_overrides",
     ]
     assert event.evidence_type == EvidenceType.SUPPORTING
     assert event.likelihoods["H1"] == LikelihoodBand.MODERATELY_CONFIRMING
@@ -588,11 +601,13 @@ def test_direct_signal_invalid_repair_becomes_schema_violation():
                 "evidence_type": "not_a_type",
                 "likelihoods": {"H1": "neutral", "H2": "neutral"},
                 "interpretation": "Invalid evidence type.",
+                "quality_overrides": {},
             },
             "repair_evidence_judgment": {
                 "evidence_type": "still_not_a_type",
                 "likelihoods": {"H1": "neutral", "H2": "neutral"},
                 "interpretation": "Still invalid.",
+                "quality_overrides": {},
             },
         }
     )
@@ -659,6 +674,7 @@ def test_direct_signal_valid_judgment_records_model_trace():
                     "H2": "moderately_disconfirming",
                 },
                 "interpretation": "Scripted supporting judgment.",
+                "quality_overrides": {},
             }
         }
     )
@@ -677,7 +693,7 @@ def test_direct_signal_valid_judgment_records_model_trace():
     assert request.prompt_version == "v0.1"
     assert request.schema_name == "EvidenceJudgment"
     assert request.schema_version == "v0.1"
-    assert request.metadata == {}
+    assert request.metadata == legacy_judgment_route_metadata()
     assert event.model_trace == {
         "task": "judge_evidence",
         "adapter_kind": "scripted",
@@ -685,7 +701,7 @@ def test_direct_signal_valid_judgment_records_model_trace():
         "prompt_version": "v0.1",
         "schema_name": "EvidenceJudgment",
         "schema_version": "v0.1",
-        "metadata": {},
+        "metadata": legacy_judgment_route_metadata(),
     }
 
 
@@ -736,7 +752,7 @@ def test_direct_signal_gateway_validation_error_becomes_schema_violation():
         "prompt_version": "v0.1",
         "schema_name": "EvidenceJudgment",
         "schema_version": "v0.1",
-        "metadata": {},
+        "metadata": legacy_judgment_route_metadata(),
     }
 
 
@@ -747,6 +763,7 @@ def test_direct_signal_repaired_judgment_records_repair_model_trace():
                 "evidence_type": "not_a_type",
                 "likelihoods": {"H1": "neutral", "H2": "neutral"},
                 "interpretation": "Invalid evidence type.",
+                "quality_overrides": {},
             },
             "repair_evidence_judgment": {
                 "evidence_type": "supporting",
@@ -755,6 +772,7 @@ def test_direct_signal_repaired_judgment_records_repair_model_trace():
                     "H2": "moderately_disconfirming",
                 },
                 "interpretation": "Repaired supporting judgment.",
+                "quality_overrides": {},
             },
         }
     )
@@ -776,7 +794,10 @@ def test_direct_signal_repaired_judgment_records_repair_model_trace():
     assert repair_request.prompt_version == "v0.1"
     assert repair_request.schema_name == "EvidenceJudgment"
     assert repair_request.schema_version == "v0.1"
-    assert repair_request.metadata == {"repair_attempt_index": 1}
+    assert repair_request.metadata == {
+        **legacy_judgment_route_metadata(),
+        "repair_attempt_index": 1,
+    }
     assert event.discard_reason is None
     assert event.model_trace == {
         "task": "repair_evidence_judgment",
@@ -786,7 +807,7 @@ def test_direct_signal_repaired_judgment_records_repair_model_trace():
         "schema_name": "EvidenceJudgment",
         "schema_version": "v0.1",
         "repair_attempt_index": 1,
-        "metadata": {},
+        "metadata": legacy_judgment_route_metadata(),
     }
 
 
@@ -821,7 +842,7 @@ def test_direct_signal_repair_exhaustion_records_latest_repair_trace():
         "schema_name": "EvidenceJudgment",
         "schema_version": "v0.1",
         "repair_attempt_index": 2,
-        "metadata": {},
+        "metadata": legacy_judgment_route_metadata(),
     }
 
 
@@ -857,6 +878,7 @@ def test_core_passes_judgment_repair_policy_to_evidence_gate():
                 "evidence_type": "not_a_type",
                 "likelihoods": {"H1": "neutral", "H2": "neutral"},
                 "interpretation": "Invalid evidence type.",
+                "quality_overrides": {},
             },
             "repair_evidence_judgment": {
                 "evidence_type": "supporting",
@@ -865,6 +887,7 @@ def test_core_passes_judgment_repair_policy_to_evidence_gate():
                     "H2": "moderately_disconfirming",
                 },
                 "interpretation": "Core repaired judgment.",
+                "quality_overrides": {},
             },
         }
     )
@@ -1376,6 +1399,7 @@ def test_direct_signal_schema_violation_becomes_discarded_evidence():
             "judge_evidence": {
                 "likelihoods": {"H1": "neutral", "H2": "neutral"},
                 "interpretation": "Missing evidence type.",
+                "quality_overrides": {},
             }
         }
     )
@@ -1415,7 +1439,7 @@ def test_direct_signal_schema_violation_becomes_discarded_evidence():
         "H2": LikelihoodBand.NEUTRAL,
     }
     assert event.discard_reason.startswith("schema_violation:")
-    assert "evidence judgment missing field: evidence_type" in event.discard_reason
+    assert "requires exactly the reviewed four fields" in event.discard_reason
     assert event.interpretation == "Model gateway judgment failed schema validation."
     assert event.reliability == 0.0
     assert event.independence == 0.0
@@ -1431,6 +1455,7 @@ def test_core_schema_violation_does_not_update_belief_state():
             "judge_evidence": {
                 "likelihoods": {"H1": "moderately_confirming", "H2": "moderately_disconfirming"},
                 "interpretation": "Missing evidence type.",
+                "quality_overrides": {},
             }
         }
     )
@@ -1477,6 +1502,7 @@ def test_core_accepts_model_gateway_for_evidence_gate():
                 "evidence_type": "boundary_condition",
                 "likelihoods": {"H1": "weakly_disconfirming", "H2": "neutral"},
                 "interpretation": "Core configured scripted judgment.",
+                "quality_overrides": {},
             }
         }
     )
@@ -2725,11 +2751,12 @@ def test_core_commits_memory_once_and_ledgers_normalized_cross_cycle_duplicate(
     assert second.frame_mass_updates == []
     assert second.belief_state.evidence_memory.correlation_credit == first_credit
     assert second.belief_state.evidence_memory.accepted_evidence_ids == [
-        "run_1_cycle_memory_1_E1"
+        first.evidence_events[0].id
     ]
-    assert second.belief_state.evidence_memory.discard_and_schema_history == [
-        "run_1_cycle_memory_2_E1:duplicate_exact"
-    ]
+    assert [
+        json.loads(entry)
+        for entry in second.belief_state.evidence_memory.discard_and_schema_history
+    ] == [[second.evidence_events[0].id, "duplicate_exact"]]
     signal_records = ledger.read_all("external_signal")
     assert len(signal_records) == 2
     assert all(record["payload"]["provenance"] for record in signal_records)
@@ -2754,7 +2781,7 @@ def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
         cycle=cycle.model_copy(update={"cycle_index": 2}),
         belief_state=first.belief_state,
         probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[_memory_signal("S_replay_2", "Second audit result.", root="root-2")],
+        signals=[_memory_signal("S_replay_2", "First audit result.", root="root-1")],
     )
 
     assert len(gateway.requests) == 1
@@ -2763,10 +2790,10 @@ def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
     assert replayed.belief_updates == []
     assert [
         record["payload"]["id"] for record in ledger.read_all("evidence_event")
-    ] == ["run_1_cycle_memory_replay_E1"]
+    ] == [first.evidence_events[0].id]
 
 
-def test_migrated_v01_ledger_replay_is_neutralized_before_provider_and_memory(
+def test_migrated_v01_reordered_inserted_replay_fails_before_provider_or_memory(
     tmp_path: Path,
 ):
     gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
@@ -2789,24 +2816,33 @@ def test_migrated_v01_ledger_replay_is_neutralized_before_provider_and_memory(
         update={"ledger_refs": {"evidence_events": [event_id]}}
     )
 
-    result = BayesProbeCore(ledger=ledger, model_gateway=gateway).integrate_cycle(
-        cycle=cycle,
-        belief_state=legacy_state,
-        probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[
-            _memory_signal(
-                "S_migrated_replay",
-                "A different payload under an already-recorded evidence id.",
-                root="root-migrated-replay",
-            )
-        ],
-    )
+    prior_state_payload = legacy_state.model_dump(mode="python")
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+
+    with pytest.raises(
+        ValueError,
+        match="cannot replay an already-used cycle without signal identity memory",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=legacy_state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                _memory_signal(
+                    "S_inserted_before_replay",
+                    "An inserted payload that shifts the old positional event.",
+                    root="root-inserted-before-replay",
+                ),
+                _memory_signal(
+                    "S_migrated_replay",
+                    "A different payload under an already-recorded evidence id.",
+                    root="root-migrated-replay",
+                ),
+            ],
+        )
 
     assert gateway.requests == []
-    assert result.evidence_events[0].discard_reason == "duplicate evidence event id"
-    assert result.belief_updates == []
-    assert result.belief_state.evidence_memory == EvidenceMemorySnapshot()
-    assert result.belief_state.ledger_refs["evidence_events"] == [event_id]
+    assert legacy_state.model_dump(mode="python") == prior_state_payload
     assert [
         record["payload"]["id"] for record in ledger.read_all("evidence_event")
     ] == [event_id]

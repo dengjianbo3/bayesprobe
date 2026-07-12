@@ -14,6 +14,9 @@
       },
       "response": {
         "evidence_type": "supporting",
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
         "interpretation": "At constant volume, adding inert gas does not change reacting-gas partial pressures, supporting the no-shift hypothesis.",
         "likelihoods": {
           "H1": "moderately_confirming",
@@ -33,6 +36,9 @@
       },
       "response": {
         "evidence_type": "counterevidence",
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
         "interpretation": "The passive expert correction contradicts the initial support cue and gives stronger support to H2.",
         "likelihoods": {
           "H1": "moderately_disconfirming",
@@ -52,6 +58,9 @@
       },
       "response": {
         "evidence_type": "supporting",
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
         "interpretation": "The reliable part of the noisy stream supports H1 while the unrelated sentence should not dominate the update.",
         "likelihoods": {
           "H1": "weakly_confirming",
@@ -71,6 +80,9 @@
       },
       "response": {
         "evidence_type": "counterevidence",
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
         "interpretation": "The system log indicates the old hypothesis fails under a concrete regression condition, moving support toward H2.",
         "likelihoods": {
           "H1": "moderately_disconfirming",
@@ -90,6 +102,9 @@
       },
       "response": {
         "evidence_type": "sender_judgment",
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
         "interpretation": "The peer projection is useful as a signal about another agent's belief, but should not be imported as BayesProbe's posterior.",
         "likelihoods": {
           "H1": "weakly_disconfirming",
@@ -109,6 +124,9 @@
       },
       "response": {
         "evidence_type": "supporting",
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
         "interpretation": "Malformed recorded provider judgment intentionally omits H2 so the repair path is exercised.",
         "likelihoods": {
           "H1": "moderately_confirming"
@@ -122,6 +140,9 @@
       },
       "response": {
         "evidence_type": "supporting",
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
         "interpretation": "The repaired provider judgment covers both requested rivals and supports H1.",
         "likelihoods": {
           "H1": "moderately_confirming",
@@ -140,6 +161,9 @@
       },
       "response": {
         "evidence_type": "boundary_condition",
+        "unresolved_likelihood": null,
+        "frame_fit": "underdetermined",
+        "unexplained_observation": null,
         "interpretation": "The signal identifies a boundary condition but does not justify a decisive shift between H1 and H2.",
         "likelihoods": {
           "H1": "neutral",
@@ -158,6 +182,9 @@
       },
       "response": {
         "evidence_type": "supporting",
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
         "interpretation": "Generic recorded judgment for deterministic active probe output supporting H1.",
         "likelihoods": {
           "H1": "moderately_confirming"

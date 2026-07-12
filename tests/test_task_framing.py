@@ -680,6 +680,31 @@ def test_explicit_framer_uses_explicit_seeds():
     assert [item.initial_prior for item in frame.hypothesis_frame.hypotheses] == [0.5, 0.5]
 
 
+def test_explicit_seed_id_keeps_domain_specific_reserved_syntax_error():
+    with pytest.raises(
+        TaskFramingError,
+        match="hypothesis seed id must not use reserved credit key syntax",
+    ):
+        ExplicitTaskFramer().frame(
+            TaskFramingInput(
+                run_id="run_reserved_seed_id",
+                question="Which explanation is best supported?",
+                hypothesis_seeds=[
+                    HypothesisSeed(id="H|1", statement="The first explanation."),
+                    HypothesisSeed(id="H2", statement="The second explanation."),
+                ],
+            )
+        )
+
+
+def test_answer_choice_label_keeps_mcq_domain_reserved_syntax_error():
+    with pytest.raises(
+        ValueError,
+        match="answer choice label must not use reserved credit key syntax",
+    ):
+        AnswerChoice(label="A|B", text="Injected composite label")
+
+
 def test_explicit_framer_rejects_unseeded_open_question():
     with pytest.raises(TaskFramingError, match="requires a model or recorded task framer"):
         ExplicitTaskFramer().frame(

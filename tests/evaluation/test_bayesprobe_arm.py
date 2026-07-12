@@ -39,6 +39,9 @@ class CapabilityGateway:
                     )
                     for target in targets
                 },
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
                 "interpretation": "The exact result supports answer B.",
                 "quality_overrides": {},
             }

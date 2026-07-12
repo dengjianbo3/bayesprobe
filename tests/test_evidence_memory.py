@@ -18,6 +18,7 @@ from bayesprobe.schemas import (
     EvidenceMemorySnapshot,
     EvidenceType,
     ExternalSignal,
+    FramingMethod,
     LikelihoodBand,
     ProbeSet,
     SignalKind,
@@ -254,6 +255,83 @@ def test_exact_cross_cycle_repeat_produces_no_update_or_provider_call():
     assert len(gateway.requests) == 1
 
 
+def test_native_event_identity_survives_reordered_and_inserted_signals():
+    gate = EvidenceIntegrationGate(model_gateway=CountingGateway())
+    state = _state()
+    cycle = _cycle(1)
+    first_signal = _signal("S_first", "The first audited observation.", root="root-1")
+    second_signal = _signal("S_second", "The second audited observation.", root="root-2")
+    inserted = _signal("S_inserted", "An inserted audited observation.", root="root-3")
+
+    original = gate.integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[first_signal, second_signal],
+    )
+    reordered = gate.integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[inserted, second_signal, first_signal],
+    )
+
+    original_ids = {
+        event.derived_from_signal: event.id for event in original.evidence_events
+    }
+    reordered_ids = {
+        event.derived_from_signal: event.id for event in reordered.evidence_events
+    }
+    assert reordered_ids["S_first"] == original_ids["S_first"]
+    assert reordered_ids["S_second"] == original_ids["S_second"]
+
+
+def test_native_event_identity_is_unique_for_duplicate_signals_in_one_batch():
+    gateway = CountingGateway()
+    duplicate = _signal("S_duplicate_1", "The same audited observation.")
+
+    result = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=_cycle(1),
+        belief_state=_state(),
+        probe_set=_probe_set(1),
+        signals=[duplicate, duplicate.model_copy(update={"id": "S_duplicate_2"})],
+    )
+
+    assert len({event.id for event in result.evidence_events}) == 2
+    assert result.evidence_events[0].id.endswith("_1")
+    assert result.evidence_events[1].id.endswith("_2")
+    assert len(gateway.requests) == 1
+
+
+def test_native_event_identity_distinguishes_same_content_with_different_roots():
+    gate = EvidenceIntegrationGate(model_gateway=CountingGateway())
+    state = _state()
+    cycle = _cycle(1)
+    first = _signal("S_same_content_root_1", "Shared wording.", root="root-1")
+    second = _signal("S_same_content_root_2", "Shared wording.", root="root-2")
+
+    original = gate.integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[first, second],
+    )
+    reordered = gate.integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[second, first],
+    )
+
+    original_ids = {
+        event.derived_from_signal: event.id for event in original.evidence_events
+    }
+    reordered_ids = {
+        event.derived_from_signal: event.id for event in reordered.evidence_events
+    }
+    assert reordered_ids == original_ids
+
+
 def test_same_root_restatement_has_zero_independence():
     gateway = CountingGateway()
     gate = EvidenceIntegrationGate(
@@ -365,8 +443,44 @@ def test_correlation_credit_saturation_stays_visible_with_zero_weight():
     assert decision.effective_update_weight == 0.0
     assert decision.discard_reason == "correlation_credit_saturated"
     assert memory.discard_and_schema_history == [
-        "E_credit_2:correlation_credit_saturated"
+        '["E_credit_2","correlation_credit_saturated"]'
     ]
+
+
+def test_discard_history_uses_exact_event_id_with_colons_for_idempotency():
+    manager = EvidenceMemoryManager()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_discard_colons", "A malformed provider result."),
+        run_id="run_memory",
+    )
+    decision = manager.classify(EvidenceMemorySnapshot(), signal)
+    event = EvidenceEvent(
+        id="run:cycle:event:1",
+        derived_from_signal=signal.id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=signal.raw_content,
+        likelihoods={"A": LikelihoodBand.NEUTRAL},
+        discard_reason="schema_violation:invalid judgment",
+    )
+
+    committed = manager.commit(
+        EvidenceMemorySnapshot(),
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+    recommitted = manager.commit(
+        committed,
+        signal=signal,
+        event=event,
+        decision=decision,
+    )
+
+    assert committed.discard_and_schema_history == [
+        '["run:cycle:event:1","schema_violation:invalid judgment"]'
+    ]
+    assert recommitted == committed
 
 
 def test_neutral_event_still_correlates_later_model_reasoning_from_same_session():
@@ -518,6 +632,111 @@ def test_same_source_changing_declared_groups_shares_cumulative_credit():
         json.loads(identity)[2]
         for identity in memory.source_content_fingerprints.values()
     } == {"canonical-source-group"}
+
+
+@pytest.mark.parametrize(
+    ("source_identities", "derivation_roots", "expected_message"),
+    [
+        (
+            {"S1": "shared-source", "S2": "shared-source"},
+            {"S1": "root-1", "S2": "root-2"},
+            "source identity has conflicting canonical correlation groups",
+        ),
+        (
+            {"S1": "source-1", "S2": "source-2"},
+            {"S1": "shared-root", "S2": "shared-root"},
+            "derivation root has conflicting canonical correlation groups",
+        ),
+    ],
+)
+def test_snapshot_rejects_conflicting_canonical_lineage_groups(
+    source_identities,
+    derivation_roots,
+    expected_message,
+):
+    fingerprints = {
+        "S1": "sha256:" + "a" * 64,
+        "S2": "sha256:" + "b" * 64,
+    }
+    identities = {
+        signal_id: json.dumps(
+            [source_identities[signal_id], fingerprint, f"group-{index}"],
+            separators=(",", ":"),
+        )
+        for index, (signal_id, fingerprint) in enumerate(
+            fingerprints.items(),
+            start=1,
+        )
+    }
+
+    with pytest.raises(ValueError, match=expected_message):
+        EvidenceMemorySnapshot(
+            content_fingerprints=fingerprints,
+            source_content_fingerprints=identities,
+            derivation_roots=derivation_roots,
+        )
+
+
+def test_canonical_group_is_map_order_independent_and_stays_saturated():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(max_cumulative_effective_weight_per_direction=0.5)
+    )
+    fingerprints = {
+        "S_unrelated": "sha256:" + "a" * 64,
+        "S_canonical": "sha256:" + "b" * 64,
+    }
+    identities = {
+        "S_unrelated": '["other-source","sha256:' + "a" * 64 + '","other-group"]',
+        "S_canonical": '["source.example/report","sha256:'
+        + "b" * 64
+        + '","canonical-source-group"]',
+    }
+    roots = {"S_unrelated": "other-root", "S_canonical": "root-canonical"}
+    snapshot = EvidenceMemorySnapshot(
+        content_fingerprints=fingerprints,
+        source_content_fingerprints=identities,
+        derivation_roots=roots,
+        correlation_credit={"canonical-source-group|A|confirming": 0.5},
+    )
+    reversed_snapshot = EvidenceMemorySnapshot(
+        content_fingerprints=dict(reversed(fingerprints.items())),
+        source_content_fingerprints=dict(reversed(identities.items())),
+        derivation_roots=dict(reversed(roots.items())),
+        correlation_credit={"canonical-source-group|A|confirming": 0.5},
+    )
+    raw_signal = _signal(
+        "S_reordered",
+        "A new observation from the canonical source.",
+        root="root-new",
+    )
+    raw_signal = raw_signal.model_copy(
+        update={
+            "provenance": raw_signal.provenance.model_copy(
+                update={"correlation_group": "caller-supplied-fresh-group"}
+            )
+        }
+    )
+    signal = SignalProvenanceNormalizer().normalize(raw_signal, run_id="run_memory")
+
+    decisions = [
+        manager.classify(
+            candidate,
+            signal,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+            base_effective_weight=0.3,
+        )
+        for candidate in (snapshot, reversed_snapshot)
+    ]
+
+    assert [item.canonical_correlation_group for item in decisions] == [
+        "canonical-source-group",
+        "canonical-source-group",
+    ]
+    assert [item.effective_update_weight for item in decisions] == [0.0, 0.0]
+    assert [item.discard_reason for item in decisions] == [
+        "correlation_credit_saturated",
+        "correlation_credit_saturated",
+    ]
 
 
 def test_unknown_parent_is_ledger_visible_but_receives_zero_independent_credit():
@@ -771,6 +990,77 @@ def test_native_judgment_request_contains_full_semantics_provenance_and_memory()
     assert request.input["probes"] == []
     assert result.evidence_events[0].schema_version == "v0.2"
     assert result.evidence_events[0].frame_fit.value == "explained_by_named"
+
+
+def test_native_v02_route_rejects_exact_legacy_four_field_judgment():
+    class LegacyFourFieldGateway(CountingGateway):
+        def complete_structured(self, request):
+            self.requests.append(request)
+            return {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "A": "moderately_confirming",
+                    "B": "moderately_disconfirming",
+                },
+                "interpretation": "Legacy-shaped response on a native request.",
+                "quality_overrides": {},
+            }
+
+    gateway = LegacyFourFieldGateway()
+
+    result = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=_cycle(1),
+        belief_state=_state(),
+        probe_set=_probe_set(1),
+        signals=[_signal("S_native_legacy_shape", "A native signal.")],
+    )
+
+    event = result.evidence_events[0]
+    assert event.discard_reason.startswith("schema_violation:")
+    assert "missing field" in event.discard_reason
+    assert gateway.requests[0].schema_version == "v0.2"
+    assert gateway.requests[0].metadata["judgment_route"] == "native_v0.2"
+    assert event.model_trace["metadata"]["judgment_route"] == "native_v0.2"
+
+
+def test_explicit_migration_route_completes_exact_legacy_shape_auditably():
+    class LegacyFourFieldGateway(CountingGateway):
+        def complete_structured(self, request):
+            self.requests.append(request)
+            return {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "A": "moderately_confirming",
+                    "B": "moderately_disconfirming",
+                },
+                "interpretation": "Reviewed legacy response shape.",
+                "quality_overrides": {},
+            }
+
+    gateway = LegacyFourFieldGateway()
+    state = _state()
+    state = state.model_copy(
+        update={
+            "task_frame": state.task_frame.model_copy(
+                update={"framing_method": FramingMethod.LEGACY_MIGRATION}
+            )
+        }
+    )
+
+    result = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[_signal("S_explicit_legacy", "A reviewed migrated signal.")],
+    )
+
+    event = result.evidence_events[0]
+    assert event.discard_reason is None
+    assert gateway.requests[0].schema_version == "v0.1"
+    assert gateway.requests[0].metadata["judgment_route"] == "legacy_v0.1_migration"
+    assert event.model_trace["metadata"]["judgment_route"] == (
+        "legacy_v0.1_migration"
+    )
 
 
 def test_v02_evidence_event_requires_native_provenance_and_memory_fields():
