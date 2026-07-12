@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from bayesprobe.belief import (
+    CoverageAwareBeliefSolver,
     mark_replayed_evidence_events,
-    solve_updates,
     summarize_hypotheses,
 )
 from bayesprobe.evidence import EvidenceIntegrationGate, EvidenceIntegrationResult
+from bayesprobe.frame_policy import FrameAdequacyDecision, FrameAdequacyPolicy
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.ledger import JsonlLedgerStore
@@ -20,7 +21,12 @@ from bayesprobe.schemas import (
     CycleSignalShape,
     EvidenceEvent,
     ExternalSignal,
+    FrameMassUpdate,
+    FramingMethod,
     HypothesisEvolution,
+    HypothesisCompetition,
+    HypothesisCoverage,
+    HypothesisStatus,
     ProbeCandidate,
     ProbeSet,
     SignalKind,
@@ -35,6 +41,8 @@ class CycleResult:
     belief_state: BeliefState
     evidence_events: list[EvidenceEvent]
     belief_updates: list[BeliefUpdate]
+    frame_mass_updates: list[FrameMassUpdate]
+    frame_adequacy_decision: FrameAdequacyDecision
     hypothesis_evolutions: list[HypothesisEvolution]
     probe_candidates: list[ProbeCandidate] = field(default_factory=list)
 
@@ -51,6 +59,8 @@ class BayesProbeCore:
         self._judgment_repair_policy = judgment_repair_policy
         self._cycle_allocations: dict[str, int] = {}
         self._evidence_gate = self._create_evidence_integration_gate()
+        self._belief_solver = self._create_belief_solver()
+        self._frame_policy = self._create_frame_adequacy_policy()
         self._evolution_policy = self._create_hypothesis_evolution_policy()
 
     @property
@@ -101,26 +111,59 @@ class BayesProbeCore:
             evidence_events,
         )
         probe_candidates = integration.probe_candidates
-        updated_hypotheses, belief_updates = solve_updates(
+        solve_result = self._belief_solver.solve(
+            belief_state,
+            evidence_events,
             run_id=cycle.run_id,
             cycle_id=cycle.cycle_id,
-            belief_state=belief_state,
+        )
+        belief_updates = solve_result.belief_updates
+        frame_mass_updates = solve_result.frame_mass_updates
+        frame_adequacy_decision = self._frame_policy.assess(
+            previous=solve_result.frame_state,
             events=evidence_events,
+            hypotheses=solve_result.hypotheses,
         )
-        evolution_result = self._evolution_policy.evolve(
-            cycle=closed_cycle,
-            previous_belief_state=belief_state,
-            updated_hypotheses=updated_hypotheses,
-            evidence_events=evidence_events,
-            belief_updates=belief_updates,
+        record_frame_adequacy_decision = (
+            belief_state.task_frame.framing_method
+            != FramingMethod.LEGACY_MIGRATION
+            or frame_adequacy_decision.frame_state.adequacy_status
+            != belief_state.frame_state.adequacy_status
+            or frame_adequacy_decision.should_expand
+            or bool(frame_adequacy_decision.trigger_event_ids)
         )
-        relation = belief_state.task_frame.hypothesis_frame.relation
-        evolved_hypotheses = evolution_result.hypotheses
-        evolutions = evolution_result.evolutions
-        probe_candidates = [
-            *probe_candidates,
-            *evolution_result.probe_candidates,
-        ]
+        if (
+            solve_result.frame_state.competition
+            == HypothesisCompetition.EXCLUSIVE
+            and solve_result.frame_state.coverage == HypothesisCoverage.OPEN
+        ):
+            # Legacy evolution cannot preserve the solver's private unresolved slot.
+            evolved_hypotheses = solve_result.hypotheses
+            evolutions = []
+        else:
+            evolution_result = self._evolution_policy.evolve(
+                cycle=closed_cycle,
+                previous_belief_state=belief_state,
+                updated_hypotheses=solve_result.hypotheses,
+                evidence_events=evidence_events,
+                belief_updates=belief_updates,
+            )
+            evolved_hypotheses = evolution_result.hypotheses
+            evolutions = evolution_result.evolutions
+            probe_candidates = [
+                *probe_candidates,
+                *evolution_result.probe_candidates,
+            ]
+        next_frame_state = frame_adequacy_decision.frame_state.model_copy(
+            update={
+                "active_hypothesis_ids": [
+                    hypothesis.id
+                    for hypothesis in evolved_hypotheses
+                    if hypothesis.status
+                    not in {HypothesisStatus.RETIRED, HypothesisStatus.ARCHIVED}
+                ]
+            }
+        )
         existing_ledger_refs = dict(belief_state.ledger_refs)
         merged_ledger_refs = dict(existing_ledger_refs)
         merged_ledger_refs["probe_sets"] = [
@@ -135,6 +178,10 @@ class BayesProbeCore:
             *existing_ledger_refs.get("belief_updates", []),
             *(update.update_id for update in belief_updates),
         ]
+        merged_ledger_refs["frame_mass_updates"] = [
+            *existing_ledger_refs.get("frame_mass_updates", []),
+            *(update.update_id for update in frame_mass_updates),
+        ]
         merged_ledger_refs["hypothesis_evolutions"] = [
             *existing_ledger_refs.get("hypothesis_evolutions", []),
             *(evolution.evolution_id for evolution in evolutions),
@@ -145,19 +192,22 @@ class BayesProbeCore:
         ]
         posterior_summary, uncertainty_summary = summarize_hypotheses(
             evolved_hypotheses,
-            relation=relation,
+            frame_state=next_frame_state,
         )
-        updated_state = belief_state.model_copy(
-            update={
+        updated_state_payload = belief_state.model_dump(mode="python")
+        updated_state_payload.update(
+            {
                 "belief_state_id": f"{cycle.run_id}_bs_{cycle.cycle_index}",
                 "cycle_id": cycle.cycle_id,
                 "cycle_index": cycle.cycle_index,
                 "hypotheses": evolved_hypotheses,
+                "frame_state": next_frame_state,
                 "posterior_summary": posterior_summary,
                 "uncertainty_summary": uncertainty_summary,
                 "ledger_refs": merged_ledger_refs,
             }
         )
+        updated_state = BeliefState.model_validate(updated_state_payload)
         integrated_cycle = closed_cycle.model_copy(
             update={
                 "boundary_status": BoundaryStatus.INTEGRATED,
@@ -170,6 +220,9 @@ class BayesProbeCore:
             probe_set=probe_set,
             evidence_events=canonical_evidence_events,
             belief_updates=belief_updates,
+            frame_mass_updates=frame_mass_updates,
+            frame_adequacy_decision=frame_adequacy_decision,
+            record_frame_adequacy_decision=record_frame_adequacy_decision,
             evolutions=evolutions,
             probe_candidates=probe_candidates,
             belief_state=updated_state,
@@ -179,6 +232,8 @@ class BayesProbeCore:
             belief_state=updated_state,
             evidence_events=evidence_events,
             belief_updates=belief_updates,
+            frame_mass_updates=frame_mass_updates,
+            frame_adequacy_decision=frame_adequacy_decision,
             hypothesis_evolutions=evolutions,
             probe_candidates=probe_candidates,
         )
@@ -191,6 +246,12 @@ class BayesProbeCore:
             model_gateway=self._model_gateway,
             judgment_repair_policy=self._judgment_repair_policy,
         )
+
+    def _create_belief_solver(self) -> CoverageAwareBeliefSolver:
+        return CoverageAwareBeliefSolver()
+
+    def _create_frame_adequacy_policy(self) -> FrameAdequacyPolicy:
+        return FrameAdequacyPolicy()
 
     def _create_hypothesis_evolution_policy(self) -> HypothesisEvolutionEngine:
         return HypothesisEvolutionEngine()
@@ -240,6 +301,9 @@ class BayesProbeCore:
         probe_set: ProbeSet,
         evidence_events: list[EvidenceEvent],
         belief_updates: list[BeliefUpdate],
+        frame_mass_updates: list[FrameMassUpdate],
+        frame_adequacy_decision: FrameAdequacyDecision,
+        record_frame_adequacy_decision: bool,
         evolutions: list[HypothesisEvolution],
         probe_candidates: list[ProbeCandidate],
         belief_state: BeliefState,
@@ -254,6 +318,21 @@ class BayesProbeCore:
             self._ledger.append("evidence_event", event)
         for update in belief_updates:
             self._ledger.append("belief_update", update)
+        for update in frame_mass_updates:
+            self._ledger.append("frame_mass_update", update)
+        if record_frame_adequacy_decision:
+            self._ledger.append(
+                "frame_adequacy_decision",
+                {
+                    "cycle_id": cycle.cycle_id,
+                    "frame_state": frame_adequacy_decision.frame_state.model_dump(
+                        mode="json"
+                    ),
+                    "should_expand": frame_adequacy_decision.should_expand,
+                    "trigger_event_ids": frame_adequacy_decision.trigger_event_ids,
+                    "reason": frame_adequacy_decision.reason,
+                },
+            )
         for evolution in evolutions:
             self._ledger.append("hypothesis_evolution", evolution)
         for candidate in probe_candidates:

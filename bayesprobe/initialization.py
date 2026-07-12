@@ -23,6 +23,7 @@ from bayesprobe.schemas import (
     TaskAdmissionStatus,
     TaskKind,
     HypothesisCompetition,
+    HypothesisCoverage,
     HypothesisRelation,
     is_secret_like_value,
 )
@@ -146,11 +147,6 @@ class BayesProbeInitializer:
             current_cycle_id=INITIAL_CYCLE_ID,
             metadata=metadata,
         )
-        compatibility_relation = _compatibility_relation(task_frame)
-        belief_summary, uncertainty_summary = summarize_hypotheses(
-            hypotheses,
-            relation=compatibility_relation,
-        )
         frame_state = FrameState(
             frame_id=task_frame.hypothesis_frame.frame_id,
             competition=task_frame.hypothesis_frame.competition,
@@ -158,8 +154,25 @@ class BayesProbeInitializer:
             active_hypothesis_ids=[item.id for item in hypotheses],
             unresolved_alternative_mass=(
                 task_frame.hypothesis_frame.unresolved_alternative_mass
+                if task_frame.hypothesis_frame.unresolved_alternative_mass
+                is not None
+                else (
+                    0.0
+                    if task_frame.hypothesis_frame.competition
+                    == HypothesisCompetition.EXCLUSIVE
+                    else None
+                )
             ),
-            adequacy_status=FrameAdequacyStatus.PROVISIONAL,
+            adequacy_status=(
+                FrameAdequacyStatus.ADEQUATE
+                if task_frame.hypothesis_frame.coverage
+                == HypothesisCoverage.EXHAUSTIVE
+                else FrameAdequacyStatus.PROVISIONAL
+            ),
+        )
+        belief_summary, uncertainty_summary = summarize_hypotheses(
+            hypotheses,
+            frame_state=frame_state,
         )
         evidence_memory = EvidenceMemorySnapshot()
         belief_state = BeliefState(
@@ -268,12 +281,6 @@ def validate_initialize_run_input_security(input: InitializeRunInput) -> None:
 def _requested_output_shape(metadata: dict[str, Any]) -> str | None:
     value = metadata.get("requested_output_shape")
     return value if isinstance(value, str) and value.strip() else None
-
-
-def _compatibility_relation(task_frame: TaskFrame) -> HypothesisRelation:
-    if task_frame.hypothesis_frame.competition == HypothesisCompetition.INDEPENDENT:
-        return HypothesisRelation.INDEPENDENT
-    return HypothesisRelation.EXCLUSIVE_EXHAUSTIVE
 
 
 def _clean_required(value: str, field_name: str) -> str:

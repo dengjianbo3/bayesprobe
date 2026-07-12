@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore, EvidenceIntegrationGate
+from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import (
@@ -12,6 +13,8 @@ from bayesprobe.model_gateway import (
 )
 from bayesprobe.schemas import (
     BeliefState,
+    AnswerContractOutline,
+    AnswerValueType,
     BoundaryStatus,
     CycleRecord,
     CycleSignalShape,
@@ -19,6 +22,8 @@ from bayesprobe.schemas import (
     EvidenceType,
     ExternalSignal,
     FramingMethod,
+    FrameAdequacyStatus,
+    FrameFit,
     Hypothesis,
     HypothesisEvolution,
     EvolutionOperation,
@@ -26,7 +31,11 @@ from bayesprobe.schemas import (
     ProbeDesign,
     ProbeSet,
     SignalKind,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
+    TaskKind,
 )
+from bayesprobe.task_framing import ModelTaskFramer
 
 
 class RecordingSignalInbox(SignalInbox):
@@ -114,6 +123,71 @@ def make_belief_state(cycle_id: str = "cycle_1", cycle_index: int = 0) -> Belief
             ),
         ],
     )
+
+
+def make_exact_belief_state() -> BeliefState:
+    initializer = BayesProbeInitializer(
+        task_framer=ModelTaskFramer(
+            ScriptedModelGateway(
+                {
+                    "frame_open_question": {
+                        "task_kind": "exact_answer",
+                        "answer_relationship": "selection",
+                        "answer_contract": {
+                            "objective": "Return the supported integer value.",
+                            "answer_value_type": "integer",
+                            "answer_format": "integer",
+                            "required_sections": ["answer", "basis", "uncertainty"],
+                            "decision_form": "single_value",
+                            "permits_synthesis": False,
+                        },
+                        "competition": "exclusive",
+                        "coverage": "open",
+                        "hypotheses": [
+                            {
+                                "statement": "The requested integer is 7.",
+                                "type": "answer_candidate",
+                                "scope": "The supplied integer constraints.",
+                                "falsifiers": ["A constraint excludes 7."],
+                                "predictions": ["Substitution verifies every constraint."],
+                                "answer_value": 7,
+                            },
+                            {
+                                "statement": "The requested integer is 9.",
+                                "type": "answer_candidate",
+                                "scope": "The supplied integer constraints.",
+                                "falsifiers": ["A constraint excludes 9."],
+                                "predictions": ["Substitution verifies every constraint."],
+                                "answer_value": 9,
+                            },
+                        ],
+                        "coverage_statement": "The named values are initial candidates.",
+                        "coverage_limitation": "Other integer values remain unresolved.",
+                    }
+                }
+            )
+        )
+    )
+    return initializer.initialize(
+        InitializeRunInput(
+            run_id="run_1",
+            problem="Which integer satisfies the constraints?",
+        ),
+        admission_decision=TaskAdmissionDecision(
+            attempt_id="run_1_admission",
+            status=TaskAdmissionStatus.ADMITTED,
+            epistemic_basis=["The integer answer can be checked."],
+            proposed_task_kind=TaskKind.EXACT_ANSWER,
+            answer_contract_outline=AnswerContractOutline(
+                objective="Return the supported integer value.",
+                answer_value_type=AnswerValueType.INTEGER,
+                decision_form="single_value",
+                permits_synthesis=False,
+                required_sections=["answer", "basis", "uncertainty"],
+            ),
+            reason="The exact-answer task is admissible.",
+        ),
+    ).belief_state
 
 
 def make_cycle(cycle_id: str = "cycle_repair") -> CycleRecord:
@@ -1731,6 +1805,111 @@ class StaticEventCore(BayesProbeCore):
 
     def _create_evidence_integration_gate(self):
         return self.static_gate
+
+
+def test_core_integrates_named_and_unresolved_mass_atomically(tmp_path: Path):
+    event = EvidenceEvent(
+        id="E_open",
+        derived_from_signal="S_open",
+        target_hypotheses=["H1", "H2"],
+        evidence_type=EvidenceType.COUNTEREVIDENCE,
+        content="Both named candidates fail the observed constraint.",
+        reliability=1.0,
+        independence=1.0,
+        relevance=1.0,
+        novelty=1.0,
+        likelihoods={
+            "H1": LikelihoodBand.MODERATELY_DISCONFIRMING,
+            "H2": LikelihoodBand.MODERATELY_DISCONFIRMING,
+        },
+        unresolved_likelihood=LikelihoodBand.MODERATELY_CONFIRMING,
+        frame_fit=FrameFit.SUPPORTS_UNRESOLVED,
+        effective_update_weight=1.0,
+        epistemic_origin="model_reasoning",
+        derivation_root_id="model-root",
+    )
+    ledger = JsonlLedgerStore(tmp_path / "open-core-ledger.jsonl")
+    core = StaticEventCore([event], ledger=ledger)
+
+    result = core.integrate_cycle(
+        cycle=make_cycle("cycle_open"),
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set("cycle_open"),
+        signals=[make_active_signal("pending")],
+    )
+
+    active_mass = sum(
+        hypothesis.posterior
+        for hypothesis in result.belief_state.hypotheses
+        if hypothesis.id in result.belief_state.frame_state.active_hypothesis_ids
+    )
+    unresolved = result.belief_state.frame_state.unresolved_alternative_mass
+    assert active_mass + unresolved == pytest.approx(1.0)
+    assert unresolved > 0.50
+    assert len(result.frame_mass_updates) == 1
+    assert result.frame_mass_updates[0].evidence_id == event.id
+    assert result.belief_state.frame_state.adequacy_status == (
+        FrameAdequacyStatus.CHALLENGED
+    )
+    assert result.belief_state.posterior_summary["named_active_mass"] == active_mass
+    assert result.belief_state.posterior_summary[
+        "unresolved_alternative_mass"
+    ] == unresolved
+    assert result.belief_state.posterior_summary["frame_adequacy"] == "challenged"
+
+    ordered_types = [
+        record["record_type"]
+        for record in ledger.read_all()
+        if record["record_type"]
+        in {
+            "external_signal",
+            "evidence_event",
+            "belief_update",
+            "frame_mass_update",
+            "frame_adequacy_decision",
+            "hypothesis_evolution",
+            "probe_candidate",
+            "belief_state",
+        }
+    ]
+    assert ordered_types == [
+        "external_signal",
+        "evidence_event",
+        "belief_update",
+        "belief_update",
+        "frame_mass_update",
+        "frame_adequacy_decision",
+        "belief_state",
+    ]
+
+
+def test_core_open_duplicate_event_moves_frame_mass_once(tmp_path: Path):
+    event = EvidenceEvent(
+        id="E_open_duplicate",
+        derived_from_signal="S_open_duplicate",
+        target_hypotheses=["H1"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content="A repeated open-frame event.",
+        likelihoods={"H1": LikelihoodBand.MODERATELY_CONFIRMING},
+        unresolved_likelihood=LikelihoodBand.NEUTRAL,
+        effective_update_weight=1.0,
+    )
+    ledger = JsonlLedgerStore(tmp_path / "open-duplicate-ledger.jsonl")
+    core = StaticEventCore([event, event], ledger=ledger)
+
+    result = core.integrate_cycle(
+        cycle=make_cycle("cycle_open_duplicate"),
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set("cycle_open_duplicate"),
+        signals=[make_active_signal("pending")],
+    )
+
+    assert len(result.frame_mass_updates) == 1
+    assert {update.evidence_id for update in result.belief_updates} == {event.id}
+    assert [
+        record["payload"]["id"]
+        for record in ledger.read_all("evidence_event")
+    ] == [event.id]
 
 
 def test_core_marks_past_evidence_replay_without_duplicate_canonical_record(

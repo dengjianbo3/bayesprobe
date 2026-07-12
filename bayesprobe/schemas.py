@@ -971,6 +971,40 @@ class BeliefState(BaseModel):
             and self.task_frame.schema_version != "v0.2"
         ):
             raise ValueError("v0.2 belief state requires a v0.2 task_frame")
+        if self.schema_version == "v0.2":
+            frame_state = self.frame_state
+            task_frame = self.task_frame
+            if frame_state.frame_id != task_frame.hypothesis_frame.frame_id:
+                raise ValueError("frame state must match the task hypothesis frame")
+            if (
+                frame_state.competition
+                != task_frame.hypothesis_frame.competition
+                or frame_state.coverage != task_frame.hypothesis_frame.coverage
+            ):
+                raise ValueError("frame state semantics must match the task frame")
+            hypotheses_by_id = self.hypotheses_by_id()
+            unknown_active_ids = set(frame_state.active_hypothesis_ids).difference(
+                hypotheses_by_id
+            )
+            if unknown_active_ids:
+                raise ValueError("frame state contains unknown active hypothesis ids")
+            if (
+                frame_state.competition == HypothesisCompetition.EXCLUSIVE
+                and task_frame.framing_method != FramingMethod.LEGACY_MIGRATION
+            ):
+                named_mass = sum(
+                    hypotheses_by_id[hypothesis_id].posterior
+                    for hypothesis_id in frame_state.active_hypothesis_ids
+                )
+                unresolved_mass = frame_state.unresolved_alternative_mass or 0.0
+                if not math.isclose(
+                    named_mass + unresolved_mass,
+                    1.0,
+                    abs_tol=1e-6,
+                ):
+                    raise ValueError(
+                        "exclusive named and unresolved mass must sum to one"
+                    )
         return self
 
     def hypotheses_by_id(self) -> dict[str, Hypothesis]:
@@ -1041,6 +1075,8 @@ class ExternalSignal(BaseModel):
 class EvidenceEvent(BaseModel):
     id: str
     derived_from_signal: str
+    epistemic_origin: EpistemicOrigin | None = None
+    derivation_root_id: str | None = None
     target_hypotheses: list[str]
     evidence_type: EvidenceType
     content: str
@@ -1059,6 +1095,11 @@ class EvidenceEvent(BaseModel):
     interpretation: str = ""
     discard_reason: str | None = None
     model_trace: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("derivation_root_id")
+    @classmethod
+    def clean_derivation_root_id(cls, value: str | None) -> str | None:
+        return None if value is None else _required_text(value, "derivation_root_id")
 
     @field_validator(
         "reliability",

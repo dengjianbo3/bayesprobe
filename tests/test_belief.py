@@ -1,6 +1,7 @@
 import pytest
 
-from bayesprobe.belief import solve_updates
+from bayesprobe.belief import CoverageAwareBeliefSolver, solve_updates
+from bayesprobe.migrations import migrate_belief_state_v0_1
 from bayesprobe.schemas import (
     AnswerContract,
     BeliefState,
@@ -489,3 +490,23 @@ def test_independent_update_is_numerically_stable_at_probability_boundary(bounda
 
     assert hypotheses[0].posterior == boundary
     assert len(updates) == 1
+
+
+def test_solve_updates_is_an_explicit_legacy_migration_wrapper():
+    state = _belief_state([_hypothesis("H1", 0.5), _hypothesis("H2", 0.5)])
+    migrated = migrate_belief_state_v0_1(state)
+
+    with pytest.raises(ValueError, match="v0.1"):
+        solve_updates("run_belief", "cycle_1", migrated, [])
+
+
+def test_deep_solver_requires_native_v02_lifecycle_state():
+    state = _belief_state([_hypothesis("H1", 0.5), _hypothesis("H2", 0.5)])
+
+    with pytest.raises(ValueError, match="v0.2"):
+        CoverageAwareBeliefSolver().solve(
+            state,
+            [],
+            run_id="run_belief",
+            cycle_id="cycle_1",
+        )

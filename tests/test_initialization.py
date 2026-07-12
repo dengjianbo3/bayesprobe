@@ -11,6 +11,7 @@ from bayesprobe.schemas import (
     AnswerContractOutline,
     AnswerValueType,
     ExternalSignal,
+    FrameAdequacyStatus,
     HypothesisRelation,
     RunRegime,
     RunStatus,
@@ -195,6 +196,14 @@ def test_initializer_preserves_framed_answer_value_in_runtime_hypothesis():
 
     assert result.task_frame.hypothesis_frame.hypotheses[0].answer_value == 7
     assert result.belief_state.hypotheses[0].answer_value == 7
+    assert result.belief_state.frame_state.adequacy_status == (
+        FrameAdequacyStatus.PROVISIONAL
+    )
+    assert result.belief_state.posterior_summary["named_active_mass"] == 0.50
+    assert result.belief_state.posterior_summary[
+        "unresolved_alternative_mass"
+    ] == 0.50
+    assert result.belief_state.posterior_summary["frame_adequacy"] == "provisional"
 
 
 def test_initializer_open_hypotheses_never_acquire_answer_values():
@@ -363,6 +372,14 @@ E. The class of all connected bipartite graphs."""
     )
     assert hypotheses["D"].prior == pytest.approx(0.2)
     assert hypotheses["D"].rivals == ["A", "B", "C", "E"]
+    assert result.belief_state.frame_state.adequacy_status == (
+        FrameAdequacyStatus.ADEQUATE
+    )
+    assert result.belief_state.posterior_summary["named_active_mass"] == 1.0
+    assert result.belief_state.posterior_summary[
+        "unresolved_alternative_mass"
+    ] == 0.0
+    assert result.belief_state.posterior_summary["frame_adequacy"] == "adequate"
 
     first_candidate = result.probe_candidates[0]
     assert first_candidate.source == "manual"
