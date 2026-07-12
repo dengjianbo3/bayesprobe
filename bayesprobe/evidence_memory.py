@@ -504,7 +504,8 @@ class EvidenceMemoryManager:
             provenance = _required_provenance(signal)
             for event in events:
                 if (
-                    event.epistemic_origin != provenance.epistemic_origin
+                    event.content != signal.raw_content
+                    or event.epistemic_origin != provenance.epistemic_origin
                     or event.derivation_root_id != provenance.derivation_root_id
                 ):
                     raise ValueError("evidence memory transition is invalid")

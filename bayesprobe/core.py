@@ -68,8 +68,14 @@ class BayesProbeCore:
         self._model_gateway = model_gateway
         self._judgment_repair_policy = judgment_repair_policy
         self._cycle_allocations: dict[str, int] = {}
+        configured_credit_policy = (
+            correlation_credit_policy or CorrelationCreditPolicy()
+        )
+        self._correlation_credit_policy = _copy_correlation_credit_policy(
+            configured_credit_policy
+        )
         self._evidence_memory_manager = EvidenceMemoryManager(
-            correlation_credit_policy
+            _copy_correlation_credit_policy(self._correlation_credit_policy)
         )
         self._evidence_gate = self._create_evidence_integration_gate()
         self._belief_solver = self._create_belief_solver()
@@ -314,7 +320,11 @@ class BayesProbeCore:
         return EvidenceIntegrationGate(
             model_gateway=self._model_gateway,
             judgment_repair_policy=self._judgment_repair_policy,
-            memory_manager=self._evidence_memory_manager,
+            memory_manager=EvidenceMemoryManager(
+                _copy_correlation_credit_policy(
+                    self._correlation_credit_policy
+                )
+            ),
         )
 
     def _create_belief_solver(self) -> CoverageAwareBeliefSolver:
@@ -433,6 +443,16 @@ def _deep_signal_copies(
     signals: list[ExternalSignal],
 ) -> list[ExternalSignal]:
     return [signal.model_copy(deep=True) for signal in signals]
+
+
+def _copy_correlation_credit_policy(
+    policy: CorrelationCreditPolicy,
+) -> CorrelationCreditPolicy:
+    return CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=(
+            policy.max_cumulative_effective_weight_per_direction
+        )
+    )
 
 
 def _scoped_cycle_key(run_id: str, cycle_id: str) -> str:

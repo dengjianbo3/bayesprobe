@@ -867,6 +867,46 @@ def test_memory_transition_validator_accepts_projection_two_event_reconstruction
     assert validated == result.evidence_memory
 
 
+def test_memory_transition_rejects_each_projection_event_content_rewrite():
+    state = _state()
+    result = EvidenceIntegrationGate().integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[
+            ExternalSignal(
+                id="S_projection_content_binding",
+                cycle_id="pending",
+                signal_kind=SignalKind.PASSIVE,
+                source_type="external_agent_projection",
+                source="agent-a",
+                raw_content=(
+                    "Agent A cites source X as evidence while favoring option A."
+                ),
+                initial_target_hypotheses=["A", "B"],
+            )
+        ],
+    )
+    manager = EvidenceMemoryManager()
+    assert len(result.evidence_events) == 2
+
+    for event_index in range(2):
+        rewritten_events = list(result.evidence_events)
+        rewritten_events[event_index] = rewritten_events[event_index].model_copy(
+            update={"content": f"{rewritten_events[event_index].content} "}
+        )
+
+        with pytest.raises(ValueError, match="evidence memory transition"):
+            manager.validate_transition(
+                state.evidence_memory,
+                result.evidence_memory,
+                evidence_events=rewritten_events,
+                normalized_signals=result.normalized_signals,
+                existing_evidence_ids=[],
+                frame_version=state.frame_state.frame_version,
+            )
+
+
 def _same_signature_different_lineage_signals():
     first = _signal(
         "S_signature_first",

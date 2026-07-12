@@ -2782,7 +2782,7 @@ def test_new_directional_event_cannot_skip_its_credit_commit(tmp_path: Path):
     assert ledger_path.read_bytes() == b""
 
 
-def test_core_constructs_one_memory_manager_before_gate_factory(monkeypatch):
+def test_core_constructs_isolated_memory_managers_with_same_policy(monkeypatch):
     instances = []
 
     class RecordingManager(evidence_memory.EvidenceMemoryManager):
@@ -2794,14 +2794,183 @@ def test_core_constructs_one_memory_manager_before_gate_factory(monkeypatch):
 
     class ManagerFactoryCore(core_module.BayesProbeCore):
         def _create_evidence_integration_gate(self):
-            self.factory_manager = self._evidence_memory_manager
-            return EvidenceIntegrationGate(
-                memory_manager=self.factory_manager,
+            gate = super()._create_evidence_integration_gate()
+            self.factory_manager = gate._memory_manager
+            return gate
+
+    policy = CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=0.2
+    )
+    core = ManagerFactoryCore(correlation_credit_policy=policy)
+
+    assert instances == [core._evidence_memory_manager, core.factory_manager]
+    assert core._evidence_memory_manager is not core.factory_manager
+    assert core._evidence_memory_manager._policy == policy
+    assert core.factory_manager._policy == policy
+    assert core._evidence_memory_manager._policy is not core.factory_manager._policy
+
+
+class _GateManagerAuthorityAttack:
+    def __init__(self, delegate, attack: str) -> None:
+        self._delegate = delegate
+        self._attack = attack
+        self.event_weight = None
+
+    def integrate(self, *, cycle, belief_state, probe_set, signals):
+        gate_manager = self._delegate._memory_manager
+        if self._attack == "policy":
+            gate_manager._policy = CorrelationCreditPolicy(
+                max_cumulative_effective_weight_per_direction=1.0
             )
+        integration = self._delegate.integrate(
+            cycle=cycle,
+            belief_state=belief_state,
+            probe_set=probe_set,
+            signals=signals,
+        )
+        event = integration.evidence_events[0]
+        if self._attack == "validator":
+            event.effective_update_weight = 0.9
+            gate_manager.validate_transition = (
+                lambda *_args, **_kwargs: integration.evidence_memory
+            )
+        self.event_weight = event.effective_update_weight
+        return integration
 
-    core = ManagerFactoryCore()
 
-    assert instances == [core.factory_manager]
+class _GateManagerAuthorityAttackCore(BayesProbeCore):
+    def __init__(self, attack: str, *, ledger, model_gateway) -> None:
+        self._manager_attack = attack
+        super().__init__(
+            ledger=ledger,
+            model_gateway=model_gateway,
+            correlation_credit_policy=CorrelationCreditPolicy(
+                max_cumulative_effective_weight_per_direction=0.2
+            ),
+        )
+
+    def _create_evidence_integration_gate(self):
+        self.manager_attack_gate = _GateManagerAuthorityAttack(
+            super()._create_evidence_integration_gate(),
+            self._manager_attack,
+        )
+        return self.manager_attack_gate
+
+
+@pytest.mark.parametrize("attack", ["policy", "validator"])
+def test_gate_manager_mutation_cannot_redefine_core_transition_authority(
+    tmp_path: Path,
+    attack: str,
+):
+    ledger_path = tmp_path / f"gate-manager-{attack}.jsonl"
+    ledger_path.touch()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = _GateManagerAuthorityAttackCore(
+        attack,
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    cycle = make_cycle(f"cycle_gate_manager_{attack}")
+
+    with pytest.raises(
+        ValueError,
+        match="native evidence memory transition is invalid",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                make_active_signal().model_copy(
+                    update={"id": f"S_gate_manager_{attack}"}
+                )
+            ],
+        )
+
+    assert core.manager_attack_gate.event_weight > 0.2
+    authoritative_policy = core._evidence_memory_manager._policy
+    assert (
+        authoritative_policy.max_cumulative_effective_weight_per_direction
+        == 0.2
+    )
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+class _EventContentRewriteGate:
+    def __init__(self, delegate) -> None:
+        self._delegate = delegate
+        self.rewritten_content = None
+
+    def integrate(self, *, cycle, belief_state, probe_set, signals):
+        integration = self._delegate.integrate(
+            cycle=cycle,
+            belief_state=belief_state,
+            probe_set=probe_set,
+            signals=signals,
+        )
+        event = integration.evidence_events[0]
+        self.rewritten_content = f"{event.content} "
+        event.content = self.rewritten_content
+        return integration
+
+
+class _EventContentRewriteCore(BayesProbeCore):
+    def _create_evidence_integration_gate(self):
+        self.content_rewrite_gate = _EventContentRewriteGate(
+            super()._create_evidence_integration_gate()
+        )
+        return self.content_rewrite_gate
+
+
+def test_native_event_content_rewrite_fails_before_solver_or_ledger(
+    tmp_path: Path,
+):
+    ledger_path = tmp_path / "event-content-rewrite.jsonl"
+    ledger_path.touch()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = _EventContentRewriteCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    signal = make_active_signal().model_copy(
+        update={
+            "id": "S_event_content_rewrite",
+            "raw_content": "Byte-exact authoritative signal content.",
+        }
+    )
+    cycle = make_cycle("cycle_event_content_rewrite")
+
+    with pytest.raises(
+        ValueError,
+        match="native evidence memory transition is invalid",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[signal],
+        )
+
+    assert core.content_rewrite_gate.rewritten_content == (
+        f"{signal.raw_content} "
+    )
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
 
 
 def test_core_custom_credit_policy_is_shared_with_production_gate(tmp_path: Path):

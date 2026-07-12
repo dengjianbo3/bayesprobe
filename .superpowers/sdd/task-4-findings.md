@@ -114,3 +114,8 @@
 ## Sixteenth full-range re-review finding
 
 1. Core must preserve immutable authoritative pre-gate snapshots. The EvidenceGate receives isolated deep copies of BeliefState, closed signals, cycle, and ProbeSet; all post-gate ownership, memory-transition, solving, state construction, and ledger work use untouched authoritative snapshots. In-place gate mutation cannot redefine the validation baseline, erase prior memory/ledger history, rewrite signal content, or alter cycle/probe records.
+
+## Seventeenth full-range re-review findings
+
+1. Core's authoritative Evidence Memory transition validator and the production EvidenceGate cannot share a mutable EvidenceMemoryManager authority. A gate-side mutation of the manager policy or validator must not redefine the policy Core uses after the gate call. Preserve the configured CorrelationCreditPolicy consistently while isolating the gate's mutable manager object from Core's authoritative validator.
+2. Native transition validation must bind every Evidence Event's content exactly to the authoritative closed signal identified by `derived_from_signal`. A gate cannot return the owned signal unchanged while rewriting only `EvidenceEvent.content`; such a transition must fail before solver, state, or ledger mutation.

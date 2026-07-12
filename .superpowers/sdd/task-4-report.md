@@ -1340,3 +1340,88 @@ production/migration controls passed.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 22
+
+### Design Decision
+
+- Reconciled the earlier shared-policy requirement by separating configuration
+  value from mutable manager authority. Core clones the configured
+  `CorrelationCreditPolicy`, constructs its authoritative transition manager
+  from one clone, and gives the production EvidenceGate a different manager
+  built from an equal independent clone. The authoritative manager remains
+  available before the overridable gate factory for initialization compatibility
+  but is never passed by the production factory.
+- Added byte-exact event-content binding to the single deep transition
+  reconstruction path. Every grouped event must have `content` exactly equal to
+  its selected normalized signal's `raw_content` before existing-event replay,
+  classification, commit reconstruction, solver, or ledger work. Neither side
+  is trimmed, normalized, case-folded, or rewritten.
+
+### Changed Files
+
+- `bayesprobe/core.py`
+- `bayesprobe/evidence_memory.py`
+- `tests/test_core_cycles.py`
+- `tests/test_evidence_memory.py`
+- `.superpowers/sdd/task-4-findings.md`
+- `.superpowers/sdd/task-4-report.md`
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py::test_core_constructs_isolated_memory_managers_with_same_policy tests/test_core_cycles.py::test_gate_manager_mutation_cannot_redefine_core_transition_authority tests/test_core_cycles.py::test_native_event_content_rewrite_fails_before_solver_or_ledger tests/test_evidence_memory.py::test_memory_transition_rejects_each_projection_event_content_rewrite tests/test_core_cycles.py::test_core_custom_credit_policy_is_shared_with_production_gate tests/test_core_cycles.py::test_core_default_credit_policy_behavior_is_unchanged tests/test_core_cycles.py::test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record tests/test_core_cycles.py::test_core_isolation_preserves_authentic_migration_receipt tests/test_evidence_memory.py::test_memory_transition_validator_accepts_projection_two_event_reconstruction -q --tb=short -p no:cacheprovider
+```
+
+Result: `5 failed, 5 passed in 0.49s`. Manager identity, policy reassignment,
+validator replacement, Core content rewrite, and projection content rewrite
+failed; production, replay, configured-policy, migration, and projection
+controls passed.
+
+- GREEN/refactor: the same focused selection -> `10 passed in 0.33s`.
+- Directly affected suites:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_core_cycles.py -q --tb=short -p no:cacheprovider` -> `302 passed
+  in 1.56s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_model_gateway.py tests/test_openai_gateway.py
+  tests/test_core_cycles.py tests/test_probe_executor.py
+  tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `552 passed
+  in 2.02s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.39s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1369 passed, 10 skipped in 11.24s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before
+  report/commit; the range check is repeated after commit.
+
+### Self-Review
+
+- The production gate and Core validator receive equal `0.2` policy semantics
+  in the configured-cap regression, but manager and policy object identities are
+  distinct. Reassigning the gate manager's policy to `1.0` produces a forged
+  event above `0.2`; Core reconstructs under its untouched `0.2` authority and
+  rejects before solver/state/ledger mutation.
+- Replacing `validate_transition` on the gate manager cannot replace the method
+  on Core's authoritative manager. An internally inconsistent event/memory pair
+  is rejected atomically with unchanged input state and empty ledger bytes.
+- Content binding executes for every event in each signal group before the
+  existing-event branch. Core rejects a content-only rewrite despite correct
+  signal ownership and coherent candidate memory; unit coverage independently
+  rewrites both projection primary and source events using only one trailing
+  byte of whitespace.
+- Native production, identity-only replay, projection reconstruction, default
+  and non-default credit caps, and authentic explicit migration remain green.
+  Explicit migrated-v0.1 Core behavior is unchanged because native transition
+  validation remains lifecycle-gated.
+
+### Concerns
+
+No blocking concerns.
