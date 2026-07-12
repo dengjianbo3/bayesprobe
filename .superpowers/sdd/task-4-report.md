@@ -1085,3 +1085,100 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 19
+
+### Design Decision
+
+- Core now treats native gate-returned closed signals as an owned transaction
+  boundary. It independently normalizes the closed inbox, recursively validates
+  every returned signal, and requires exact one-to-one ordered equality. Native
+  `None`, empty, reordered, extra, changed, secret-bearing, and superficially
+  populated noncanonical results fail before memory transition, solver, or
+  ledger work. The same validated owned list is passed to transition replay and
+  ledger persistence; there is no native truthiness fallback.
+- Explicit legacy list-return compatibility remains lifecycle-gated. It may use
+  the closed inbox only when the result has no normalized-signal envelope, and
+  every value is recursively revalidated and checked for exact/NFKC secret
+  material before it can reach the ledger.
+- `PythonExecutionRecord.policy_snapshot` now has a per-record empty mapping
+  default for old callers. Construction defensively copies the full nested
+  snapshot into private immutable mappings and tuples. Trusted evidence first
+  verifies that all resolved Docker policy controls are present and that the
+  image binding matches, before either deterministic provenance hash is called;
+  incomplete legacy records produce the existing unverified signal path.
+- Evidence Memory now applies one semantic event-id normalization to accepted
+  ids, discarded-history uniqueness, and accepted/discarded disjointness. The
+  model-level check runs during direct snapshot validation and recursive
+  `BeliefState` validation before bindings or state use.
+
+### Changes
+
+- Added Core-owned closed-signal validation and removed both native
+  `normalized_signals or ...` fallbacks. Updated downstream adversarial test
+  adapters to supply canonical owned signals when their intended assertion is a
+  later event or memory invariant; dedicated ownership fixtures remain invalid.
+- Added recursively frozen policy values, JSON-compatible defensive deepcopy,
+  complete-policy pre-hash validation, legacy-constructor coverage, and
+  observer/original-input mutation regressions for network, resources, and
+  interpreter controls.
+- Added exact and semantic accepted/discarded overlap regressions, recursively
+  embedded `BeliefState` coverage, and accepted-only/discard-only controls.
+
+### Verification
+
+- RED:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py::test_native_missing_closed_signals_reject_secret_input_atomically tests/test_core_cycles.py::test_native_closed_signal_mismatch_fails_before_transition tests/test_core_cycles.py::test_native_owned_signals_with_zero_events_fail_in_transition tests/test_core_cycles.py::test_explicit_legacy_plain_list_gate_never_ledgers_raw_secrets tests/test_core_cycles.py::test_core_persists_same_cycle_duplicate_identity_once tests/test_core_cycles.py::test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record tests/evaluation/test_python_probe.py::test_python_execution_record_legacy_constructor_defaults_policy_snapshot tests/evaluation/test_python_probe.py::test_legacy_execution_record_cannot_produce_trusted_evidence tests/evaluation/test_python_probe.py::test_execution_policy_is_immutable_to_observer_mutation tests/evaluation/test_python_probe.py::test_execution_policy_defensively_copies_original_nested_input tests/evaluation/test_python_probe.py::test_python_augmented_gateway_converts_successful_execution_to_active_signal tests/test_schemas.py::test_evidence_memory_rejects_accepted_discarded_lifecycle_overlap tests/test_schemas.py::test_belief_state_recursively_rejects_evidence_lifecycle_overlap tests/test_schemas.py::test_evidence_memory_accepts_one_sided_lifecycle_history tests/test_schemas.py::test_evidence_memory_event_bindings_cover_accepted_and_discarded_events -q --tb=no -p no:cacheprovider
+```
+
+Result: `18 failed, 7 passed in 0.32s`.
+
+- GREEN: the same focused selection without `--tb=no` -> `25 passed in
+  0.33s`.
+- Core compatibility after adapting downstream custom-gate fixtures:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_core_cycles.py -q
+  --tb=short -p no:cacheprovider` -> `181 passed in 1.11s`.
+- Task 4 focused:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py
+  tests/test_model_gateway.py tests/test_openai_gateway.py
+  tests/test_core_cycles.py tests/test_probe_executor.py
+  tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `536 passed
+  in 1.82s`.
+- Compatibility:
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py
+  tests/test_migrations.py tests/test_task_framing.py
+  tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `336 passed
+  in 0.38s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p
+  no:cacheprovider` -> `1353 passed, 10 skipped in 10.85s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` and `git diff --check 67abac9..HEAD` -> clean before
+  report/commit; the historical range check is repeated after commit.
+
+### Self-Review
+
+- Native closed-signal validation runs after gate return but before transition,
+  replay marking, solver, and every ledger append. Independent normalization
+  compares every non-provenance field and the complete canonical provenance;
+  recursive exact/NFKC secret checks run on both the inbox normalization path
+  and returned payload. A valid nonempty owned list with no events reaches the
+  existing exact transition grouping rule rather than being silently erased.
+- Legacy compatibility never substitutes secret-bearing raw inbox signals into
+  ledger input. Production native integration, multi-signal processing, native
+  replay, explicit migration replay, and the full transition-forgery matrix all
+  remain green under the stronger ownership boundary.
+- The execution record freezes nested mappings and sequences at construction,
+  so observer calls and later mutation of the original dictionary cannot alter
+  the policy used for hashing. Dataclass deep-copy serialization thaws the
+  private representation to ordinary JSON-compatible dictionaries/lists; the
+  end-to-end artifact tests remain green. Missing policy fails before the first
+  deterministic-root call and cannot acquire trusted provenance.
+- Accepted/discarded overlap is rejected using the same case-folded,
+  whitespace-collapsed semantic identity used by lifecycle list validation.
+  Binding exactness and normal one-sided lifecycle histories remain unchanged.
+
+### Concerns
+
+No blocking concerns.

@@ -4,6 +4,7 @@ import unicodedata
 
 import pytest
 
+import bayesprobe.evaluation.python_probe as python_probe_module
 from bayesprobe.evidence import EvidenceIntegrationGate
 from bayesprobe.evaluation.python_probe import (
     DockerPythonSandbox,
@@ -419,8 +420,14 @@ def execution_record(
     policy_violation=False,
     repair_attempt_index=0,
     policy_snapshot=None,
+    copy_policy_snapshot=True,
 ):
-    effective_policy_snapshot = deepcopy(policy_snapshot or POLICY_SNAPSHOT)
+    source_policy_snapshot = policy_snapshot or POLICY_SNAPSHOT
+    effective_policy_snapshot = (
+        deepcopy(source_policy_snapshot)
+        if copy_policy_snapshot
+        else source_policy_snapshot
+    )
     if policy_snapshot is None:
         effective_policy_snapshot["image_digest"] = image_digest
     return PythonExecutionRecord(
@@ -442,6 +449,28 @@ def execution_record(
         policy_violation=policy_violation,
         repair_attempt_index=repair_attempt_index,
         policy_snapshot=effective_policy_snapshot,
+    )
+
+
+def legacy_execution_record():
+    return PythonExecutionRecord(
+        execution_id="exec_legacy",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        probe_id="probe_1",
+        code="print(4)",
+        code_sha256="7" * 64,
+        image_digest=IMAGE_DIGEST,
+        started_at="2026-07-11T00:00:00Z",
+        completed_at="2026-07-11T00:00:01Z",
+        wall_seconds=1.0,
+        exit_code=0,
+        stdout="4\n",
+        stderr="",
+        output_truncated=False,
+        timed_out=False,
+        policy_violation=False,
+        repair_attempt_index=0,
     )
 
 
@@ -724,6 +753,104 @@ def test_python_augmented_gateway_converts_successful_execution_to_active_signal
     assert model.requests[0].prompt_version == "v0.2"
     assert model.requests[0].schema_version == "v0.2"
     assert "gold" not in str(model.requests[0].input).lower()
+
+
+def test_python_execution_record_legacy_constructor_defaults_policy_snapshot():
+    record = legacy_execution_record()
+
+    assert dict(record.policy_snapshot) == {}
+    assert record.success is True
+
+
+def test_legacy_execution_record_cannot_produce_trusted_evidence(
+    monkeypatch,
+):
+    hash_calls = []
+    real_derive = python_probe_module.derive_deterministic_computation_root
+
+    def recording_derive(**kwargs):
+        hash_calls.append(kwargs)
+        return real_derive(**kwargs)
+
+    monkeypatch.setattr(
+        python_probe_module,
+        "derive_deterministic_computation_root",
+        recording_derive,
+    )
+    gateway = PythonAugmentedProbeToolGateway(
+        SequenceModelGateway([python_plan()]),
+        FakeSandbox([legacy_execution_record()]),
+    )
+    probe, context = probe_context()
+
+    signal = gateway.execute_probe(probe=probe, context=context)[0]
+
+    assert signal.provenance is None
+    assert "unverified" in signal.raw_content.lower()
+    assert hash_calls == []
+
+
+def _python_signal_for_record(record, *, observer=None):
+    gateway = PythonAugmentedProbeToolGateway(
+        SequenceModelGateway([python_plan()]),
+        FakeSandbox([record]),
+        execution_observer=observer,
+    )
+    probe, context = probe_context()
+    return gateway.execute_probe(probe=probe, context=context)[0]
+
+
+def test_execution_policy_is_immutable_to_observer_mutation():
+    mutation_errors = []
+
+    class MutatingObserver:
+        def observe(self, record):
+            try:
+                record.policy_snapshot["network"]["mode"] = "host"
+            except TypeError as error:
+                mutation_errors.append(error)
+            try:
+                record.policy_snapshot["resources"]["cpus"] = 99.0
+            except TypeError as error:
+                mutation_errors.append(error)
+            try:
+                record.policy_snapshot["interpreter"]["argv"][0] = "pypy"
+            except TypeError as error:
+                mutation_errors.append(error)
+
+    baseline = _python_signal_for_record(execution_record())
+    observed = _python_signal_for_record(
+        execution_record(),
+        observer=MutatingObserver(),
+    )
+
+    assert len(mutation_errors) == 3
+    assert observed.provenance is not None
+    assert observed.provenance.derivation_root_id == (
+        baseline.provenance.derivation_root_id
+    )
+
+
+def test_execution_policy_defensively_copies_original_nested_input():
+    original_policy = deepcopy(POLICY_SNAPSHOT)
+    record = execution_record(
+        policy_snapshot=original_policy,
+        copy_policy_snapshot=False,
+    )
+    original_policy["network"]["mode"] = "host"
+    original_policy["resources"]["cpus"] = 99.0
+    original_policy["interpreter"]["argv"][0] = "pypy"
+
+    signal = _python_signal_for_record(record)
+    baseline = _python_signal_for_record(execution_record())
+
+    assert record.policy_snapshot["network"]["mode"] == "none"
+    assert record.policy_snapshot["resources"]["cpus"] == 1.0
+    assert record.policy_snapshot["interpreter"]["argv"][0] == "python"
+    assert signal.provenance is not None
+    assert signal.provenance.derivation_root_id == (
+        baseline.provenance.derivation_root_id
+    )
 
 
 def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():

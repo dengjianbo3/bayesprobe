@@ -708,7 +708,7 @@ class EvidenceMemorySnapshot(StrictTaskModel):
         seen_event_ids: set[str] = set()
         for entry in value:
             event_id, _ = decode_discard_history_entry(entry)
-            semantic_id = event_id.casefold()
+            semantic_id = _normalized_semantic_text(event_id)
             if semantic_id in seen_event_ids:
                 raise ValueError(
                     "discard_and_schema_history event ids must be unique"
@@ -812,11 +812,24 @@ class EvidenceMemorySnapshot(StrictTaskModel):
         }
         if len(identity_key_sets) != 1:
             raise ValueError("evidence memory identity map keys must match exactly")
-        lifecycle_event_ids = set(self.accepted_evidence_ids)
-        lifecycle_event_ids.update(
+        discarded_event_ids = [
             decode_discard_history_entry(entry)[0]
             for entry in self.discard_and_schema_history
-        )
+        ]
+        accepted_semantic_ids = {
+            _normalized_semantic_text(event_id)
+            for event_id in self.accepted_evidence_ids
+        }
+        discarded_semantic_ids = {
+            _normalized_semantic_text(event_id)
+            for event_id in discarded_event_ids
+        }
+        if accepted_semantic_ids.intersection(discarded_semantic_ids):
+            raise ValueError(
+                "evidence event cannot be both accepted and discarded"
+            )
+        lifecycle_event_ids = set(self.accepted_evidence_ids)
+        lifecycle_event_ids.update(discarded_event_ids)
         if set(self.event_signal_identity_digests).difference(
             lifecycle_event_ids
         ):

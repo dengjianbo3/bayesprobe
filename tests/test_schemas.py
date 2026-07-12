@@ -557,6 +557,72 @@ def test_evidence_memory_discard_history_has_canonical_round_trip():
     assert restored.discard_and_schema_history == [entry]
 
 
+@pytest.mark.parametrize(
+    ("accepted_event_id", "discarded_event_id"),
+    [
+        ("E_overlap", "E_overlap"),
+        ("Event A", "event  a"),
+    ],
+)
+def test_evidence_memory_rejects_accepted_discarded_lifecycle_overlap(
+    accepted_event_id,
+    discarded_event_id,
+):
+    with pytest.raises(ValueError, match="both accepted and discarded"):
+        EvidenceMemorySnapshot(
+            memory_version=2,
+            accepted_evidence_ids=[accepted_event_id],
+            discard_and_schema_history=[
+                schemas.encode_discard_history_entry(
+                    discarded_event_id,
+                    "duplicate_exact",
+                )
+            ],
+        )
+
+
+def test_belief_state_recursively_rejects_evidence_lifecycle_overlap():
+    state = make_v02_belief_state()
+    payload = state.model_dump(mode="python")
+    payload["evidence_memory"].update(
+        {
+            "accepted_evidence_ids": ["Event A"],
+            "discard_and_schema_history": [
+                schemas.encode_discard_history_entry(
+                    "event  a",
+                    "duplicate_exact",
+                )
+            ],
+        }
+    )
+    payload["ledger_refs"] = {
+        "evidence_events": ["Event A", "event  a"]
+    }
+
+    with pytest.raises(ValueError, match="both accepted and discarded"):
+        BeliefState.model_validate(payload)
+
+
+@pytest.mark.parametrize("lifecycle", ["accepted", "discarded"])
+def test_evidence_memory_accepts_one_sided_lifecycle_history(lifecycle):
+    payload = {"memory_version": 2}
+    if lifecycle == "accepted":
+        payload["accepted_evidence_ids"] = ["E_one_sided"]
+    else:
+        payload["discard_and_schema_history"] = [
+            schemas.encode_discard_history_entry(
+                "E_one_sided",
+                "duplicate_exact",
+            )
+        ]
+
+    snapshot = EvidenceMemorySnapshot.model_validate(payload)
+
+    assert EvidenceMemorySnapshot.model_validate(
+        snapshot.model_dump(mode="python")
+    ) == snapshot
+
+
 def test_v2_evidence_memory_defaults_missing_event_signal_bindings():
     snapshot = EvidenceMemorySnapshot.model_validate({"memory_version": 2})
 

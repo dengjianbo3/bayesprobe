@@ -7,8 +7,9 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any, Callable, Literal, Protocol
 
 from bayesprobe.evidence_memory import derive_deterministic_computation_root
@@ -36,6 +37,56 @@ _PLAN_KEYS = frozenset(
 )
 _PYTHON_SANDBOX_TOOL_IDENTITY = "python_sandbox:v1"
 _PYTHON_SANDBOX_POLICY_IDENTITY = "python_sandbox_policy:v1"
+
+
+class _FrozenPolicyMapping(Mapping[str, Any]):
+    __slots__ = ("_values",)
+
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        object.__setattr__(self, "_values", MappingProxyType(dict(values)))
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Mapping) and dict(self.items()) == dict(
+            other.items()
+        )
+
+    def __deepcopy__(self, memo):
+        return _thaw_policy_value(self)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise TypeError("Python execution policy snapshot is immutable")
+
+
+def _freeze_policy_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("Python execution policy keys must be strings")
+            frozen[key] = _freeze_policy_value(item)
+        return _FrozenPolicyMapping(frozen)
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_policy_value(item) for item in value)
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    raise TypeError("Python execution policy must contain canonical values")
+
+
+def _thaw_policy_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_policy_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_policy_value(item) for item in value]
+    return value
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -140,7 +191,14 @@ class PythonExecutionRecord:
     timed_out: bool
     policy_violation: bool
     repair_attempt_index: int
-    policy_snapshot: dict[str, Any]
+    policy_snapshot: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "policy_snapshot",
+            _freeze_policy_value(self.policy_snapshot),
+        )
 
     @property
     def success(self) -> bool:
@@ -533,7 +591,23 @@ class PythonAugmentedProbeToolGateway:
                     source=record.image_digest,
                 )
             ]
-        return [self._execution_signal(plan=plan, record=record, probe=probe, context=context)]
+        try:
+            signal = self._execution_signal(
+                plan=plan,
+                record=record,
+                probe=probe,
+                context=context,
+            )
+        except (TypeError, ValueError):
+            return [
+                self._failure_signal(
+                    probe=probe,
+                    context=context,
+                    reason="unverified Python sandbox policy metadata",
+                    source=record.image_digest,
+                )
+            ]
+        return [signal]
 
     def _plan_probe(
         self,
@@ -732,9 +806,7 @@ class PythonAugmentedProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionContext,
     ) -> ExternalSignal:
-        policy_snapshot = dict(record.policy_snapshot)
-        if policy_snapshot.get("image_digest") != record.image_digest:
-            raise ValueError("Python execution policy image does not match record")
+        policy_snapshot = _validated_execution_policy(record)
         environment_state_id = derive_deterministic_computation_root(
             tool_identity=_PYTHON_SANDBOX_POLICY_IDENTITY,
             computation_inputs=policy_snapshot,
@@ -886,6 +958,91 @@ def _probe_request_metadata(
         if isinstance(value, str) and value:
             metadata[key] = value
     return metadata
+
+
+def _validated_execution_policy(
+    record: PythonExecutionRecord,
+) -> Mapping[str, Any]:
+    snapshot = record.policy_snapshot
+    try:
+        if not isinstance(snapshot, Mapping):
+            raise ValueError
+        required_top_level = {
+            "runtime",
+            "image_digest",
+            "user",
+            "resources",
+            "limits",
+            "network",
+            "filesystem",
+            "security",
+            "environment",
+            "interpreter",
+        }
+        if not required_top_level.issubset(snapshot):
+            raise ValueError
+        if (
+            snapshot["image_digest"] != record.image_digest
+            or not isinstance(record.image_digest, str)
+            or _IMAGE_DIGEST.fullmatch(record.image_digest) is None
+        ):
+            raise ValueError
+        if not all(
+            isinstance(snapshot[key], str) and bool(snapshot[key])
+            for key in ("runtime", "user")
+        ):
+            raise ValueError
+
+        required_mapping_keys = {
+            "resources": {"cpus", "memory", "pids_limit"},
+            "limits": {"timeout_seconds", "max_output_bytes"},
+            "network": {"mode"},
+            "filesystem": {"read_only_root", "host_mounts", "tmpfs"},
+            "security": {"cap_drop", "no_new_privileges"},
+            "environment": {
+                "PYTHONHASHSEED",
+                "OMP_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+            },
+            "interpreter": {"argv", "stdin"},
+        }
+        mappings: dict[str, Mapping[str, Any]] = {}
+        for key, required_keys in required_mapping_keys.items():
+            value = snapshot[key]
+            if not isinstance(value, Mapping) or not required_keys.issubset(value):
+                raise ValueError
+            mappings[key] = value
+
+        filesystem = mappings["filesystem"]
+        security = mappings["security"]
+        interpreter = mappings["interpreter"]
+        if not isinstance(filesystem["host_mounts"], list | tuple):
+            raise ValueError
+        tmpfs = filesystem["tmpfs"]
+        if not isinstance(tmpfs, list | tuple) or not tmpfs:
+            raise ValueError
+        if any(
+            not isinstance(entry, Mapping)
+            or not {"path", "options", "size"}.issubset(entry)
+            or not isinstance(entry["options"], list | tuple)
+            for entry in tmpfs
+        ):
+            raise ValueError
+        if not isinstance(security["cap_drop"], list | tuple):
+            raise ValueError
+        if not isinstance(interpreter["argv"], list | tuple):
+            raise ValueError
+        if any(
+            mappings[owner][key] is None
+            for owner, required_keys in required_mapping_keys.items()
+            for key in required_keys
+        ):
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Python execution policy snapshot is incomplete") from None
+    return snapshot
 
 
 def _execution_requires_repair(record: PythonExecutionRecord) -> bool:

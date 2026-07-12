@@ -1979,33 +1979,19 @@ class StaticEventGate(EvidenceIntegrationGate):
             if original.id in processed_by_id:
                 processed_events.append(processed_by_id[original.id])
                 continue
-            signal = normalizer.normalize(
-                signals[0].model_copy(
-                    update={
-                        "id": original.derived_from_signal,
-                        "raw_content": original.content,
-                        "provenance": SignalProvenance(
-                            epistemic_origin=(
-                                original.epistemic_origin
-                                or EpistemicOrigin.EXTERNAL_OBSERVATION
-                            ),
-                            source_identity=(
-                                f"static-event:{original.derived_from_signal}"
-                            ),
-                            derivation_root_id=(
-                                original.derivation_root_id
-                                or f"root:{original.derived_from_signal}"
-                            ),
-                            correlation_group=(
-                                f"static-event:{original.derived_from_signal}"
-                            ),
-                            canonical_content_fingerprint="replace-me",
-                        ),
-                    }
-                ),
-                run_id=cycle.run_id,
-            )
-            normalized_by_id[signal.id] = signal
+            signal = normalized_by_id.get(original.derived_from_signal)
+            if signal is None:
+                signal = normalizer.normalize(
+                    signals[0].model_copy(
+                        update={
+                            "id": original.derived_from_signal,
+                            "raw_content": original.content,
+                            "provenance": _static_event_signal_provenance(original),
+                        }
+                    ),
+                    run_id=cycle.run_id,
+                )
+                normalized_by_id[signal.id] = signal
             unresolved_likelihood = original.unresolved_likelihood
             requires_unresolved = (
                 belief_state.frame_state.competition
@@ -2090,6 +2076,20 @@ class StaticEventGate(EvidenceIntegrationGate):
         )
 
 
+def _static_event_signal_provenance(event: EvidenceEvent) -> SignalProvenance:
+    return SignalProvenance(
+        epistemic_origin=(
+            event.epistemic_origin or EpistemicOrigin.EXTERNAL_OBSERVATION
+        ),
+        source_identity=f"static-event:{event.derived_from_signal}",
+        derivation_root_id=(
+            event.derivation_root_id or f"root:{event.derived_from_signal}"
+        ),
+        correlation_group=f"static-event:{event.derived_from_signal}",
+        canonical_content_fingerprint="replace-me",
+    )
+
+
 class StaticEventCore(BayesProbeCore):
     def __init__(
         self,
@@ -2103,14 +2103,42 @@ class StaticEventCore(BayesProbeCore):
     def _create_evidence_integration_gate(self):
         return self.static_gate
 
+    def integrate_cycle(self, cycle, belief_state, probe_set, signals):
+        base_signal = signals[0]
+        owned_signals = []
+        seen_signal_ids = set()
+        for event in self.static_gate.events:
+            if event.derived_from_signal in seen_signal_ids:
+                continue
+            seen_signal_ids.add(event.derived_from_signal)
+            owned_signals.append(
+                base_signal.model_copy(
+                    update={
+                        "id": event.derived_from_signal,
+                        "raw_content": event.content,
+                        "provenance": _static_event_signal_provenance(event),
+                    }
+                )
+            )
+        return super().integrate_cycle(
+            cycle=cycle,
+            belief_state=belief_state,
+            probe_set=probe_set,
+            signals=owned_signals,
+        )
+
 
 class InvalidMemoryGate(EvidenceIntegrationGate):
     def integrate(self, *, cycle, belief_state, probe_set, signals):
+        normalizer = evidence_memory.SignalProvenanceNormalizer()
         return EvidenceIntegrationResult(
             evidence_events=[],
             probe_candidates=[],
             evidence_memory=EvidenceMemorySnapshot.model_construct(memory_version=0),
-            normalized_signals=list(signals),
+            normalized_signals=[
+                normalizer.normalize(signal, run_id=cycle.run_id)
+                for signal in signals
+            ],
         )
 
 
@@ -2124,7 +2152,16 @@ class SuppliedIntegrationGate(EvidenceIntegrationGate):
         self.integration = integration
 
     def integrate(self, *, cycle, belief_state, probe_set, signals):
-        return self.integration
+        normalizer = evidence_memory.SignalProvenanceNormalizer()
+        return EvidenceIntegrationResult(
+            evidence_events=list(self.integration.evidence_events),
+            probe_candidates=list(self.integration.probe_candidates),
+            evidence_memory=self.integration.evidence_memory,
+            normalized_signals=[
+                normalizer.normalize(signal, run_id=cycle.run_id)
+                for signal in signals
+            ],
+        )
 
 
 class SuppliedIntegrationCore(BayesProbeCore):
@@ -2145,6 +2182,17 @@ class SuppliedIntegrationCore(BayesProbeCore):
 
     def _create_evidence_integration_gate(self):
         return self.supplied_gate
+
+    def integrate_cycle(self, cycle, belief_state, probe_set, signals):
+        supplied_signals = self.supplied_gate.integration.normalized_signals
+        if supplied_signals:
+            signals = list(supplied_signals)
+        return super().integrate_cycle(
+            cycle=cycle,
+            belief_state=belief_state,
+            probe_set=probe_set,
+            signals=signals,
+        )
 
 
 def _policy_transition_event(
@@ -2236,6 +2284,9 @@ def _assert_supplied_transition_rejected_atomically(
         def solve(self, *args, **kwargs):
             self.calls += 1
             return real_solver.solve(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_solver, name)
 
     recording_solver = RecordingSolver()
     core._belief_solver = recording_solver
@@ -2511,7 +2562,7 @@ def test_native_plain_list_gate_fails_before_state_or_ledger_mutation(
 
     with pytest.raises(
         ValueError,
-        match="native evidence integration requires coherent evidence memory",
+        match="native closed signal ownership is invalid",
     ):
         core.integrate_cycle(
             cycle=cycle,
@@ -2531,7 +2582,7 @@ def test_native_gate_wrong_event_signal_binding_fails_before_ledger(
     class WrongBindingGate(EvidenceIntegrationGate):
         def integrate(self, *, cycle, belief_state, probe_set, signals):
             normalized = evidence_memory.SignalProvenanceNormalizer().normalize(
-                signals[0].model_copy(update={"id": "S_wrong_binding"}),
+                signals[0],
                 run_id=cycle.run_id,
             )
             event = EvidenceEvent(
@@ -2959,6 +3010,282 @@ def test_uncapped_same_batch_duplicate_transition_fails_atomically(tmp_path: Pat
             normalized_signals=[first_signal, second_signal],
         ),
     )
+
+
+class ClosedSignalOwnershipGate(EvidenceIntegrationGate):
+    def __init__(self, case: str) -> None:
+        self.case = case
+
+    def integrate(self, *, cycle, belief_state, probe_set, signals):
+        if self.case == "none":
+            owned = None
+        elif self.case == "empty":
+            owned = []
+        else:
+            normalized = [
+                evidence_memory.SignalProvenanceNormalizer().normalize(
+                    signal,
+                    run_id=cycle.run_id,
+                )
+                for signal in signals
+            ]
+            if self.case == "valid":
+                owned = normalized
+            elif self.case == "missing":
+                owned = normalized[:-1]
+            elif self.case == "extra":
+                owned = [
+                    *normalized,
+                    normalized[-1].model_copy(
+                        update={"id": "S_closed_signal_extra"}
+                    ),
+                ]
+            elif self.case == "reordered":
+                owned = list(reversed(normalized))
+            elif self.case == "changed":
+                owned = [
+                    normalized[0].model_copy(
+                        update={"raw_content": "Changed after inbox closure."}
+                    ),
+                    *normalized[1:],
+                ]
+            elif self.case == "noncanonical_provenance":
+                owned = [
+                    normalized[0].model_copy(
+                        update={
+                            "provenance": normalized[0].provenance.model_copy(
+                                update={
+                                    "canonical_content_fingerprint": (
+                                        "sha256:" + "0" * 64
+                                    )
+                                }
+                            )
+                        }
+                    ),
+                    *normalized[1:],
+                ]
+            else:
+                raise AssertionError(
+                    f"unknown closed signal case: {self.case}"
+                )
+        return EvidenceIntegrationResult(
+            evidence_events=[],
+            probe_candidates=[],
+            evidence_memory=belief_state.evidence_memory,
+            normalized_signals=owned,
+        )
+
+
+class ClosedSignalOwnershipCore(BayesProbeCore):
+    def __init__(self, case: str, *, ledger: JsonlLedgerStore) -> None:
+        self.closed_signal_case = case
+        super().__init__(ledger=ledger)
+
+    def _create_evidence_integration_gate(self):
+        return ClosedSignalOwnershipGate(self.closed_signal_case)
+
+
+def _assert_closed_signal_ownership_rejected(
+    tmp_path: Path,
+    *,
+    case: str,
+    signals: list[ExternalSignal],
+) -> str:
+    ledger_path = tmp_path / f"closed-signal-{case}.jsonl"
+    ledger_path.touch()
+    core = ClosedSignalOwnershipCore(
+        case,
+        ledger=JsonlLedgerStore(ledger_path),
+    )
+    transition_calls = 0
+    real_validate_transition = (
+        core._evidence_memory_manager.validate_transition
+    )
+
+    def recording_validate_transition(*args, **kwargs):
+        nonlocal transition_calls
+        transition_calls += 1
+        return real_validate_transition(*args, **kwargs)
+
+    core._evidence_memory_manager.validate_transition = (
+        recording_validate_transition
+    )
+    real_solver = core._belief_solver
+
+    class RecordingSolver:
+        calls = 0
+
+        def solve(self, *args, **kwargs):
+            self.calls += 1
+            return real_solver.solve(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_solver, name)
+
+    solver = RecordingSolver()
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    prior_memory = state.evidence_memory.model_dump(mode="json")
+    cycle = make_cycle(f"cycle_closed_signal_{case}")
+
+    with pytest.raises(
+        ValueError,
+        match="native closed signal ownership is invalid",
+    ) as exc_info:
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=signals,
+        )
+
+    assert transition_calls == 0
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert state.evidence_memory.model_dump(mode="json") == prior_memory
+    assert ledger_path.read_bytes() == b""
+    return str(exc_info.value)
+
+
+@pytest.mark.parametrize("case", ["none", "empty"])
+@pytest.mark.parametrize("secret_value", [_NFKC_SECRET_VALUE, "api_key=secret-value-123"])
+def test_native_missing_closed_signals_reject_secret_input_atomically(
+    tmp_path: Path,
+    case: str,
+    secret_value: str,
+):
+    error_text = _assert_closed_signal_ownership_rejected(
+        tmp_path,
+        case=case,
+        signals=[
+            make_active_signal().model_copy(
+                update={"raw_content": secret_value}
+            )
+        ],
+    )
+
+    assert secret_value not in error_text
+    assert unicodedata.normalize("NFKC", secret_value) not in error_text
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "extra", "reordered", "changed", "noncanonical_provenance"],
+)
+def test_native_closed_signal_mismatch_fails_before_transition(
+    tmp_path: Path,
+    case: str,
+):
+    _assert_closed_signal_ownership_rejected(
+        tmp_path,
+        case=case,
+        signals=[
+            make_active_signal().model_copy(update={"id": "S_closed_first"}),
+            make_active_signal().model_copy(
+                update={
+                    "id": "S_closed_second",
+                    "raw_content": "A distinct second closed signal.",
+                }
+            ),
+        ],
+    )
+
+
+def test_native_owned_signals_with_zero_events_fail_in_transition(tmp_path: Path):
+    ledger_path = tmp_path / "owned-signals-zero-events.jsonl"
+    ledger_path.touch()
+    core = ClosedSignalOwnershipCore(
+        "valid",
+        ledger=JsonlLedgerStore(ledger_path),
+    )
+    real_solver = core._belief_solver
+
+    class RecordingSolver:
+        calls = 0
+
+        def solve(self, *args, **kwargs):
+            self.calls += 1
+            return real_solver.solve(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_solver, name)
+
+    solver = RecordingSolver()
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    cycle = make_cycle("cycle_owned_signals_zero_events")
+
+    with pytest.raises(ValueError, match="native evidence memory transition"):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[make_active_signal()],
+        )
+
+    assert solver.calls == 0
+    assert ledger_path.read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    "secret_value",
+    [_NFKC_SECRET_VALUE, "Authorization: Bearer provider-secret-value-123"],
+)
+def test_explicit_legacy_plain_list_gate_never_ledgers_raw_secrets(
+    tmp_path: Path,
+    secret_value: str,
+):
+    class LegacyPlainListGate(EvidenceIntegrationGate):
+        def integrate(self, *, cycle, belief_state, probe_set, signals):
+            return []
+
+    class LegacyPlainListCore(BayesProbeCore):
+        def _create_evidence_integration_gate(self):
+            return LegacyPlainListGate()
+
+    ledger_path = tmp_path / "legacy-raw-secret.jsonl"
+    ledger_path.touch()
+    core = LegacyPlainListCore(ledger=JsonlLedgerStore(ledger_path))
+    real_solver = core._belief_solver
+
+    class RecordingSolver:
+        calls = 0
+
+        def solve(self, *args, **kwargs):
+            self.calls += 1
+            return real_solver.solve(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_solver, name)
+
+    solver = RecordingSolver()
+    core._belief_solver = solver
+    state = make_belief_state(cycle_id="cycle_0")
+    prior_state = state.model_dump(mode="json")
+    cycle = make_cycle("cycle_legacy_raw_secret")
+
+    with pytest.raises(
+        ValueError,
+        match="legacy closed signals contain secret material",
+    ) as exc_info:
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                make_active_signal().model_copy(
+                    update={"raw_content": secret_value}
+                )
+            ],
+        )
+
+    error_text = str(exc_info.value)
+    assert secret_value not in error_text
+    assert unicodedata.normalize("NFKC", secret_value) not in error_text
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
 
 
 @pytest.mark.parametrize(

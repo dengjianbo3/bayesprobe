@@ -99,3 +99,10 @@
 
 1. Transition reconstruction must use the same cycle-local source/content signature duplicate detection as production EvidenceGate. Two same-batch signals with the same source/content but different supplied roots/groups remain correlated-novel for memory classification yet must receive the duplicate quality cap in both construction and validation.
 2. Core and its production EvidenceGate must share one explicitly owned EvidenceMemoryManager and CorrelationCreditPolicy. Transition validation may not instantiate a default manager when the gate committed under a configured non-default cumulative credit cap; custom policy transitions must validate and default behavior must remain unchanged.
+
+## Fourteenth full-range re-review findings
+
+1. Native Core requires explicit closed-signal ownership from the gate. `normalized_signals=None` or an empty/missing/mismatched list cannot fall back to raw inbox signals; returned closed signals must correspond one-to-one with the cycle inputs, carry validated provenance, and be recursively secret-free before transition, solver, or ledger work. A nonempty native cycle with zero owned signals/events fails atomically.
+2. The exported PythonExecutionRecord constructor must retain backward-compatible construction after adding policy metadata. Legacy construction may use an explicit safe compatibility representation, while current sandbox execution still requires the complete resolved policy before producing trusted evidence.
+3. Python execution policy metadata must be deeply immutable at the record/observer boundary. An observer or external holder cannot mutate nested network/resource/interpreter fields before deterministic provenance hashing; the hash must describe the policy actually executed.
+4. EvidenceMemorySnapshot must require accepted evidence IDs and decoded discarded-history event IDs to be disjoint. Contradictory lifecycle ownership fails recursive snapshot and BeliefState validation.

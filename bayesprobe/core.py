@@ -8,7 +8,10 @@ from bayesprobe.belief import (
     summarize_hypotheses,
 )
 from bayesprobe.evidence import EvidenceIntegrationGate, EvidenceIntegrationResult
-from bayesprobe.evidence_memory import EvidenceMemoryManager
+from bayesprobe.evidence_memory import (
+    EvidenceMemoryManager,
+    SignalProvenanceNormalizer,
+)
 from bayesprobe.frame_policy import FrameAdequacyDecision, FrameAdequacyPolicy
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.inbox import SignalInbox
@@ -35,6 +38,7 @@ from bayesprobe.schemas import (
     ProbeCandidate,
     ProbeSet,
     SignalKind,
+    contains_secret_material,
     utc_now,
 )
 from bayesprobe.task_framing import migrate_legacy_belief_state
@@ -96,27 +100,36 @@ class BayesProbeCore:
         inbox = self._create_signal_inbox(cycle)
         for signal in signals:
             inbox.add(signal)
-        normalized_signals = inbox.close()
+        closed_inbox_signals = inbox.close()
         closed_cycle = cycle.model_copy(
             update={
                 "boundary_status": BoundaryStatus.CLOSED,
                 "boundary_closed_at": utc_now(),
             }
         )
-        self._validate_signal_shape(cycle=closed_cycle, signals=normalized_signals)
+        self._validate_signal_shape(
+            cycle=closed_cycle,
+            signals=closed_inbox_signals,
+        )
         integration = self._normalize_evidence_integration(
             self._evidence_gate.integrate(
                 cycle=closed_cycle,
                 belief_state=belief_state,
                 probe_set=probe_set,
-                signals=normalized_signals,
+                signals=closed_inbox_signals,
             )
         )
-        ledger_signals = integration.normalized_signals or normalized_signals
+        ledger_signals = _resolve_owned_closed_signals(
+            lifecycle=lifecycle,
+            inbox_signals=closed_inbox_signals,
+            integration=integration,
+            run_id=cycle.run_id,
+        )
         next_evidence_memory = _resolve_next_evidence_memory(
             lifecycle=lifecycle,
             belief_state=belief_state,
             integration=integration,
+            normalized_signals=ledger_signals,
             memory_manager=self._evidence_memory_manager,
         )
         evidence_events = mark_replayed_evidence_events(
@@ -431,6 +444,7 @@ def _resolve_next_evidence_memory(
     lifecycle: BeliefLifecycle,
     belief_state: BeliefState,
     integration: EvidenceIntegrationResult,
+    normalized_signals: list[ExternalSignal],
     memory_manager: EvidenceMemoryManager,
 ) -> EvidenceMemorySnapshot:
     memory = integration.evidence_memory
@@ -449,7 +463,7 @@ def _resolve_next_evidence_memory(
                 prior_memory,
                 memory,
                 evidence_events=integration.evidence_events,
-                normalized_signals=integration.normalized_signals or [],
+                normalized_signals=normalized_signals,
                 existing_evidence_ids=belief_state.ledger_refs.get(
                     "evidence_events",
                     [],
@@ -465,6 +479,73 @@ def _resolve_next_evidence_memory(
     if memory is None:
         raise ValueError("belief state requires evidence memory")
     return memory
+
+
+def _resolve_owned_closed_signals(
+    *,
+    lifecycle: BeliefLifecycle,
+    inbox_signals: list[ExternalSignal],
+    integration: EvidenceIntegrationResult,
+    run_id: str,
+) -> list[ExternalSignal]:
+    owned_signals = integration.normalized_signals
+    if lifecycle == BeliefLifecycle.NATIVE_V02:
+        return _validate_owned_closed_signals(
+            inbox_signals,
+            owned_signals,
+            run_id=run_id,
+        )
+
+    # Explicit legacy list-return compatibility may lack a normalized ownership
+    # envelope. In either form it may ledger only recursively valid safe values.
+    legacy_signals = inbox_signals if owned_signals is None else owned_signals
+    validated: list[ExternalSignal] = []
+    for signal in legacy_signals:
+        try:
+            payload = signal.model_dump(mode="python")
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("legacy closed signal ownership is invalid") from None
+        if contains_secret_material(payload):
+            raise ValueError(
+                "legacy closed signals contain secret material"
+            ) from None
+        try:
+            validated.append(ExternalSignal.model_validate(payload))
+        except (TypeError, ValueError):
+            raise ValueError("legacy closed signal ownership is invalid") from None
+    return validated
+
+
+def _validate_owned_closed_signals(
+    inbox_signals: list[ExternalSignal],
+    owned_signals: list[ExternalSignal] | None,
+    *,
+    run_id: str,
+) -> list[ExternalSignal]:
+    try:
+        if not isinstance(owned_signals, list) or len(owned_signals) != len(
+            inbox_signals
+        ):
+            raise ValueError
+        normalizer = SignalProvenanceNormalizer()
+        expected_signals = [
+            normalizer.normalize(signal, run_id=run_id)
+            for signal in inbox_signals
+        ]
+        validated_signals: list[ExternalSignal] = []
+        for expected, owned in zip(expected_signals, owned_signals, strict=True):
+            if not isinstance(owned, ExternalSignal):
+                raise ValueError
+            payload = owned.model_dump(mode="python")
+            if contains_secret_material(payload):
+                raise ValueError
+            validated = ExternalSignal.model_validate(payload)
+            if validated != expected:
+                raise ValueError
+            validated_signals.append(validated)
+        return validated_signals
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("native closed signal ownership is invalid") from None
 
 
 def _validate_native_evidence_events(
