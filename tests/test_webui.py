@@ -264,9 +264,14 @@ def test_webui_stream_emits_ordered_cycle_and_terminal_events():
     assert error is None
     assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
     assert events[0]["event"] == "run_started"
-    assert events[-2]["event"] == "cycle_integrated"
+    assert [event["event"] for event in events[-4:]] == [
+        "cycle_integrated",
+        "probe_design_started",
+        "probe_design_completed",
+        "run_completed",
+    ]
     assert events[-1]["event"] == "run_completed"
-    cycle = events[-2]["data"]
+    cycle = events[-4]["data"]
     assert cycle["cycle"]["boundary_status"] == "integrated"
     assert cycle["belief_state"]["posterior_summary"][
         "total_active_posterior"
@@ -308,6 +313,11 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
     assert set(event_by_name["initialization_completed"]["data"]) == {
         "run",
         "belief_state",
+    }
+    assert event_by_name["probe_design_started"]["data"] == {}
+    assert set(event_by_name["probe_design_completed"]["data"]) == {
+        "probe_candidates",
+        "capability_decisions",
     }
     assert set(event_by_name["cycle_started"]["data"]) == {"belief_summary"}
     assert set(event_by_name["cycle_started"]["data"]["belief_summary"]) == {

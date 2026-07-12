@@ -11,10 +11,12 @@ from bayesprobe.schemas import (
     EvidenceMemorySnapshot,
     FrameAdequacyStatus,
     FrameState,
+    FramingMethod,
     FramedHypothesis,
     Hypothesis,
     ProbeCandidate,
     ProbeDesign,
+    ProbePurpose,
     RunRecord,
     RunRegime,
     RunStatus,
@@ -200,6 +202,10 @@ class BayesProbeInitializer:
             problem=problem,
             hypotheses=hypotheses,
             is_multiple_choice=task_frame.task_kind == TaskKind.MULTIPLE_CHOICE,
+            is_explicit_seeded=(
+                task_frame.framing_method == FramingMethod.EXPLICIT
+                and bool(input.hypothesis_seeds)
+            ),
         )
         self._append_ledger(
             admission_decision=decision,
@@ -314,16 +320,70 @@ def _initial_probe_candidates(
     problem: str,
     hypotheses: list[Hypothesis],
     is_multiple_choice: bool,
+    is_explicit_seeded: bool,
 ) -> list[ProbeCandidate]:
-    if not is_multiple_choice:
-        return []
-    return [
-        _answer_choice_discriminator_candidate(
-            run_id=run_id,
-            problem=problem,
-            hypotheses=hypotheses,
-        )
-    ]
+    if is_multiple_choice:
+        return [
+            _answer_choice_discriminator_candidate(
+                run_id=run_id,
+                problem=problem,
+                hypotheses=hypotheses,
+            )
+        ]
+    if is_explicit_seeded:
+        return [
+            _frame_discriminator_candidate(
+                run_id=run_id,
+                problem=problem,
+                hypotheses=hypotheses,
+            )
+        ]
+    return []
+
+
+def _frame_discriminator_candidate(
+    *,
+    run_id: str,
+    problem: str,
+    hypotheses: list[Hypothesis],
+) -> ProbeCandidate:
+    hypothesis_ids = [hypothesis.id for hypothesis in hypotheses]
+    primary_hypothesis = hypotheses[0]
+    return ProbeCandidate(
+        candidate_id=f"pc_{run_id}_{INITIAL_CYCLE_ID}_frame_discriminator",
+        source="manual",
+        candidate_probe=ProbeDesign(
+            id=f"P_{run_id}_{INITIAL_CYCLE_ID}_frame_discriminator",
+            cycle_id=INITIAL_CYCLE_ID,
+            target_hypotheses=[primary_hypothesis.id],
+            inquiry_goal=(
+                "Test the primary explicit hypothesis against the named frame "
+                f"alternatives using its stated predictions.\nProblem:\n{problem}"
+            ),
+            method="frame_discrimination_support",
+            purpose=ProbePurpose.HYPOTHESIS_DISCRIMINATION,
+            expected_observation=(
+                "An observation favors one framed hypothesis over its alternatives."
+            ),
+            support_condition={
+                primary_hypothesis.id: "Its stated prediction is observed."
+            },
+            weaken_condition={
+                primary_hypothesis.id: "Its stated falsifier is observed."
+            },
+            expected_information_gain=0.85,
+            decision_relevance=0.85,
+            cost_estimate=0.3,
+            priority=0.85,
+        ),
+        priority_features={
+            "initialization_method": INITIALIZATION_METHOD,
+            "question_frame": "explicit_seeded",
+            "probe_role": "frame_discriminator",
+            "frame_hypotheses": hypothesis_ids,
+            "target_hypotheses": [primary_hypothesis.id],
+        },
+    )
 
 
 def _answer_choice_discriminator_candidate(

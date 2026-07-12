@@ -293,6 +293,13 @@ def _serialize_progress_data(progress: AutonomousQuestionProgress) -> dict[str, 
             "run": _dump_domain(progress.run),
             "belief_state": _dump_domain(progress.belief_state),
         }
+    if progress.kind == AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED:
+        return {}
+    if progress.kind == AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED:
+        return {
+            "probe_candidates": _dump_domain(progress.probe_candidates),
+            "capability_decisions": _dump_domain(progress.capability_decisions),
+        }
     if progress.kind == AutonomousQuestionProgressKind.CYCLE_STARTED:
         belief_state = progress.belief_state
         return {

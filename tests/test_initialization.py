@@ -227,15 +227,77 @@ def test_initializer_open_hypotheses_never_acquire_answer_values():
     )
 
 
-def test_open_initializer_does_not_emit_generic_per_hypothesis_probes():
+def test_explicit_seeded_initializer_emits_one_frame_level_discriminator():
     result = BayesProbeInitializer().initialize(
         InitializeRunInput(
-            run_id="run_open_without_generic_probes",
+            run_id="run_seeded_frame_discriminator",
             problem="Which explanation best fits?",
             hypothesis_seeds=explicit_test_hypothesis_seeds(),
             task_kind=TaskKind.DECISION,
         ),
         admission_decision=admitted_seed_decision(),
+    )
+
+    assert result.task_frame.answer_relationship == AnswerRelationship.SYNTHESIS
+    assert len(result.probe_candidates) == 1
+    candidate = result.probe_candidates[0]
+    assert candidate.candidate_probe.target_hypotheses == ["H1"]
+    assert candidate.candidate_probe.method == "frame_discrimination_support"
+    assert candidate.candidate_probe.method != "source_tracing"
+    assert candidate.priority_features["probe_role"] == "frame_discriminator"
+    assert candidate.priority_features["frame_hypotheses"] == ["H1", "H2"]
+
+
+def test_model_framed_unseeded_open_initializer_starts_without_candidates():
+    initializer = BayesProbeInitializer(
+        task_framer=ModelTaskFramer(
+            ScriptedModelGateway(
+                {
+                    "frame_open_question": {
+                        "task_kind": "decision",
+                        "answer_relationship": "synthesis",
+                        "answer_contract": {
+                            "objective": "Assess the competing explanations.",
+                            "answer_value_type": "structured_text",
+                            "answer_format": "structured assessment",
+                            "required_sections": ["answer", "basis", "uncertainty"],
+                            "decision_form": "hypothesis_assessment",
+                            "permits_synthesis": True,
+                        },
+                        "competition": "independent",
+                        "coverage": "open",
+                        "hypotheses": [
+                            {
+                                "statement": "The primary explanation holds.",
+                                "type": "causal_claim",
+                                "scope": "The stated conditions.",
+                                "falsifiers": ["Reliable evidence contradicts it."],
+                                "predictions": ["The expected effect appears."],
+                                "answer_value": None,
+                            },
+                            {
+                                "statement": "A competing explanation holds.",
+                                "type": "alternative_explanation",
+                                "scope": "The stated conditions.",
+                                "falsifiers": ["Reliable evidence excludes it."],
+                                "predictions": ["The alternative pattern appears."],
+                                "answer_value": None,
+                            },
+                        ],
+                        "coverage_statement": "The frame names the main alternatives.",
+                        "coverage_limitation": "Other explanations remain possible.",
+                    }
+                }
+            )
+        )
+    )
+
+    result = initializer.initialize(
+        InitializeRunInput(
+            run_id="run_model_open_without_candidates",
+            problem="How should the competing explanations be assessed?",
+        ),
+        admission_decision=admitted_seed_decision("admission_model_open"),
     )
 
     assert result.task_frame.answer_relationship == AnswerRelationship.SYNTHESIS
@@ -538,6 +600,7 @@ def test_initializer_writes_ledger_records_without_evidence_or_answers(tmp_path:
         "task_frame",
         "run",
         "belief_state",
+        "probe_candidate",
     ]
     assert "evidence_event" not in record_types
     assert "belief_update" not in record_types

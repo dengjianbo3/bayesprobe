@@ -237,7 +237,7 @@ class AutonomousQuestionRunner:
             probe_candidates=tuple(initialization.probe_candidates),
         )
         current_belief_state = initial_belief_state
-        if task_frame.task_kind == TaskKind.MULTIPLE_CHOICE:
+        if initialization.probe_candidates:
             candidate_pool = list(initialization.probe_candidates)
         else:
             initial_design = self._design_probes(

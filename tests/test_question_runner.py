@@ -12,7 +12,11 @@ from bayesprobe.probe_executor import (
     ProbeExecutionResult,
     ProbeExecutor,
 )
-from bayesprobe.probe_design import MODEL_REASONING_CAPABILITY, ModelProbeDesigner
+from bayesprobe.probe_design import (
+    MODEL_REASONING_CAPABILITY,
+    ModelProbeDesigner,
+    ProbeDesignResult,
+)
 from bayesprobe.probe_planner import ProbePlanningResult
 from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
@@ -92,6 +96,15 @@ class ReturningTaskAdmitter:
 
     def assess(self, input):
         return self.decision
+
+
+class RecordingProbeDesigner:
+    def __init__(self):
+        self.contexts = []
+
+    def propose(self, context):
+        self.contexts.append(context)
+        return ProbeDesignResult(candidates=[], capability_decisions=[])
 
 
 def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
@@ -320,6 +333,31 @@ def test_runner_rejects_wrong_admitter_return_type_before_progress_or_ledger(tmp
 
     assert progress == []
     assert not ledger_path.exists()
+
+
+def test_runner_uses_explicit_seeded_initializer_discriminator_before_fresh_design():
+    designer = RecordingProbeDesigner()
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        probe_designer=designer,
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_explicit_seeded_compatibility",
+            problem="Which explicit explanation is better supported?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    )
+
+    assert len(result.cycle_results) == 1
+    assert result.cycle_results[0].probe_set.probes[0].method == (
+        "frame_discrimination_support"
+    )
+    assert [context.cycle_id for context in designer.contexts] == [
+        result.cycle_results[0].cycle.cycle_id
+    ]
 
 
 def test_open_question_framing_precedes_belief_initialization():
@@ -687,7 +725,7 @@ def test_question_runner_stops_on_confidence_threshold():
     )
 
     assert result.stop_reason == AutonomousQuestionStopReason.CONFIDENCE_REACHED
-    assert len(result.cycle_results) == 2
+    assert len(result.cycle_results) == 1
     assert result.final_answer_projection is not None
     assert result.final_belief_state.hypotheses_by_id()["H1"].posterior >= 0.6
 
@@ -806,7 +844,7 @@ def test_question_runner_writes_end_to_end_ledger_records(tmp_path: Path):
 
     record_types = [record["record_type"] for record in ledger.read_all()]
     assert "run" in record_types
-    assert "probe_candidate" not in record_types
+    assert "probe_candidate" in record_types
     assert "probe_set" in record_types
     assert "probe_execution" in record_types
     assert "external_signal" in record_types
@@ -861,8 +899,6 @@ def test_question_runner_emits_truthful_progress_for_integrated_cycle():
         AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
         AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
         AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
-        AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
-        AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
         AutonomousQuestionProgressKind.CYCLE_STARTED,
         AutonomousQuestionProgressKind.PROBE_SET_PLANNED,
         AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED,
@@ -1062,8 +1098,6 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
         AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
         AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
         AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
-        AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
-        AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
         *per_cycle,
         *per_cycle,
         AutonomousQuestionProgressKind.RUN_COMPLETED,
