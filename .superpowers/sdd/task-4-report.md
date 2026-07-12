@@ -608,3 +608,55 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 11
+
+### Changes
+
+- Added one v0.2 `BeliefState` cross-object invariant: accepted evidence ids
+  plus decoded discard-history ids must be a subset of
+  `ledger_refs["evidence_events"]`. The error is secret-free and never includes
+  an event id.
+- Kept the relation deliberately one-way. Extra historical ledger evidence ids
+  remain valid, while evidence-memory binding ownership continues to be checked
+  inside `EvidenceMemorySnapshot`.
+- Exercised deep lifecycle revalidation with a bypass-constructed migrated state
+  whose bound E1 was removed from ledger refs. It now fails before a changed
+  positional signal reaches provider, memory, state, or ledger work.
+- Updated direct-gate test transitions to carry the event refs corresponding to
+  copied committed memory, and retained ledger-only missing-binding replay as a
+  valid load that fails closed only when replayed.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py::test_v02_belief_state_rejects_accepted_memory_event_missing_from_ledger_refs tests/test_schemas.py::test_v02_belief_state_rejects_discarded_memory_event_missing_from_ledger_refs tests/test_schemas.py::test_v02_belief_state_rejects_bound_memory_event_missing_from_ledger_refs tests/test_schemas.py::test_v02_belief_state_accepts_memory_lifecycle_subset_with_extra_ledger_ids tests/test_core_cycles.py::test_bypass_migrated_memory_event_without_ledger_ref_fails_atomically tests/test_core_cycles.py::test_exact_migrated_positional_replay_is_idempotent tests/test_core_cycles.py::test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record tests/test_core_cycles.py::test_historical_positional_event_without_binding_fails_with_other_identity_memory -q -p no:cacheprovider` -> `4 failed, 4 passed in 0.33s`.
+- Initial GREEN exposed the old historical fixture as memory-owned rather than
+  ledger-only: the same command -> `1 failed, 7 passed in 0.28s`.
+- GREEN after fixture refactor: the same command -> `8 passed in 0.26s`.
+- The first Task 4 run exposed four direct-gate fixtures that copied committed
+  memory without its refs: the Task 4 command below -> `4 failed, 388 passed in
+  1.14s`; their focused correction check -> `4 passed in 0.21s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `392 passed in 1.05s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `320 passed in 0.40s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1193 passed, 10 skipped in 9.50s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- Direct construction rejects accepted, discarded, and bound lifecycle entries
+  missing from evidence ledger refs. Recursive lifecycle resolution converts a
+  bypassed version of the same inconsistency into an invalid lifecycle before
+  provider access; core assertions prove unchanged state, memory, and ledger
+  bytes.
+- Normal first migrated commit, exact migrated replay, and exact native replay
+  all assert the new subset invariant. The validator does not require equality,
+  so historical ledger-only ids remain backward-loadable and their absent
+  binding is checked only on replay.
+- The invariant applies only to v0.2 envelopes, uses canonical decoded discard
+  ids, and does not weaken the existing internal binding-to-lifecycle subset or
+  any prior lifecycle, identity, credit, replay, and secret-safety checks.
+
+### Concerns
+
+No blocking concerns.

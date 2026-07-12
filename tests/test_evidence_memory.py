@@ -490,7 +490,18 @@ def test_exact_cross_cycle_repeat_produces_no_update_or_provider_call():
         probe_set=_probe_set(1),
         signals=[_signal("S_first", "The audited value supports A.")],
     )
-    state = state.model_copy(update={"evidence_memory": first.evidence_memory})
+    state = state.model_copy(
+        update={
+            "evidence_memory": first.evidence_memory,
+            "ledger_refs": {
+                **state.ledger_refs,
+                "evidence_events": [
+                    *state.ledger_refs.get("evidence_events", []),
+                    *(event.id for event in first.evidence_events),
+                ],
+            },
+        }
+    )
 
     repeated = gate.integrate(
         cycle=_cycle(2),
@@ -658,7 +669,18 @@ def test_same_root_restatement_has_zero_independence():
         probe_set=_probe_set(1),
         signals=[_signal("S_first", "The audited value supports A.")],
     )
-    state = state.model_copy(update={"evidence_memory": first.evidence_memory})
+    state = state.model_copy(
+        update={
+            "evidence_memory": first.evidence_memory,
+            "ledger_refs": {
+                **state.ledger_refs,
+                "evidence_events": [
+                    *state.ledger_refs.get("evidence_events", []),
+                    *(event.id for event in first.evidence_events),
+                ],
+            },
+        }
+    )
 
     restated = gate.integrate(
         cycle=_cycle(2),

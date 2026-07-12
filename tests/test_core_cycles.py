@@ -3011,6 +3011,14 @@ def _legacy_evidence_judgment():
     }
 
 
+def _memory_lifecycle_ids(state: BeliefState) -> set[str]:
+    memory = state.evidence_memory
+    assert memory is not None
+    return set(memory.accepted_evidence_ids) | {
+        json.loads(entry)[0] for entry in memory.discard_and_schema_history
+    }
+
+
 def _migrated_replay_fixture(tmp_path: Path, name: str):
     gateway = ScriptedModelGateway(
         responses={"judge_evidence": _legacy_evidence_judgment()}
@@ -3051,6 +3059,9 @@ def _migrated_replay_fixture(tmp_path: Path, name: str):
     assert first.belief_state.evidence_memory.event_signal_identity_digests == (
         expected_bindings
     )
+    assert _memory_lifecycle_ids(first.belief_state) <= set(
+        first.belief_state.ledger_refs["evidence_events"]
+    )
     return (
         gateway,
         ledger_path,
@@ -3061,6 +3072,67 @@ def _migrated_replay_fixture(tmp_path: Path, name: str):
         second_signal,
         first,
     )
+
+
+def test_bypass_migrated_memory_event_without_ledger_ref_fails_atomically(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _legacy_evidence_judgment()}
+    )
+    ledger_path = tmp_path / "bypass-memory-ledger-invariant.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    cycle = make_cycle("cycle_bypass_memory_ledger_invariant")
+    first = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_belief_state(cycle_id="cycle_0"),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[
+            _memory_signal(
+                "S_bypass_original",
+                "The original positional audit favors H1.",
+                root="root-bypass-original",
+            )
+        ],
+    )
+    event_id = first.evidence_events[0].id
+    memory = first.belief_state.evidence_memory
+    assert memory is not None
+    assert event_id in memory.accepted_evidence_ids
+    assert event_id in memory.event_signal_identity_digests
+    assert event_id in first.belief_state.ledger_refs["evidence_events"]
+    inconsistent_state = first.belief_state.model_copy(
+        update={
+            "ledger_refs": {
+                **first.belief_state.ledger_refs,
+                "evidence_events": [],
+            }
+        }
+    )
+    prior_state = inconsistent_state.model_dump(mode="json")
+    prior_memory = memory.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+    prior_provider_calls = len(gateway.requests)
+
+    with pytest.raises(ValueError, match="invalid belief lifecycle"):
+        core.integrate_cycle(
+            cycle=cycle.model_copy(update={"cycle_index": 2}),
+            belief_state=inconsistent_state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                _memory_signal(
+                    "S_bypass_changed",
+                    "Changed content must not rebind the positional event.",
+                    root="root-bypass-changed",
+                )
+            ],
+        )
+
+    assert len(gateway.requests) == prior_provider_calls
+    assert inconsistent_state.model_dump(mode="json") == prior_state
+    assert memory.model_dump(mode="json") == prior_memory
+    assert ledger_path.read_bytes() == prior_ledger
 
 
 @pytest.mark.parametrize(
@@ -3213,6 +3285,9 @@ def test_exact_migrated_positional_replay_is_idempotent(tmp_path: Path):
         "duplicate evidence event id",
     ]
     assert replayed.belief_state.evidence_memory == prior_memory
+    assert _memory_lifecycle_ids(replayed.belief_state) <= set(
+        replayed.belief_state.ledger_refs["evidence_events"]
+    )
     assert ledger.read_all("evidence_event") == prior_event_records
 
 
@@ -3451,6 +3526,9 @@ def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
     assert replayed_memory.event_signal_identity_digests == (
         prior_memory.event_signal_identity_digests
     )
+    assert _memory_lifecycle_ids(replayed.belief_state) <= set(
+        replayed.belief_state.ledger_refs["evidence_events"]
+    )
     assert replayed.belief_updates == []
     assert [
         record["payload"]["id"] for record in ledger.read_all("evidence_event")
@@ -3596,20 +3674,15 @@ def test_historical_positional_event_without_binding_fails_with_other_identity_m
     )
     ledger.append("evidence_event", prior_event)
     prior_memory = first.belief_state.evidence_memory
-    memory_with_historical_lifecycle = EvidenceMemorySnapshot.model_validate(
-        {
-            **prior_memory.model_dump(mode="python"),
-            "accepted_evidence_ids": [
-                *prior_memory.accepted_evidence_ids,
-                event_id,
-            ],
-        }
-    )
     historical_state = first.belief_state.model_copy(
-        update={"ledger_refs": {"evidence_events": [event_id]}}
-    )
-    historical_state = historical_state.model_copy(
-        update={"evidence_memory": memory_with_historical_lifecycle}
+        update={
+            "ledger_refs": {
+                "evidence_events": [
+                    *first.belief_state.ledger_refs["evidence_events"],
+                    event_id,
+                ]
+            }
+        }
     )
     historical_state = BeliefState.model_validate(
         historical_state.model_dump(mode="python")
@@ -3619,6 +3692,7 @@ def test_historical_positional_event_without_binding_fails_with_other_identity_m
     prior_provider_calls = len(gateway.requests)
 
     assert historical_state.evidence_memory.source_content_fingerprints
+    assert event_id not in historical_state.evidence_memory.accepted_evidence_ids
     assert event_id not in (
         historical_state.evidence_memory.event_signal_identity_digests
     )

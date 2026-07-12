@@ -1283,6 +1283,7 @@ class BeliefState(BaseModel):
         if self.schema_version == "v0.2":
             frame_state = self.frame_state
             task_frame = self.task_frame
+            evidence_memory = self.evidence_memory
             if frame_state.frame_id != task_frame.hypothesis_frame.frame_id:
                 raise ValueError("frame state must match the task hypothesis frame")
             if (
@@ -1297,9 +1298,21 @@ class BeliefState(BaseModel):
             )
             if unknown_active_ids:
                 raise ValueError("frame state contains unknown active hypothesis ids")
+            memory_lifecycle_ids = set(evidence_memory.accepted_evidence_ids)
+            memory_lifecycle_ids.update(
+                decode_discard_history_entry(entry)[0]
+                for entry in evidence_memory.discard_and_schema_history
+            )
+            ledger_evidence_ids = set(
+                self.ledger_refs.get("evidence_events", [])
+            )
+            if memory_lifecycle_ids.difference(ledger_evidence_ids):
+                raise ValueError(
+                    "evidence memory lifecycle ids must be ledger-referenced"
+                )
             credit_subjects = {
                 key.split("|")[1]
-                for key in self.evidence_memory.correlation_credit
+                for key in evidence_memory.correlation_credit
                 if not key.split("|")[1].startswith("frame:")
             }
             if credit_subjects.difference(hypotheses_by_id):

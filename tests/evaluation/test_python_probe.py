@@ -649,7 +649,13 @@ def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():
         signals=[first_signal],
     )
     state = first_context.belief_state.model_copy(
-        update={"evidence_memory": first.evidence_memory}
+        update={
+            "evidence_memory": first.evidence_memory,
+            "ledger_refs": {
+                **first_context.belief_state.ledger_refs,
+                "evidence_events": [event.id for event in first.evidence_events],
+            },
+        }
     )
     repeated = gate.integrate(
         cycle=CycleRecord(

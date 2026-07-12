@@ -100,6 +100,55 @@ def make_v02_task_frame(
     )
 
 
+def make_v02_belief_state(
+    *,
+    evidence_memory: EvidenceMemorySnapshot | None = None,
+    ledger_evidence_ids: list[str] | None = None,
+) -> BeliefState:
+    task_frame = make_v02_task_frame()
+    hypotheses = [
+        Hypothesis(
+            id=item.id,
+            statement=item.statement,
+            type=item.type,
+            scope=item.scope,
+            prior=item.initial_prior,
+            posterior=item.initial_prior,
+            rivals=list(task_frame.hypothesis_frame.rival_sets[item.id]),
+            falsifiers=list(item.falsifiers),
+            predictions=list(item.predictions),
+        )
+        for item in task_frame.hypothesis_frame.hypotheses
+    ]
+    ledger_refs = (
+        {"evidence_events": list(ledger_evidence_ids)}
+        if ledger_evidence_ids is not None
+        else {}
+    )
+    return BeliefState(
+        schema_version="v0.2",
+        belief_state_id="bs_memory_ledger_validation",
+        run_id="run_memory_ledger_validation",
+        cycle_id="cycle_0",
+        hypotheses=hypotheses,
+        ledger_refs=ledger_refs,
+        task_frame=task_frame,
+        frame_state=FrameState(
+            frame_id=task_frame.hypothesis_frame.frame_id,
+            competition=task_frame.hypothesis_frame.competition,
+            coverage=task_frame.hypothesis_frame.coverage,
+            active_hypothesis_ids=[item.id for item in hypotheses],
+            unresolved_alternative_mass=0.5,
+            adequacy_status=FrameAdequacyStatus.PROVISIONAL,
+        ),
+        evidence_memory=(
+            evidence_memory
+            if evidence_memory is not None
+            else EvidenceMemorySnapshot(memory_version=2)
+        ),
+    )
+
+
 def test_exact_answer_frame_is_exclusive_open_with_unresolved_mass():
     frame = make_v02_task_frame(
         task_kind=TaskKind.EXACT_ANSWER,
@@ -564,6 +613,74 @@ def test_evidence_memory_event_bindings_cover_accepted_and_discarded_events():
     )
 
     assert restored == snapshot
+
+
+def test_v02_belief_state_rejects_accepted_memory_event_missing_from_ledger_refs():
+    memory = EvidenceMemorySnapshot(
+        memory_version=2,
+        accepted_evidence_ids=["E_accepted"],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="evidence memory lifecycle ids must be ledger-referenced",
+    ):
+        make_v02_belief_state(evidence_memory=memory)
+
+
+def test_v02_belief_state_rejects_discarded_memory_event_missing_from_ledger_refs():
+    memory = EvidenceMemorySnapshot(
+        memory_version=2,
+        discard_and_schema_history=[
+            '["E_discarded","schema_violation:invalid judgment"]'
+        ],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="evidence memory lifecycle ids must be ledger-referenced",
+    ):
+        make_v02_belief_state(evidence_memory=memory)
+
+
+def test_v02_belief_state_rejects_bound_memory_event_missing_from_ledger_refs():
+    memory = EvidenceMemorySnapshot(
+        memory_version=2,
+        accepted_evidence_ids=["E_bound"],
+        event_signal_identity_digests={"E_bound": "a" * 64},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="evidence memory lifecycle ids must be ledger-referenced",
+    ):
+        make_v02_belief_state(evidence_memory=memory)
+
+
+def test_v02_belief_state_accepts_memory_lifecycle_subset_with_extra_ledger_ids():
+    memory = EvidenceMemorySnapshot(
+        memory_version=2,
+        accepted_evidence_ids=["E_accepted"],
+        discard_and_schema_history=[
+            '["E_discarded","schema_violation:invalid judgment"]'
+        ],
+        event_signal_identity_digests={
+            "E_accepted": "a" * 64,
+            "E_discarded": "b" * 64,
+        },
+    )
+
+    state = make_v02_belief_state(
+        evidence_memory=memory,
+        ledger_evidence_ids=["E_accepted", "E_discarded", "E_historical"],
+    )
+
+    assert state.evidence_memory == memory
+    assert state.ledger_refs["evidence_events"] == [
+        "E_accepted",
+        "E_discarded",
+        "E_historical",
+    ]
 
 
 def test_belief_state_recursively_rejects_unowned_event_signal_binding():

@@ -339,7 +339,15 @@ def test_repeated_deterministic_probe_reuses_root_and_spends_no_fresh_credit():
         probe_set=make_probe_set([first_probe], cycle_id="run_exec_cycle_1"),
         signals=[first_signal],
     )
-    state = state.model_copy(update={"evidence_memory": first.evidence_memory})
+    state = state.model_copy(
+        update={
+            "evidence_memory": first.evidence_memory,
+            "ledger_refs": {
+                **state.ledger_refs,
+                "evidence_events": [event.id for event in first.evidence_events],
+            },
+        }
+    )
     repeated = gate.integrate(
         cycle=CycleRecord(
             cycle_id="run_exec_cycle_2",
