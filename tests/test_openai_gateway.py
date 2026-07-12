@@ -15,6 +15,7 @@ from bayesprobe.openai_gateway import (
     EVIDENCE_JUDGMENT_JSON_SCHEMA,
     EVIDENCE_JUDGMENT_V01_JSON_SCHEMA,
     OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA,
+    PROBE_DESIGN_JSON_SCHEMA,
     PROBE_SIGNAL_JSON_SCHEMA,
     TASK_ADMISSION_DECISION_JSON_SCHEMA,
     OpenAIChatCompletionsModelGateway,
@@ -47,6 +48,17 @@ FORBIDDEN_OPEN_QUESTION_TASK_FRAME_FIELDS = [
     "credential",
     "secret",
 ]
+PROBE_DESIGN_REQUIRED_KEYS = [
+    "purpose",
+    "target_hypotheses",
+    "inquiry_goal",
+    "expected_observation",
+    "support_condition",
+    "weaken_condition",
+    "reframe_condition",
+    "required_capability",
+]
+FORBIDDEN_PROBE_DESIGN_FIELDS = ["id", "priority", "prior", "posterior"]
 OPENAI_MODEL_IDENTITY_PREFIX = "openai_model_identity:v1:"
 
 
@@ -174,6 +186,26 @@ def make_repair_task_frame_request() -> StructuredModelRequest:
     )
 
 
+def make_probe_design_request(
+    *, task: str = "design_probes"
+) -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task=task,
+        input={
+            "cycle_id": "cycle_1",
+            "hypotheses": [
+                {"id": "H1", "statement": "First explanation."},
+                {"id": "H2", "statement": "Second explanation."},
+            ],
+            "available_capabilities": ["model_reasoning"],
+        },
+        prompt_id="probe_design",
+        prompt_version="v0.2",
+        schema_name="ProbeDesign",
+        schema_version="v0.2",
+    )
+
+
 def make_task_admission_request(
     *, task: str = "assess_task_admission"
 ) -> StructuredModelRequest:
@@ -252,6 +284,53 @@ def assert_open_question_task_frame_required_output(required_output: dict) -> No
     serialized_required_output = json.dumps(required_output).lower()
     for field in FORBIDDEN_OPEN_QUESTION_TASK_FRAME_FIELDS:
         assert f'"{field}"' not in serialized_required_output
+
+
+def assert_probe_design_schema(schema: dict) -> None:
+    assert schema == PROBE_DESIGN_JSON_SCHEMA
+    assert schema["required"] == ["proposals"]
+    proposal_schema = schema["properties"]["proposals"]["items"]
+    assert proposal_schema["required"] == PROBE_DESIGN_REQUIRED_KEYS
+    serialized_schema = json.dumps(schema).lower()
+    for field in FORBIDDEN_PROBE_DESIGN_FIELDS:
+        assert f'"{field}"' not in serialized_schema
+
+
+@pytest.mark.parametrize(
+    "model_request",
+    [
+        make_probe_design_request(),
+        make_probe_design_request(task="repair_probe_design"),
+    ],
+)
+def test_responses_probe_design_uses_strict_semantic_schema(model_request):
+    payload = build_openai_request_payload(model_request, model="test-model")
+
+    assert payload["text"]["format"] == {
+        "type": "json_schema",
+        "name": "ProbeDesign",
+        "strict": True,
+        "schema": PROBE_DESIGN_JSON_SCHEMA,
+    }
+    assert_probe_design_schema(payload["text"]["format"]["schema"])
+
+
+@pytest.mark.parametrize(
+    "model_request",
+    [
+        make_probe_design_request(),
+        make_probe_design_request(task="repair_probe_design"),
+    ],
+)
+def test_chat_probe_design_uses_exact_semantic_schema(model_request):
+    payload = build_openai_chat_completions_payload(model_request, model="test-model")
+    required_output = json.loads(payload["messages"][1]["content"])[
+        "required_output"
+    ]
+
+    assert required_output["type"] == "ProbeDesign"
+    assert required_output["required_keys"] == ["proposals"]
+    assert_probe_design_schema(required_output["json_schema"])
 
 
 def test_build_openai_payload_for_open_question_frame():

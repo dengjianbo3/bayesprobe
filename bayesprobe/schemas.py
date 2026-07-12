@@ -1410,6 +1410,11 @@ class ProbeDesign(BaseModel):
     target_hypotheses: list[str]
     inquiry_goal: str
     method: str
+    purpose: ProbePurpose = ProbePurpose.HYPOTHESIS_DISCRIMINATION
+    expected_observation: str = (
+        "A result that changes support for a target hypothesis."
+    )
+    required_capability: CapabilityKind = CapabilityKind.MODEL_REASONING
     probe_type: str = "discriminative_test"
     support_condition: dict[str, str] = Field(default_factory=dict)
     weaken_condition: dict[str, str] = Field(default_factory=dict)
@@ -1419,6 +1424,17 @@ class ProbeDesign(BaseModel):
     cost_estimate: float = 0.5
     priority: float = 0.5
     status: str = "candidate"
+
+    @field_validator(
+        "id",
+        "cycle_id",
+        "inquiry_goal",
+        "method",
+        "expected_observation",
+    )
+    @classmethod
+    def clean_probe_text(cls, value: str, info: ValidationInfo) -> str:
+        return _required_text(value, info.field_name)
 
     @field_validator("expected_information_gain", "decision_relevance", "cost_estimate", "priority")
     @classmethod

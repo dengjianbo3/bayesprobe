@@ -88,6 +88,15 @@ from bayesprobe.probe_executor import (
     ProbeExecutor,
     ProbeToolGateway,
 )
+from bayesprobe.probe_design import (
+    MODEL_REASONING_CAPABILITY,
+    FrameProbeDesigner,
+    ModelProbeDesigner,
+    ProbeDesignContext,
+    ProbeDesignError,
+    ProbeDesignResult,
+    ProbeDesigner,
+)
 from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunResult,
@@ -209,6 +218,7 @@ __all__ = [
     "JsonlLedgerStore",
     "ModelGateway",
     "ModelBackedProbeToolGateway",
+    "ModelProbeDesigner",
     "ModelGatewayConfig",
     "ModelGatewayValidationError",
     "ModelInvocationTrace",
@@ -222,6 +232,10 @@ __all__ = [
     "RecordedTaskFramer",
     "RecordedTaskAdmitter",
     "ProbeDesign",
+    "ProbeDesignContext",
+    "ProbeDesignError",
+    "ProbeDesignResult",
+    "ProbeDesigner",
     "ProbePurpose",
     "ProbeExecutionContext",
     "ProbeExecutionResult",
@@ -270,4 +284,6 @@ __all__ = [
     "parse_legacy_answer_choice_frame",
     "run_benchmark_experiment",
     "write_benchmark_report",
+    "FrameProbeDesigner",
+    "MODEL_REASONING_CAPABILITY",
 ]

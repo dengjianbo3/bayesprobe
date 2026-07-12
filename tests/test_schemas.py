@@ -36,6 +36,7 @@ from bayesprobe.schemas import (
     LikelihoodBand,
     ProbeCandidate,
     ProbeDesign,
+    ProbePurpose,
     ProbeSet,
     RunRecord,
     RunRegime,
@@ -45,6 +46,7 @@ from bayesprobe.schemas import (
     TaskAdmissionDecision,
     TaskAdmissionStatus,
     TaskKind,
+    CapabilityKind,
     is_forbidden_secret_key_name,
     is_secret_like_value,
 )
@@ -181,6 +183,36 @@ def make_v02_belief_state(
             else EvidenceMemorySnapshot(memory_version=2)
         ),
     )
+
+
+def test_probe_design_carries_server_typed_semantics():
+    probe = ProbeDesign(
+        id="P_cycle_1_discriminate",
+        cycle_id="cycle_1",
+        target_hypotheses=["H1", "H2"],
+        inquiry_goal="Distinguish a size effect from a compute-budget confounder.",
+        method="model_reasoning",
+        purpose=ProbePurpose.HYPOTHESIS_DISCRIMINATION,
+        expected_observation=(
+            "A matched-budget comparison changes the apparent size effect."
+        ),
+        required_capability=CapabilityKind.MODEL_REASONING,
+    )
+
+    assert probe.purpose == ProbePurpose.HYPOTHESIS_DISCRIMINATION
+    assert probe.required_capability == CapabilityKind.MODEL_REASONING
+
+
+def test_probe_design_rejects_blank_expected_observation():
+    with pytest.raises(ValueError, match="expected_observation"):
+        ProbeDesign(
+            id="P1",
+            cycle_id="cycle_1",
+            target_hypotheses=["H1"],
+            inquiry_goal="Test H1.",
+            method="model_reasoning",
+            expected_observation="   ",
+        )
 
 
 def test_exact_answer_frame_is_exclusive_open_with_unresolved_mass():

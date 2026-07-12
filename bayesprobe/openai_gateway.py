@@ -22,9 +22,11 @@ from bayesprobe.model_gateway import (
     StructuredModelRequest,
 )
 from bayesprobe.schemas import (
+    CapabilityKind,
     EvidenceType,
     FrameFit,
     LikelihoodBand,
+    ProbePurpose,
     validate_secret_free_provider_identity,
 )
 from bayesprobe.provider_telemetry import (
@@ -120,6 +122,70 @@ PROBE_SIGNAL_JSON_SCHEMA: dict[str, Any] = {
     "required": ["raw_content"],
     "properties": {
         "raw_content": {"type": "string"},
+    },
+}
+
+PROBE_DESIGN_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["proposals"],
+    "properties": {
+        "proposals": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "purpose",
+                    "target_hypotheses",
+                    "inquiry_goal",
+                    "expected_observation",
+                    "support_condition",
+                    "weaken_condition",
+                    "reframe_condition",
+                    "required_capability",
+                ],
+                "properties": {
+                    "purpose": {
+                        "type": "string",
+                        "enum": [item.value for item in ProbePurpose],
+                    },
+                    "target_hypotheses": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                    },
+                    "inquiry_goal": {"type": "string", "minLength": 1},
+                    "expected_observation": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "support_condition": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "weaken_condition": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "reframe_condition": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"},
+                            },
+                            {"type": "null"},
+                        ]
+                    },
+                    "required_capability": {
+                        "type": "string",
+                        "enum": [item.value for item in CapabilityKind],
+                    },
+                },
+            },
+        }
     },
 }
 
@@ -988,6 +1054,19 @@ def _instruction_for_task(task: str) -> str:
             "Repair the malformed BayesProbe open-question frame using the validation "
             "error. Return one complete frame without ids, priors, or posteriors."
         )
+    if task == "design_probes":
+        return (
+            "Design one to three BayesProbe probe proposals from the supplied task, "
+            "active hypotheses, and capability descriptors. Return only inquiry "
+            "semantics; do not assign ids, priorities, priors, posteriors, or claim "
+            "that an unavailable capability can be executed."
+        )
+    if task == "repair_probe_design":
+        return (
+            "Repair the malformed BayesProbe probe design using the validation error. "
+            "Return only semantic probe proposals without ids, priorities, priors, "
+            "or posteriors."
+        )
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -1020,6 +1099,8 @@ def _structured_output_for_task(
         return "PythonCodeRepair", PYTHON_CODE_REPAIR_JSON_SCHEMA
     if task in {"frame_open_question", "repair_task_frame"}:
         return "OpenQuestionTaskFrame", OPEN_QUESTION_TASK_FRAME_JSON_SCHEMA
+    if task in {"design_probes", "repair_probe_design"}:
+        return "ProbeDesign", PROBE_DESIGN_JSON_SCHEMA
     raise ValueError(f"unsupported openai model task: {task}")
 
 
@@ -1078,6 +1159,14 @@ def _chat_instruction_for_task(
             "top-level keys: task_kind, answer_relationship, answer_contract, "
             "competition, coverage, hypotheses, coverage_statement, "
             "coverage_limitation. Do not include markdown."
+        )
+    if task in {"design_probes", "repair_probe_design"}:
+        return (
+            f"{base_instruction} Return only one JSON object with exactly one "
+            "top-level key: proposals. Each proposal must contain exactly these "
+            "keys: purpose, target_hypotheses, inquiry_goal, expected_observation, "
+            "support_condition, weaken_condition, reframe_condition, "
+            "required_capability. Do not include markdown."
         )
     raise ValueError(f"unsupported openai model task: {task}")
 
@@ -1176,6 +1265,16 @@ def _required_output_for_task(
             "notes": [
                 "hypotheses are semantic candidates rather than answer labels",
                 "do not assign hypothesis ids, priors, or posteriors",
+            ],
+        }
+    if task in {"design_probes", "repair_probe_design"}:
+        return {
+            "type": "ProbeDesign",
+            "required_keys": ["proposals"],
+            "json_schema": PROBE_DESIGN_JSON_SCHEMA,
+            "notes": [
+                "proposals contain semantics only; the server assigns ids and priority",
+                "do not assign priors or posteriors",
             ],
         }
     raise ValueError(f"unsupported openai model task: {task}")
