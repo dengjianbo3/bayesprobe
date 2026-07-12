@@ -12,6 +12,11 @@ from bayesprobe.evidence import EvidenceIntegrationResult
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
+from bayesprobe.hypothesis_expansion import (
+    HypothesisExpansionError,
+    HypothesisExpansionProposal,
+    HypothesisExpansionService,
+)
 from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
@@ -43,6 +48,7 @@ from bayesprobe.schemas import (
     EpistemicOrigin,
     LikelihoodBand,
     ProbeDesign,
+    ProbePurpose,
     ProbeSet,
     SignalKind,
     SignalProvenance,
@@ -2098,9 +2104,10 @@ class StaticEventCore(BayesProbeCore):
         events: list[EvidenceEvent],
         *,
         ledger: JsonlLedgerStore | None = None,
+        hypothesis_expander: HypothesisExpansionService | None = None,
     ) -> None:
         self.static_gate = StaticEventGate(events)
-        super().__init__(ledger=ledger)
+        super().__init__(ledger=ledger, hypothesis_expander=hypothesis_expander)
 
     def _create_evidence_integration_gate(self):
         return self.static_gate
@@ -2128,6 +2135,174 @@ class StaticEventCore(BayesProbeCore):
             probe_set=probe_set,
             signals=owned_signals,
         )
+
+
+class RecordingExpansionAdapter:
+    def __init__(self, proposals: list[HypothesisExpansionProposal]) -> None:
+        self.proposals = proposals
+        self.requests = []
+
+    def propose(self, request):
+        self.requests.append(request)
+        return self.proposals
+
+
+def exact_open_state() -> BeliefState:
+    state = make_exact_belief_state()
+    hypotheses = [
+        hypothesis.model_copy(
+            update={
+                "statement": f"The requested integer is {answer_value}.",
+                "prior": 0.15,
+                "posterior": 0.15,
+                "rivals": [
+                    f"H{other_answer_value}"
+                    for other_answer_value in (1, 2, 3)
+                    if other_answer_value != answer_value
+                ],
+                "answer_value": answer_value,
+            }
+        )
+        for hypothesis, answer_value in zip(state.hypotheses, (1, 2), strict=True)
+    ]
+    hypotheses.append(
+        Hypothesis(
+            id="H3",
+            statement="The requested integer is 3.",
+            type="answer_candidate",
+            scope="The supplied integer constraints.",
+            prior=0.15,
+            posterior=0.15,
+            rivals=["H1", "H2"],
+            falsifiers=["A constraint excludes 3."],
+            predictions=["Substitution verifies every constraint."],
+            answer_value=3,
+        )
+    )
+    return state.model_copy(
+        update={
+            "hypotheses": hypotheses,
+            "frame_state": state.frame_state.model_copy(
+                update={
+                    "active_hypothesis_ids": ["H1", "H2", "H3"],
+                    "unresolved_alternative_mass": 0.55,
+                }
+            ),
+        }
+    )
+
+
+def unresolved_support_event(*, event_id: str, discard_reason: str | None = None) -> EvidenceEvent:
+    return EvidenceEvent(
+        id=event_id,
+        derived_from_signal=f"S_{event_id}",
+        target_hypotheses=["H1", "H2", "H3"],
+        evidence_type=EvidenceType.COUNTEREVIDENCE,
+        content="The observed constraint excludes every named integer.",
+        reliability=1.0,
+        independence=1.0,
+        relevance=1.0,
+        novelty=1.0,
+        verifiability=1.0,
+        likelihoods={
+            "H1": LikelihoodBand.STRONGLY_DISCONFIRMING,
+            "H2": LikelihoodBand.STRONGLY_DISCONFIRMING,
+            "H3": LikelihoodBand.STRONGLY_DISCONFIRMING,
+        },
+        unresolved_likelihood=LikelihoodBand.STRONGLY_CONFIRMING,
+        frame_fit=FrameFit.SUPPORTS_UNRESOLVED,
+        effective_update_weight=1.0,
+        epistemic_origin=EpistemicOrigin.TOOL_RESULT,
+        derivation_root_id=f"root_{event_id}",
+        discard_reason=discard_reason,
+    )
+
+
+def expansion_proposals_for_4_and_5() -> list[HypothesisExpansionProposal]:
+    return [
+        HypothesisExpansionProposal(
+            statement=f"The requested integer is {answer_value}.",
+            type="answer_candidate",
+            scope="The supplied integer constraints.",
+            falsifiers=[f"A constraint excludes {answer_value}."],
+            predictions=["Substitution verifies every constraint."],
+            answer_value=answer_value,
+            why_current_frame_missed="The named values omitted this alternative.",
+            required_next_probe="Check every supplied constraint.",
+        )
+        for answer_value in (4, 5)
+    ]
+
+
+def test_core_authorizes_and_commits_exact_answer_expansion_atomically(tmp_path: Path):
+    event = unresolved_support_event(event_id="E_expand")
+    discarded_event = unresolved_support_event(
+        event_id="E_discarded",
+        discard_reason="schema_violation: fixture",
+    )
+    adapter = RecordingExpansionAdapter(expansion_proposals_for_4_and_5())
+    ledger = JsonlLedgerStore(tmp_path / "expanded-cycle.jsonl")
+    core = StaticEventCore(
+        [event, discarded_event],
+        ledger=ledger,
+        hypothesis_expander=HypothesisExpansionService(adapter=adapter),
+    )
+
+    result = core.integrate_cycle(
+        cycle=make_cycle("cycle_expand"),
+        belief_state=exact_open_state(),
+        probe_set=make_empty_probe_set("cycle_expand"),
+        signals=[make_active_signal("pending")],
+    )
+
+    spawned_ids = {"H_exp_f2_1", "H_exp_f2_2"}
+    assert result.frame_adequacy_decision.should_expand is True
+    assert [event.id] == [item.id for item in adapter.requests[0].triggering_events]
+    assert {item.answer_value for item in result.belief_state.hypotheses} >= {4, 5}
+    assert result.belief_state.frame_state.frame_version == 2
+    assert event.id in result.belief_state.evidence_memory.discovery_evidence_ids
+    assert all(update.hypothesis_id not in spawned_ids for update in result.belief_updates)
+    assert result.probe_candidates[-1].candidate_probe.purpose == ProbePurpose.FRAME_COVERAGE
+    assert {item.to_hypothesis for item in result.hypothesis_evolutions} >= spawned_ids
+    assert "cycle_expand_frame_mass_expansion_f2" in {
+        update.update_id for update in result.frame_mass_updates
+    }
+    assert spawned_ids.issubset(result.belief_state.frame_state.active_hypothesis_ids)
+    assert {
+        evolution.evolution_id for evolution in result.hypothesis_evolutions
+    }.issubset(result.belief_state.ledger_refs["hypothesis_evolutions"])
+    assert {
+        record["record_type"] for record in ledger.read_all()
+    } >= {"cycle", "hypothesis_evolution", "probe_candidate", "belief_state"}
+
+
+def test_invalid_expansion_leaves_input_state_and_ledger_unchanged(tmp_path: Path):
+    state = exact_open_state()
+    prior_state = state.model_dump(mode="json")
+    event = unresolved_support_event(event_id="E_invalid_expand")
+    ledger_path = tmp_path / "invalid-expanded-cycle.jsonl"
+    ledger_path.touch()
+    core = StaticEventCore(
+        [event],
+        ledger=JsonlLedgerStore(ledger_path),
+        hypothesis_expander=HypothesisExpansionService(
+            adapter=RecordingExpansionAdapter([])
+        ),
+    )
+
+    with pytest.raises(
+        HypothesisExpansionError,
+        match="between one and three proposals",
+    ):
+        core.integrate_cycle(
+            cycle=make_cycle("cycle_invalid_expand"),
+            belief_state=state,
+            probe_set=make_empty_probe_set("cycle_invalid_expand"),
+            signals=[make_active_signal("pending")],
+        )
+
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
 
 
 class InvalidMemoryGate(EvidenceIntegrationGate):

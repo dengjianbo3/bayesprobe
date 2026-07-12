@@ -14,6 +14,10 @@ from bayesprobe.evidence_memory import (
 )
 from bayesprobe.frame_policy import FrameAdequacyDecision, FrameAdequacyPolicy
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
+from bayesprobe.hypothesis_expansion import (
+    HypothesisExpansionRequest,
+    HypothesisExpansionService,
+)
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.ledger import JsonlLedgerStore
@@ -63,6 +67,7 @@ class BayesProbeCore:
         model_gateway: ModelGateway | None = None,
         judgment_repair_policy: EvidenceJudgmentRepairPolicy | None = None,
         correlation_credit_policy: CorrelationCreditPolicy | None = None,
+        hypothesis_expander: HypothesisExpansionService | None = None,
     ) -> None:
         self._ledger = ledger
         self._model_gateway = model_gateway
@@ -81,6 +86,7 @@ class BayesProbeCore:
         self._belief_solver = self._create_belief_solver()
         self._frame_policy = self._create_frame_adequacy_policy()
         self._evolution_policy = self._create_hypothesis_evolution_policy()
+        self._hypothesis_expander = hypothesis_expander
 
     @property
     def ledger(self) -> JsonlLedgerStore | None:
@@ -230,6 +236,44 @@ class BayesProbeCore:
                 ]
             }
         )
+        if (
+            frame_adequacy_decision.should_expand
+            and self._hypothesis_expander is not None
+        ):
+            accepted_trigger_events = tuple(
+                event
+                for event in evidence_events
+                if event.discard_reason is None
+                and event.id in frame_adequacy_decision.trigger_event_ids
+            )
+            expansion = self._hypothesis_expander.expand(
+                request=HypothesisExpansionRequest(
+                    run_id=authoritative_cycle.run_id,
+                    cycle_id=authoritative_cycle.cycle_id,
+                    task_frame=authoritative_belief_state.task_frame,
+                    frame_state=frame_adequacy_decision.frame_state,
+                    hypotheses=tuple(evolved_hypotheses),
+                    triggering_events=accepted_trigger_events,
+                    expansion_reason=frame_adequacy_decision.reason,
+                ),
+                decision=frame_adequacy_decision,
+            )
+            evolved_hypotheses = expansion.hypotheses
+            next_frame_state = expansion.frame_state
+            next_evidence_memory = next_evidence_memory.model_copy(
+                update={
+                    "discovery_evidence_ids": _append_unique(
+                        next_evidence_memory.discovery_evidence_ids,
+                        expansion.discovery_evidence_ids,
+                    )
+                }
+            )
+            evolutions = [*evolutions, *expansion.evolutions]
+            probe_candidates = [*probe_candidates, *expansion.probe_candidates]
+            frame_mass_updates = [
+                *frame_mass_updates,
+                *expansion.frame_mass_updates,
+            ]
         existing_ledger_refs = dict(authoritative_belief_state.ledger_refs)
         merged_ledger_refs = dict(existing_ledger_refs)
         merged_ledger_refs["probe_sets"] = [
