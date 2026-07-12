@@ -4,12 +4,14 @@ import unicodedata
 
 import pytest
 
+import bayesprobe.core as core_module
 import bayesprobe.evidence_memory as evidence_memory
 from bayesprobe.core import BayesProbeCore, EvidenceIntegrationGate
 from bayesprobe.evidence import EvidenceIntegrationResult
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
+from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import (
     EvidenceJudgmentRepairPolicy,
@@ -1967,6 +1969,7 @@ class StaticEventGate(EvidenceIntegrationGate):
         normalized_by_id = {}
         processed_by_id = {}
         processed_events = []
+        seen_signatures: set[tuple[str, str]] = set()
         confirming = {
             LikelihoodBand.WEAKLY_CONFIRMING,
             LikelihoodBand.MODERATELY_CONFIRMING,
@@ -1980,6 +1983,7 @@ class StaticEventGate(EvidenceIntegrationGate):
                 signals[0].model_copy(
                     update={
                         "id": original.derived_from_signal,
+                        "raw_content": original.content,
                         "provenance": SignalProvenance(
                             epistemic_origin=(
                                 original.epistemic_origin
@@ -2014,9 +2018,24 @@ class StaticEventGate(EvidenceIntegrationGate):
             frame_fit = original.frame_fit
             if unresolved_likelihood in confirming:
                 frame_fit = FrameFit.SUPPORTS_UNRESOLVED
+            is_cycle_duplicate = (
+                evidence_memory.observe_cycle_signal_duplicate(
+                    signal,
+                    seen_signatures,
+                )
+            )
+            preliminary_decision = manager.classify(
+                working_memory,
+                signal,
+                frame_version=belief_state.frame_state.frame_version,
+            )
             quality_cap = evidence_memory.SignalQualityAssessor().assess(
                 signal=signal,
                 event_type=original.evidence_type,
+                is_duplicate=(
+                    is_cycle_duplicate
+                    or preliminary_decision.correlation_status == "duplicate_exact"
+                ),
             )
             quality = {
                 metric: min(
@@ -2115,9 +2134,14 @@ class SuppliedIntegrationCore(BayesProbeCore):
         *,
         ledger: JsonlLedgerStore,
         model_gateway=None,
+        correlation_credit_policy: CorrelationCreditPolicy | None = None,
     ) -> None:
         self.supplied_gate = SuppliedIntegrationGate(integration)
-        super().__init__(ledger=ledger, model_gateway=model_gateway)
+        super().__init__(
+            ledger=ledger,
+            model_gateway=model_gateway,
+            correlation_credit_policy=correlation_credit_policy,
+        )
 
     def _create_evidence_integration_gate(self):
         return self.supplied_gate
@@ -2195,13 +2219,26 @@ def _assert_supplied_transition_rejected_atomically(
     name: str,
     state: BeliefState,
     integration: EvidenceIntegrationResult,
+    correlation_credit_policy: CorrelationCreditPolicy | None = None,
 ) -> None:
     ledger_path = tmp_path / f"{name}.jsonl"
     ledger_path.touch()
     core = SuppliedIntegrationCore(
         integration,
         ledger=JsonlLedgerStore(ledger_path),
+        correlation_credit_policy=correlation_credit_policy,
     )
+    real_solver = core._belief_solver
+
+    class RecordingSolver:
+        calls = 0
+
+        def solve(self, *args, **kwargs):
+            self.calls += 1
+            return real_solver.solve(*args, **kwargs)
+
+    recording_solver = RecordingSolver()
+    core._belief_solver = recording_solver
     prior_state = state.model_dump(mode="json")
 
     with pytest.raises(ValueError, match="native evidence memory transition"):
@@ -2212,6 +2249,7 @@ def _assert_supplied_transition_rejected_atomically(
             signals=[make_active_signal()],
         )
 
+    assert recording_solver.calls == 0
     assert state.model_dump(mode="json") == prior_state
     assert ledger_path.read_bytes() == b""
 
@@ -2690,6 +2728,237 @@ def test_new_directional_event_cannot_skip_its_credit_commit(tmp_path: Path):
     assert len(gateway.requests) == prior_provider_calls
     assert state.model_dump(mode="json") == prior_state
     assert ledger_path.read_bytes() == b""
+
+
+def test_core_constructs_one_memory_manager_before_gate_factory(monkeypatch):
+    instances = []
+
+    class RecordingManager(evidence_memory.EvidenceMemoryManager):
+        def __init__(self, policy=None):
+            super().__init__(policy)
+            instances.append(self)
+
+    monkeypatch.setattr(core_module, "EvidenceMemoryManager", RecordingManager)
+
+    class ManagerFactoryCore(core_module.BayesProbeCore):
+        def _create_evidence_integration_gate(self):
+            self.factory_manager = self._evidence_memory_manager
+            return EvidenceIntegrationGate(
+                memory_manager=self.factory_manager,
+            )
+
+    core = ManagerFactoryCore()
+
+    assert instances == [core.factory_manager]
+
+
+def test_core_custom_credit_policy_is_shared_with_production_gate(tmp_path: Path):
+    policy = CorrelationCreditPolicy(
+        max_cumulative_effective_weight_per_direction=0.2
+    )
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    ledger = JsonlLedgerStore(tmp_path / "custom-credit-policy.jsonl")
+    core = BayesProbeCore(
+        ledger=ledger,
+        model_gateway=gateway,
+        correlation_credit_policy=policy,
+    )
+    state = make_exact_belief_state()
+    first_cycle = make_cycle("cycle_custom_credit_first")
+
+    first = core.integrate_cycle(
+        cycle=first_cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(first_cycle.cycle_id),
+        signals=[
+            make_active_signal().model_copy(
+                update={"id": "S_custom_credit_first"}
+            )
+        ],
+    )
+
+    first_event = first.evidence_events[0]
+    assert first_event.effective_update_weight == pytest.approx(0.2)
+    first_credit = first.belief_state.evidence_memory.correlation_credit
+    assert first_credit
+    assert all(value == pytest.approx(0.2) for value in first_credit.values())
+
+    second_cycle = make_cycle("cycle_custom_credit_second").model_copy(
+        update={"cycle_index": 2}
+    )
+    second = core.integrate_cycle(
+        cycle=second_cycle,
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(second_cycle.cycle_id),
+        signals=[
+            make_active_signal().model_copy(
+                update={
+                    "id": "S_custom_credit_second",
+                    "raw_content": "A second observation spends the same direction.",
+                }
+            )
+        ],
+    )
+
+    second_event = second.evidence_events[0]
+    assert second_event.correlation_status == "correlated_novel"
+    assert second_event.effective_update_weight == 0.0
+    assert second_event.discard_reason == "correlation_credit_saturated"
+    assert second.belief_state.evidence_memory.correlation_credit == (
+        first.belief_state.evidence_memory.correlation_credit
+    )
+    assert [
+        record["payload"]["id"] for record in ledger.read_all("evidence_event")
+    ] == [first_event.id, second_event.id]
+
+
+def test_core_default_credit_policy_behavior_is_unchanged():
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    cycle = make_cycle("cycle_default_credit_policy")
+
+    result = BayesProbeCore(model_gateway=gateway).integrate_cycle(
+        cycle=cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+
+    assert result.evidence_events[0].effective_update_weight == pytest.approx(
+        0.4608
+    )
+
+
+def test_core_rejects_transition_built_under_a_different_credit_policy(
+    tmp_path: Path,
+):
+    state = make_exact_belief_state()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    cycle = make_cycle("cycle_mismatched_credit_policy")
+    production = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+    prior_state = state.model_dump(mode="json")
+    prior_provider_calls = len(gateway.requests)
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name="mismatched_credit_policy",
+        state=state,
+        integration=production,
+        correlation_credit_policy=CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        ),
+    )
+
+    assert len(gateway.requests) == prior_provider_calls
+    assert state.model_dump(mode="json") == prior_state
+
+
+def test_uncapped_same_batch_duplicate_transition_fails_atomically(tmp_path: Path):
+    state = make_exact_belief_state()
+    first_raw = _memory_signal(
+        "S_uncapped_signature_first",
+        "The same source repeats this audited observation.",
+        root="root-uncapped-signature-first",
+    )
+    second_raw = first_raw.model_copy(
+        update={
+            "id": "S_uncapped_signature_second",
+            "provenance": first_raw.provenance.model_copy(
+                update={
+                    "derivation_root_id": "root-uncapped-signature-second",
+                    "correlation_group": "caller-supplied-uncapped-second",
+                }
+            ),
+        }
+    )
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    cycle = make_cycle("cycle_uncapped_signature")
+    production = EvidenceIntegrationGate(model_gateway=gateway).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[first_raw, second_raw],
+    )
+    first_signal, second_signal = production.normalized_signals
+    first_event, capped_second_event = production.evidence_events
+    assert capped_second_event.correlation_status == "correlated_novel"
+    assert capped_second_event.effective_update_weight == pytest.approx(0.045)
+
+    manager = evidence_memory.EvidenceMemoryManager()
+    first_decision = manager.classify(
+        state.evidence_memory,
+        first_signal,
+        likelihoods=first_event.likelihoods,
+        unresolved_likelihood=first_event.unresolved_likelihood,
+        frame_version=state.frame_state.frame_version,
+        base_effective_weight=(
+            first_event.reliability
+            * first_event.independence
+            * first_event.relevance
+            * first_event.novelty
+        ),
+    )
+    forged_memory = manager.commit(
+        state.evidence_memory,
+        signal=first_signal,
+        event=first_event,
+        decision=first_decision,
+    )
+    uncapped_quality = {
+        "reliability": 0.8,
+        "independence": 0.8,
+        "relevance": 0.9,
+        "novelty": 0.8,
+        "specificity": 0.7,
+        "verifiability": 0.7,
+    }
+    second_decision = manager.classify(
+        forged_memory,
+        second_signal,
+        likelihoods=capped_second_event.likelihoods,
+        unresolved_likelihood=capped_second_event.unresolved_likelihood,
+        frame_version=state.frame_state.frame_version,
+        base_effective_weight=0.8 * 0.8 * 0.9 * 0.8,
+    )
+    forged_second_event = EvidenceEvent.model_validate(
+        {
+            **capped_second_event.model_dump(mode="python"),
+            **uncapped_quality,
+            "correlation_status": second_decision.correlation_status,
+            "effective_update_weight": second_decision.effective_update_weight,
+        }
+    )
+    forged_memory = manager.commit(
+        forged_memory,
+        signal=second_signal,
+        event=forged_second_event,
+        decision=second_decision,
+    )
+    assert forged_second_event.effective_update_weight == pytest.approx(0.4608)
+
+    _assert_supplied_transition_rejected_atomically(
+        tmp_path,
+        name="uncapped_same_batch_duplicate",
+        state=state,
+        integration=EvidenceIntegrationResult(
+            evidence_events=[first_event, forged_second_event],
+            probe_candidates=[],
+            evidence_memory=forged_memory,
+            normalized_signals=[first_signal, second_signal],
+        ),
+    )
 
 
 @pytest.mark.parametrize(

@@ -94,3 +94,8 @@
 
 1. Native memory transition validation must independently enforce correlation classification, deterministic quality-derived base weight, remaining directional-credit limits, and the configured cumulative cap. An event and candidate memory that agree with each other cannot self-authorize an inflated weight, label an exact/same-root repeat as novel, or raise cumulative used credit above policy.
 2. Every existing/replayed event must compare its current normalized signal identity digest with the preserved historical event binding. A different signal identity or missing historical binding fails closed before remembering identity, solving, or ledger work; preserving the old binding map without comparing it is insufficient.
+
+## Thirteenth full-range re-review findings
+
+1. Transition reconstruction must use the same cycle-local source/content signature duplicate detection as production EvidenceGate. Two same-batch signals with the same source/content but different supplied roots/groups remain correlated-novel for memory classification yet must receive the duplicate quality cap in both construction and validation.
+2. Core and its production EvidenceGate must share one explicitly owned EvidenceMemoryManager and CorrelationCreditPolicy. Transition validation may not instantiate a default manager when the gate committed under a configured non-default cumulative credit cap; custom policy transitions must validate and default behavior must remain unchanged.

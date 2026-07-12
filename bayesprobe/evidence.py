@@ -13,6 +13,7 @@ from bayesprobe.evidence_memory import (
     SignalQualityAssessor,
     SignalProvenanceNormalizer,
     canonical_signal_identity_digest,
+    observe_cycle_signal_duplicate,
 )
 from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
@@ -174,6 +175,10 @@ class EvidenceIntegrationGate:
         for planned in planned_signals:
             signal = planned.signal
             self._memory_manager.validate_signal_lineage(working_memory, signal)
+            is_cycle_duplicate = observe_cycle_signal_duplicate(
+                signal,
+                seen_signatures,
+            )
             closed_signals.append(signal)
             event_id = planned.event_ids[0]
             if event_id in prior_evidence_ids:
@@ -212,17 +217,13 @@ class EvidenceIntegrationGate:
                     probe_candidates=[],
                 )
             else:
-                is_duplicate = _is_duplicate_signal(
-                    signal=signal,
-                    seen_signatures=seen_signatures,
-                )
                 event_result = self._build_signal_events(
                     event_ids=planned.event_ids,
                     signal=signal,
                     belief_state=belief_state,
                     probe_set=probe_set,
                     cycle=cycle,
-                    is_duplicate=is_duplicate,
+                    is_duplicate=is_cycle_duplicate,
                     prior_memory_decision=prior_decision,
                 )
             memory_events: list[EvidenceEvent] = []
@@ -1067,21 +1068,6 @@ def _apply_quality_overrides(
         if metric in values:
             values[metric] = value
     return SignalQuality(**values)
-
-
-def _is_duplicate_signal(
-    *,
-    signal: ExternalSignal,
-    seen_signatures: set[tuple[str, str]],
-) -> bool:
-    signature = (signal.source.strip().lower(), _content_signature(signal.raw_content))
-    is_duplicate = signature in seen_signatures
-    seen_signatures.add(signature)
-    return is_duplicate
-
-
-def _content_signature(content: str) -> str:
-    return " ".join(content.lower().split())
 
 
 def _endorsed_hypothesis(content: str, hypotheses: list[Hypothesis]) -> str | None:

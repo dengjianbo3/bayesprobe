@@ -44,6 +44,25 @@ SIGNAL_QUALITY_METRICS = (
 )
 
 
+def cycle_signal_source_content_signature(
+    signal: ExternalSignal,
+) -> tuple[str, str]:
+    return (
+        signal.source.strip().lower(),
+        " ".join(signal.raw_content.lower().split()),
+    )
+
+
+def observe_cycle_signal_duplicate(
+    signal: ExternalSignal,
+    seen_signatures: set[tuple[str, str]],
+) -> bool:
+    signature = cycle_signal_source_content_signature(signal)
+    is_duplicate = signature in seen_signatures
+    seen_signatures.add(signature)
+    return is_duplicate
+
+
 @dataclass(frozen=True)
 class SignalQuality:
     reliability: float
@@ -508,7 +527,12 @@ class EvidenceMemoryManager:
 
         expected = prior
         quality_assessor = SignalQualityAssessor()
+        seen_signatures: set[tuple[str, str]] = set()
         for signal, events in signal_event_groups:
+            is_cycle_duplicate = observe_cycle_signal_duplicate(
+                signal,
+                seen_signatures,
+            )
             classification_snapshot = expected
             for event in events:
                 if event.id in existing_ids:
@@ -536,7 +560,8 @@ class EvidenceMemoryManager:
                     signal=signal,
                     event_type=event.evidence_type,
                     is_duplicate=(
-                        decision.correlation_status == "duplicate_exact"
+                        is_cycle_duplicate
+                        or decision.correlation_status == "duplicate_exact"
                     ),
                 )
                 if any(
@@ -1040,5 +1065,7 @@ __all__ = [
     "SignalQuality",
     "SignalQualityAssessor",
     "SignalProvenanceNormalizer",
+    "cycle_signal_source_content_signature",
     "derive_deterministic_computation_root",
+    "observe_cycle_signal_duplicate",
 ]

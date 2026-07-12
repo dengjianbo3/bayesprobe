@@ -1008,3 +1008,80 @@ unauthorized for the v0.1 provider route because the receipt is runtime-only.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 18
+
+### Design Decision
+
+- Moved the cycle-local source/content signature and seen-set mutation into
+  `bayesprobe.evidence_memory`. The signature retains the existing semantics:
+  trim and lowercase `signal.source`, lowercase `raw_content`, and collapse its
+  whitespace. EvidenceGate and transition reconstruction now call the same
+  operation exactly once per normalized signal in order.
+- Kept cycle-local duplicate quality separate from memory correlation status.
+  A later matching signature can remain `correlated_novel` because its supplied
+  root/group differs, while still receiving the duplicate independence/novelty
+  cap. Exact memory duplicates are capped through the same quality path even
+  when they are the first cycle-local signature occurrence.
+- Added one optional `correlation_credit_policy` to `BayesProbeCore`. Core creates
+  one `EvidenceMemoryManager` before invoking the overridable gate factory,
+  passes that object to its production EvidenceGate, and reuses it for native
+  transition validation. Custom gates remain free to construct their result,
+  but a result built under an inconsistent policy fails Core validation.
+
+### Changes
+
+- Added and exported `cycle_signal_source_content_signature` and
+  `observe_cycle_signal_duplicate`; removed EvidenceGate's local signature and
+  duplicate helpers.
+- Recorded every production signal signature before replay/classification early
+  returns. Transition replay maintains an equivalent cycle-local seen set and
+  combines that duplicate flag with independently reconstructed exact-duplicate
+  status when selecting deterministic quality ceilings.
+- Threaded Core's owned manager through `_create_evidence_integration_gate` and
+  `_resolve_next_evidence_memory`; removed the per-cycle default manager from
+  transition validation. Initialization order now lets subclass factories use
+  `self._evidence_memory_manager` directly without gate-private inspection.
+- Added regressions for normalized same-signature/different-lineage batches,
+  uncapped self-consistent candidate memory, distinct and first occurrences,
+  exact/projection/low-reliability controls, manager construction order, custom
+  cap acceptance/saturation, default behavior, and mismatched custom policy
+  rejection before solver or ledger work. Updated `StaticEventGate` to represent
+  each fixture event's actual content and use the shared duplicate policy.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_same_batch_source_content_duplicate_uses_shared_quality_cap tests/test_evidence_memory.py::test_distinct_cycle_signatures_keep_standard_quality tests/test_evidence_memory.py::test_exact_cross_cycle_repeat_produces_no_update_or_provider_call tests/test_evidence_memory.py::test_memory_transition_validator_accepts_projection_two_event_reconstruction tests/test_core_cycles.py::test_core_constructs_one_memory_manager_before_gate_factory tests/test_core_cycles.py::test_core_custom_credit_policy_is_shared_with_production_gate tests/test_core_cycles.py::test_core_default_credit_policy_behavior_is_unchanged tests/test_core_cycles.py::test_core_rejects_transition_built_under_a_different_credit_policy tests/test_core_cycles.py::test_uncapped_same_batch_duplicate_transition_fails_atomically tests/test_core_cycles.py::test_low_reliability_signal_caps_quality_scores -q -p no:cacheprovider` -> `4 failed, 6 passed in 0.45s`.
+- GREEN: the same focused command -> `10 passed in 0.31s`.
+- Directly affected files: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_core_cycles.py -q -p no:cacheprovider` -> `281 passed in 1.29s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py tests/evaluation/test_python_probe.py -q -p no:cacheprovider` -> `520 passed in 1.72s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `331 passed in 0.36s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1332 passed, 10 skipped in 10.64s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check`, `git diff --check 67abac9..HEAD` -> clean before commit; the exact range check is repeated after commit.
+
+### Self-Review
+
+- The normalized duplicate regression uses case/outer-whitespace differences in
+  source plus case/line/whitespace differences in content, and different
+  supplied roots/groups. Production classifies the second signal
+  `correlated_novel` but caps it to independence/novelty `0.25` and weight
+  `0.045`; transition reconstruction accepts that exact result and rejects the
+  internally matching uncapped `0.4608` event/memory pair before the solver.
+- Signature observation occurs once per signal rather than once per event, so a
+  projection primary/secondary pair shares one flag. Existing event replays also
+  contribute to the cycle-local set before a later signal. Exact duplicates use
+  the duplicate quality cap regardless of their cycle-local position, while
+  first and distinct signatures keep the original quality.
+- Core's custom `0.2` policy limits the first production event and its persisted
+  directional credit to `0.2`; the next same-direction event is ledger-visible
+  with zero weight and `correlation_credit_saturated`. A default Core remains at
+  `0.4608`. A default-policy custom result supplied to a `0.2` Core is rejected
+  with zero solver calls, unchanged state, and empty ledger bytes.
+- Production Core constructs one manager before its overridable gate factory,
+  passes that same object explicitly, and performs no manager construction in
+  `_resolve_next_evidence_memory`. No gate private state is inspected.
+
+### Concerns
+
+No blocking concerns.

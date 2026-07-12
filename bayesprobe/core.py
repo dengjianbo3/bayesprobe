@@ -12,6 +12,7 @@ from bayesprobe.evidence_memory import EvidenceMemoryManager
 from bayesprobe.frame_policy import FrameAdequacyDecision, FrameAdequacyPolicy
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
 from bayesprobe.inbox import SignalInbox
+from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
 from bayesprobe.migrations import _carry_v01_migration_receipt
@@ -57,11 +58,15 @@ class BayesProbeCore:
         ledger: JsonlLedgerStore | None = None,
         model_gateway: ModelGateway | None = None,
         judgment_repair_policy: EvidenceJudgmentRepairPolicy | None = None,
+        correlation_credit_policy: CorrelationCreditPolicy | None = None,
     ) -> None:
         self._ledger = ledger
         self._model_gateway = model_gateway
         self._judgment_repair_policy = judgment_repair_policy
         self._cycle_allocations: dict[str, int] = {}
+        self._evidence_memory_manager = EvidenceMemoryManager(
+            correlation_credit_policy
+        )
         self._evidence_gate = self._create_evidence_integration_gate()
         self._belief_solver = self._create_belief_solver()
         self._frame_policy = self._create_frame_adequacy_policy()
@@ -112,6 +117,7 @@ class BayesProbeCore:
             lifecycle=lifecycle,
             belief_state=belief_state,
             integration=integration,
+            memory_manager=self._evidence_memory_manager,
         )
         evidence_events = mark_replayed_evidence_events(
             belief_state,
@@ -281,6 +287,7 @@ class BayesProbeCore:
         return EvidenceIntegrationGate(
             model_gateway=self._model_gateway,
             judgment_repair_policy=self._judgment_repair_policy,
+            memory_manager=self._evidence_memory_manager,
         )
 
     def _create_belief_solver(self) -> CoverageAwareBeliefSolver:
@@ -424,6 +431,7 @@ def _resolve_next_evidence_memory(
     lifecycle: BeliefLifecycle,
     belief_state: BeliefState,
     integration: EvidenceIntegrationResult,
+    memory_manager: EvidenceMemoryManager,
 ) -> EvidenceMemorySnapshot:
     memory = integration.evidence_memory
     if lifecycle == BeliefLifecycle.NATIVE_V02:
@@ -437,7 +445,7 @@ def _resolve_next_evidence_memory(
                 "native evidence integration requires coherent evidence memory"
             )
         try:
-            return EvidenceMemoryManager().validate_transition(
+            return memory_manager.validate_transition(
                 prior_memory,
                 memory,
                 evidence_events=integration.evidence_events,

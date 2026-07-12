@@ -867,6 +867,86 @@ def test_memory_transition_validator_accepts_projection_two_event_reconstruction
     assert validated == result.evidence_memory
 
 
+def _same_signature_different_lineage_signals():
+    first = _signal(
+        "S_signature_first",
+        "The same source repeats this audited observation.",
+        root="root-signature-first",
+    )
+    second = first.model_copy(
+        update={
+            "id": "S_signature_second",
+            "source": "  SOURCE.EXAMPLE/REPORT  ",
+            "raw_content": (
+                "  THE SAME SOURCE\nREPEATS THIS AUDITED OBSERVATION.  "
+            ),
+            "provenance": first.provenance.model_copy(
+                update={
+                    "derivation_root_id": "root-signature-second",
+                    "correlation_group": "caller-supplied-second-group",
+                }
+            ),
+        }
+    )
+    return first, second
+
+
+def test_same_batch_source_content_duplicate_uses_shared_quality_cap():
+    state = _state()
+    first, second = _same_signature_different_lineage_signals()
+    result = EvidenceIntegrationGate(model_gateway=CountingGateway()).integrate(
+        cycle=_cycle(1),
+        belief_state=state,
+        probe_set=_probe_set(1),
+        signals=[first, second],
+    )
+
+    first_event, second_event = result.evidence_events
+    assert first_event.correlation_status == "novel"
+    assert first_event.independence == 0.8
+    assert first_event.novelty == 0.8
+    assert first_event.effective_update_weight == pytest.approx(0.4608)
+    assert second_event.correlation_status == "correlated_novel"
+    assert second_event.independence == 0.25
+    assert second_event.novelty == 0.25
+    assert second_event.effective_update_weight == pytest.approx(0.045)
+    assert EvidenceMemoryManager().validate_transition(
+        state.evidence_memory,
+        result.evidence_memory,
+        evidence_events=result.evidence_events,
+        normalized_signals=result.normalized_signals,
+        existing_evidence_ids=[],
+        frame_version=state.frame_state.frame_version,
+    ) == result.evidence_memory
+
+
+def test_distinct_cycle_signatures_keep_standard_quality():
+    first = _signal(
+        "S_signature_distinct_first",
+        "The first audited observation.",
+        root="root-signature-distinct-first",
+    )
+    second = _signal(
+        "S_signature_distinct_second",
+        "A materially distinct audited observation.",
+        root="root-signature-distinct-second",
+    )
+
+    result = EvidenceIntegrationGate(model_gateway=CountingGateway()).integrate(
+        cycle=_cycle(1),
+        belief_state=_state(),
+        probe_set=_probe_set(1),
+        signals=[first, second],
+    )
+
+    assert [event.independence for event in result.evidence_events] == [0.8, 0.8]
+    assert [event.novelty for event in result.evidence_events] == [0.8, 0.8]
+    assert [event.effective_update_weight for event in result.evidence_events] == [
+        pytest.approx(0.4608),
+        pytest.approx(0.4608),
+    ]
+
+
 def test_native_event_identity_is_unique_for_duplicate_signals_in_one_batch():
     gateway = CountingGateway()
     duplicate = _signal("S_duplicate_1", "The same audited observation.")
