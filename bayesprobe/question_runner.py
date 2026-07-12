@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Literal
 
 from bayesprobe.core import BayesProbeCore
+from bayesprobe.frame_policy import FrameAdequacyDecision
 from bayesprobe.initialization import (
     BayesProbeInitializer,
     InitializeRunInput,
@@ -32,7 +33,11 @@ from bayesprobe.probe_executor import (
     ProbeExecutor,
 )
 from bayesprobe.probe_planner import ProbePlanner, ProbePlanningConfig, ProbePlanningResult
-from bayesprobe.projections import build_answer_projection
+from bayesprobe.projections import (
+    AnswerProjectionInput,
+    AnswerProjector,
+    build_answer_projection,
+)
 from bayesprobe.schemas import (
     AnswerProjection,
     BeliefState,
@@ -91,6 +96,10 @@ class AutonomousQuestionProgressKind(StrEnum):
     INITIALIZATION_COMPLETED = "initialization_completed"
     PROBE_DESIGN_STARTED = "probe_design_started"
     PROBE_DESIGN_COMPLETED = "probe_design_completed"
+    FRAME_ADEQUACY_ASSESSED = "frame_adequacy_assessed"
+    HYPOTHESIS_EXPANSION_COMPLETED = "hypothesis_expansion_completed"
+    ANSWER_PROJECTION_STARTED = "answer_projection_started"
+    ANSWER_PROJECTION_COMPLETED = "answer_projection_completed"
     CYCLE_STARTED = "cycle_started"
     PROBE_SET_PLANNED = "probe_set_planned"
     PROBE_EXECUTION_STARTED = "probe_execution_started"
@@ -150,6 +159,9 @@ class AutonomousQuestionProgress:
     probe_candidates: tuple[ProbeCandidate, ...] = ()
     capability_decisions: tuple[CapabilityDecision, ...] = ()
     signals: tuple[ExternalSignal, ...] = ()
+    frame_adequacy_decision: FrameAdequacyDecision | None = None
+    hypothesis_evolutions: tuple[HypothesisEvolution, ...] = ()
+    answer_projection: AnswerProjection | None = None
     cycle_result: AutonomousQuestionCycleResult | None = None
     result: AutonomousQuestionRunResult | None = None
 
@@ -161,6 +173,15 @@ class _AdmissionCapabilityDescriptor(CapabilityDescriptor):
     def model_dump(self, *args, **kwargs):
         kwargs["mode"] = "json"
         return super().model_dump(*args, **kwargs)
+
+
+class _LegacyAnswerProjector:
+    def project(self, input: AnswerProjectionInput) -> AnswerProjection:
+        return build_answer_projection(
+            input.cycle_id,
+            input.previous_belief_state,
+            input.cycle_result,
+        )
 
 
 class AutonomousQuestionRunner:
@@ -176,6 +197,7 @@ class AutonomousQuestionRunner:
         task_admitter: TaskAdmitter | None = None,
         probe_designer: ProbeDesigner | None = None,
         available_capabilities: tuple[CapabilityDescriptor, ...] = (),
+        answer_projector: AnswerProjector | None = None,
     ) -> None:
         self.core = core
         self.initializer = initializer or BayesProbeInitializer(ledger=core.ledger)
@@ -189,6 +211,7 @@ class AutonomousQuestionRunner:
         self.task_admitter = task_admitter or ExplicitTaskAdmitter()
         self.probe_designer = probe_designer or FrameProbeDesigner()
         self.available_capabilities = tuple(available_capabilities)
+        self.answer_projector = answer_projector or _LegacyAnswerProjector()
 
     def run_question(
         self,
@@ -347,10 +370,46 @@ class AutonomousQuestionRunner:
                 probe_set=planning.probe_set,
                 signals=signals,
             )
-            answer_projection = build_answer_projection(
-                cycle_id,
-                previous_belief_state,
-                core_result,
+            self._emit_progress(
+                AutonomousQuestionProgressKind.FRAME_ADEQUACY_ASSESSED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=core_result.cycle.cycle_index,
+                belief_state=core_result.belief_state,
+                frame_adequacy_decision=core_result.frame_adequacy_decision,
+            )
+            if any(
+                evolution.operation.value == "spawn"
+                for evolution in core_result.hypothesis_evolutions
+            ):
+                self._emit_progress(
+                    AutonomousQuestionProgressKind.HYPOTHESIS_EXPANSION_COMPLETED,
+                    run_id=run.run_id,
+                    cycle_id=cycle_id,
+                    cycle_index=core_result.cycle.cycle_index,
+                    belief_state=core_result.belief_state,
+                    probe_candidates=tuple(core_result.probe_candidates),
+                    hypothesis_evolutions=tuple(core_result.hypothesis_evolutions),
+                )
+            prospective_stop_reason = self._prospective_stop_reason(
+                previous=previous_belief_state,
+                current=core_result.belief_state,
+                completed_cycle_count=len(cycle_results) + 1,
+            )
+            self._emit_progress(
+                AutonomousQuestionProgressKind.ANSWER_PROJECTION_STARTED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=core_result.cycle.cycle_index,
+                belief_state=core_result.belief_state,
+            )
+            answer_projection = self.answer_projector.project(
+                AnswerProjectionInput(
+                    cycle_id=cycle_id,
+                    previous_belief_state=previous_belief_state,
+                    cycle_result=core_result,
+                    stop_reason=prospective_stop_reason,
+                )
             )
             if self.core.ledger is not None:
                 self.core.ledger.append("answer_projection", answer_projection)
@@ -369,6 +428,14 @@ class AutonomousQuestionRunner:
             )
             cycle_results.append(cycle_result)
             self._emit_progress(
+                AutonomousQuestionProgressKind.ANSWER_PROJECTION_COMPLETED,
+                run_id=run.run_id,
+                cycle_id=cycle_id,
+                cycle_index=cycle_result.cycle.cycle_index,
+                belief_state=cycle_result.belief_state,
+                answer_projection=answer_projection,
+            )
+            self._emit_progress(
                 AutonomousQuestionProgressKind.CYCLE_INTEGRATED,
                 run_id=run.run_id,
                 cycle_id=cycle_id,
@@ -380,6 +447,16 @@ class AutonomousQuestionRunner:
             )
             current_belief_state = core_result.belief_state
             previous_answer = answer_projection
+            if prospective_stop_reason is not None:
+                return self._result(
+                    run=run,
+                    task_frame=task_frame,
+                    initial_belief_state=initial_belief_state,
+                    final_belief_state=current_belief_state,
+                    cycle_results=cycle_results,
+                    final_answer_projection=previous_answer,
+                    stop_reason=AutonomousQuestionStopReason(prospective_stop_reason),
+                )
             design_result = self._design_probes(
                 run=run,
                 cycle_id=cycle_id,
@@ -402,28 +479,6 @@ class AutonomousQuestionRunner:
                     cycle_results=cycle_results,
                     final_answer_projection=previous_answer,
                     stop_reason=AutonomousQuestionStopReason.NO_PROBES,
-                )
-
-            if self._confidence_reached(current_belief_state):
-                return self._result(
-                    run=run,
-                    task_frame=task_frame,
-                    initial_belief_state=initial_belief_state,
-                    final_belief_state=current_belief_state,
-                    cycle_results=cycle_results,
-                    final_answer_projection=previous_answer,
-                    stop_reason=AutonomousQuestionStopReason.CONFIDENCE_REACHED,
-                )
-
-            if self._posterior_stable(previous=previous_belief_state, current=current_belief_state):
-                return self._result(
-                    run=run,
-                    task_frame=task_frame,
-                    initial_belief_state=initial_belief_state,
-                    final_belief_state=current_belief_state,
-                    cycle_results=cycle_results,
-                    final_answer_projection=previous_answer,
-                    stop_reason=AutonomousQuestionStopReason.POSTERIOR_STABLE,
                 )
 
         return self._result(
@@ -530,6 +585,21 @@ class AutonomousQuestionRunner:
             return False
         return _posterior_delta_is_stable(previous=previous, current=current, threshold=threshold)
 
+    def _prospective_stop_reason(
+        self,
+        *,
+        previous: BeliefState,
+        current: BeliefState,
+        completed_cycle_count: int,
+    ) -> str | None:
+        if completed_cycle_count >= self.config.max_cycles:
+            return AutonomousQuestionStopReason.MAX_CYCLES.value
+        if self._confidence_reached(current):
+            return AutonomousQuestionStopReason.CONFIDENCE_REACHED.value
+        if self._posterior_stable(previous=previous, current=current):
+            return AutonomousQuestionStopReason.POSTERIOR_STABLE.value
+        return None
+
     def _result(
         self,
         *,
@@ -588,6 +658,9 @@ class AutonomousQuestionRunner:
         probe_candidates: tuple[ProbeCandidate, ...] = (),
         capability_decisions: tuple[CapabilityDecision, ...] = (),
         signals: tuple[ExternalSignal, ...] = (),
+        frame_adequacy_decision: FrameAdequacyDecision | None = None,
+        hypothesis_evolutions: tuple[HypothesisEvolution, ...] = (),
+        answer_projection: AnswerProjection | None = None,
         cycle_result: AutonomousQuestionCycleResult | None = None,
         result: AutonomousQuestionRunResult | None = None,
     ) -> None:
@@ -608,6 +681,9 @@ class AutonomousQuestionRunner:
                         probe_candidates=probe_candidates,
                         capability_decisions=capability_decisions,
                         signals=signals,
+                        frame_adequacy_decision=frame_adequacy_decision,
+                        hypothesis_evolutions=hypothesis_evolutions,
+                        answer_projection=answer_projection,
                         cycle_result=cycle_result,
                         result=result,
                     )

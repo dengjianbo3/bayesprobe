@@ -12,7 +12,11 @@ from types import SimpleNamespace
 import pytest
 
 import bayesprobe.webui as webui
-from bayesprobe.question_runner import NeedsReframingResult, OutOfScopeResult
+from bayesprobe.question_runner import (
+    AutonomousQuestionProgressKind,
+    NeedsReframingResult,
+    OutOfScopeResult,
+)
 from bayesprobe.schemas import TaskAdmissionDecision, TaskAdmissionStatus
 from bayesprobe.webui import (
     create_handler_class,
@@ -264,14 +268,15 @@ def test_webui_stream_emits_ordered_cycle_and_terminal_events():
     assert error is None
     assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
     assert events[0]["event"] == "run_started"
-    assert [event["event"] for event in events[-4:]] == [
+    assert [event["event"] for event in events[-5:]] == [
+        "frame_adequacy_assessed",
+        "answer_projection_started",
+        "answer_projection_completed",
         "cycle_integrated",
-        "probe_design_started",
-        "probe_design_completed",
         "run_completed",
     ]
     assert events[-1]["event"] == "run_completed"
-    cycle = events[-4]["data"]
+    cycle = events[-2]["data"]
     assert cycle["cycle"]["boundary_status"] == "integrated"
     assert cycle["belief_state"]["posterior_summary"][
         "total_active_posterior"
@@ -314,11 +319,6 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
         "run",
         "belief_state",
     }
-    assert event_by_name["probe_design_started"]["data"] == {}
-    assert set(event_by_name["probe_design_completed"]["data"]) == {
-        "probe_candidates",
-        "capability_decisions",
-    }
     assert set(event_by_name["cycle_started"]["data"]) == {"belief_summary"}
     assert set(event_by_name["cycle_started"]["data"]["belief_summary"]) == {
         "posterior_summary",
@@ -337,6 +337,13 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
     assert event_by_name["evidence_integration_started"]["data"][
         "signal_count"
     ] == 2
+    assert set(event_by_name["frame_adequacy_assessed"]["data"]) == {
+        "frame_adequacy_decision"
+    }
+    assert event_by_name["answer_projection_started"]["data"] == {}
+    assert set(event_by_name["answer_projection_completed"]["data"]) == {
+        "answer_projection"
+    }
     assert set(event_by_name["cycle_integrated"]["data"]) == {
         "cycle_id",
         "signal_shape",
@@ -415,6 +422,38 @@ def valid_open_frame_payload():
     }
 
 
+def valid_probe_design_payload():
+    return {
+        "proposals": [
+            {
+                "purpose": "hypothesis_discrimination",
+                "target_hypotheses": ["H1", "H2"],
+                "inquiry_goal": "Compare the active explanations under matched conditions.",
+                "expected_observation": "The result favors one explanation over the other.",
+                "support_condition": {"H1": "The matched effect remains."},
+                "weaken_condition": {"H2": "The effect disappears after matching."},
+                "reframe_condition": None,
+                "required_capability": "model_reasoning",
+            }
+        ]
+    }
+
+
+def valid_synthesis_projection_payload(request):
+    del request
+    return {
+        "answer": "Use a preregistered matched-budget factorial evaluation.",
+        "contract_sections": {
+            "hypotheses": "Test scale and confounding claims.",
+            "controls": "Hold task set and inference budget fixed.",
+            "decision_rule": "Accept only a preregistered practical effect.",
+        },
+        "main_uncertainty": "Deployment distributions may differ.",
+        "weakest_assumption": "The frozen task set represents deployment.",
+        "cited_evidence_ids": [],
+    }
+
+
 class FramingWebUIChatCompletions:
     def __init__(self):
         self.tasks = []
@@ -428,8 +467,12 @@ class FramingWebUIChatCompletions:
             content = valid_admission_payload()
         elif request["task"] == "frame_open_question":
             content = valid_open_frame_payload()
+        elif request["task"] == "design_probes":
+            content = valid_probe_design_payload()
         elif request["task"] == "execute_probe":
             content = {"raw_content": "A matched controlled test is required."}
+        elif request["task"] == "project_answer":
+            content = valid_synthesis_projection_payload(request)
         else:
             content = {
                 "evidence_type": "supporting",
@@ -453,6 +496,67 @@ class FramingWebUIChatOpenAI:
         self.chat = type("FakeChat", (), {"completions": completions})()
 
 
+class OpenQuestionMVPClient:
+    gateway_count = 0
+    tasks: list[str] = []
+
+    def __init__(self, **kwargs):
+        del kwargs
+        self.__class__.gateway_count += 1
+        self.chat = type("FakeChat", (), {"completions": self})()
+
+    def create(self, **payload):
+        request = json.loads(payload["messages"][1]["content"])
+        self.__class__.tasks.append(request["task"])
+        task = request["task"]
+        if task == "assess_task_admission":
+            content = valid_admission_payload()
+        elif task == "frame_open_question":
+            content = valid_open_frame_payload()
+        elif task == "design_probes":
+            content = {
+                "proposals": [
+                    {
+                        "purpose": "hypothesis_discrimination",
+                        "target_hypotheses": ["H1", "H2"],
+                        "inquiry_goal": "Compare the active explanations under matched conditions.",
+                        "expected_observation": "The result favors one explanation over the other.",
+                        "support_condition": {"H1": "The matched effect remains."},
+                        "weaken_condition": {"H2": "The effect disappears after matching."},
+                        "reframe_condition": None,
+                        "required_capability": "model_reasoning",
+                    }
+                ]
+            }
+        elif task == "execute_probe":
+            content = {"raw_content": "MODEL REASONING: A matched controlled test is required."}
+        elif task == "judge_evidence":
+            content = {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    hypothesis_id: "weakly_confirming"
+                    for hypothesis_id in request["input"]["target_hypotheses"]
+                },
+                "interpretation": "A design suggestion, not an external result.",
+                "quality_overrides": {"independence": 0.2, "verifiability": 0.2},
+            }
+        elif task == "project_answer":
+            content = {
+                "answer": "Use a preregistered matched-budget factorial evaluation.",
+                "contract_sections": {
+                    "hypotheses": "Test scale and confounding claims.",
+                    "controls": "Hold task set and inference budget fixed.",
+                    "decision_rule": "Accept only a preregistered practical effect.",
+                },
+                "main_uncertainty": "Deployment distributions may differ.",
+                "weakest_assumption": "The frozen task set represents deployment.",
+                "cited_evidence_ids": [],
+            }
+        else:
+            raise AssertionError(f"unexpected task: {task}")
+        return {"choices": [{"message": {"content": json.dumps(content)}}]}
+
+
 class SecretRepairWebUIChatCompletions:
     secret = "sk-abcdefghijklmnop"
 
@@ -473,8 +577,12 @@ class SecretRepairWebUIChatCompletions:
                 content["hypotheses"][0]["statement"] = (
                     f"The provider leaked {self.secret}."
                 )
+        elif request["task"] == "design_probes":
+            content = valid_probe_design_payload()
         elif request["task"] == "execute_probe":
             content = {"raw_content": "A matched controlled test is required."}
+        elif request["task"] == "project_answer":
+            content = valid_synthesis_projection_payload(request)
         else:
             content = {
                 "evidence_type": "supporting",
@@ -532,11 +640,14 @@ def test_webui_provider_frames_open_question_before_exposing_belief():
     assert events[3]["data"]["belief_state"]["task_frame"] is not None
     assert FramingWebUIChatOpenAI.completions.tasks[0] == "assess_task_admission"
     frame_request = FramingWebUIChatOpenAI.completions.tasks
-    assert frame_request[:4] == [
+    assert frame_request == [
         "assess_task_admission",
         "frame_open_question",
+        "design_probes",
         "execute_probe",
         "judge_evidence",
+        "judge_evidence",
+        "project_answer",
     ]
     assert FramingWebUIChatOpenAI.completions.requests[1]["input"]["task_context"] == (
         "Design an experimental protocol for a research audience."
@@ -572,12 +683,14 @@ def test_webui_secret_bearing_frame_is_repaired_without_reaching_stream_or_resul
     assert status == 200
     assert stream_status == 200
     assert stream_result is None
-    assert SecretRepairWebUIChatOpenAI.completions.tasks[:5] == [
+    assert SecretRepairWebUIChatOpenAI.completions.tasks == [
         "assess_task_admission",
         "frame_open_question",
         "repair_task_frame",
+        "design_probes",
         "execute_probe",
         "judge_evidence",
+        "project_answer",
     ]
     assert SecretRepairWebUIChatCompletions.secret not in json.dumps(
         SecretRepairWebUIChatOpenAI.completions.requests[2]
@@ -668,13 +781,100 @@ def test_webui_open_question_framing_uses_one_request_scoped_gateway():
     )
 
     assert status == 200
-    assert FramingWebUIChatOpenAI.completions.tasks[:4] == [
+    assert FramingWebUIChatOpenAI.completions.tasks == [
         "assess_task_admission",
         "frame_open_question",
+        "design_probes",
         "execute_probe",
         "judge_evidence",
+        "project_answer",
     ]
     assert "provider-secret-123" not in json.dumps(payload)
+
+
+def test_webui_open_question_uses_one_gateway_for_every_semantic_stage():
+    OpenQuestionMVPClient.gateway_count = 0
+    OpenQuestionMVPClient.tasks = []
+    status, payload = handle_autonomous_run_request(
+        {
+            "question": "How should a model-scale claim be tested?",
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "model": "provider-model",
+            },
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        client_factory=OpenQuestionMVPClient,
+    )
+
+    assert status == 200
+    assert OpenQuestionMVPClient.gateway_count == 1
+    assert OpenQuestionMVPClient.tasks == [
+        "assess_task_admission",
+        "frame_open_question",
+        "design_probes",
+        "execute_probe",
+        "judge_evidence",
+        "project_answer",
+    ]
+    assert payload["final_answer"]["mode"] == "synthesis"
+
+
+def test_webui_stream_serializes_open_question_stage_data():
+    OpenQuestionMVPClient.gateway_count = 0
+    OpenQuestionMVPClient.tasks = []
+    events = []
+
+    status, body = handle_autonomous_stream_request(
+        {
+            "question": "How should a model-scale claim be tested?",
+            "provider": {
+                "kind": "openai_chat_completions",
+                "api_key": "provider-secret-123",
+                "model": "provider-model",
+            },
+            "runner": {"max_cycles": 1, "max_probes_per_cycle": 1},
+        },
+        event_sink=events.append,
+        client_factory=OpenQuestionMVPClient,
+    )
+
+    assert status == 200
+    assert body is None
+    names = [event["event"] for event in events]
+    assert names.index("probe_design_started") < names.index("probe_design_completed")
+    assert names.index("evidence_integration_started") < names.index("frame_adequacy_assessed")
+    assert names.index("frame_adequacy_assessed") < names.index("answer_projection_started")
+    assert names.index("answer_projection_started") < names.index("answer_projection_completed")
+    design = next(event for event in events if event["event"] == "probe_design_completed")
+    assert design["data"]["probe_candidates"]
+    assert design["data"]["capability_decisions"]
+    adequacy = next(event for event in events if event["event"] == "frame_adequacy_assessed")
+    assert adequacy["data"]["frame_adequacy_decision"]["should_expand"] is False
+    projection = next(event for event in events if event["event"] == "answer_projection_completed")
+    assert projection["data"]["answer_projection"]["mode"] == "synthesis"
+
+
+def test_webui_stream_serializes_expansion_hypotheses_and_follow_up_probe():
+    events = []
+    emitter = webui._AutonomousProgressEventEmitter(events.append)
+    emitter.emit(
+        SimpleNamespace(
+            kind=AutonomousQuestionProgressKind.HYPOTHESIS_EXPANSION_COMPLETED,
+            run_id="run-expansion",
+            cycle_id="cycle-1",
+            cycle_index=1,
+            belief_state={"hypotheses": [{"id": "H3", "statement": "New claim."}]},
+            hypothesis_evolutions=[{"operation": "spawn", "to_hypothesis": "H3"}],
+            probe_candidates=[{"candidate_id": "follow-up-H3"}],
+        )
+    )
+
+    assert events[0]["event"] == "hypothesis_expansion_completed"
+    assert events[0]["data"]["belief_state"]["hypotheses"][0]["id"] == "H3"
+    assert events[0]["data"]["hypothesis_evolutions"][0]["operation"] == "spawn"
+    assert events[0]["data"]["probe_candidates"][0]["candidate_id"] == "follow-up-H3"
 
 
 @pytest.mark.parametrize(
@@ -1146,7 +1346,7 @@ def test_webui_static_assets_define_operational_workbench():
     assert "run_failed" in script
     assert "Responses-compatible providers only." in script
     assert "Check base URL, model, API key, and max output tokens." in script
-    assert "Best answer / hypothesis" in script
+    assert "Projection" in script
     assert "Posterior mass" in script
     assert "Cycle lifecycle" in script
     assert "boundary_status" in script
@@ -1477,6 +1677,8 @@ class FakeWebUIChatCompletions:
             content = {
                 "raw_content": "The chat model executed the requested active probe."
             }
+        elif request["task"] == "design_probes":
+            content = valid_probe_design_payload()
         else:
             content = {
                 "evidence_type": "supporting",
@@ -1563,6 +1765,7 @@ def test_webui_stream_preserves_real_first_cycle_before_second_cycle_failure():
     assert FailDuringSecondCycleWebUIChatOpenAI.completions.tasks == [
         "execute_probe",
         "judge_evidence",
+        "design_probes",
         "execute_probe",
     ]
     assert len(integrated) == 1
@@ -1968,8 +2171,7 @@ E. The class of all connected bipartite graphs."""
 
     assert status == 200
     assert payload["final_answer"]["current_best_hypothesis"] == "D"
-    assert payload["final_answer"]["answer"].startswith("Current best answer is D:")
-    assert "connected non-bipartite graphs" in payload["final_answer"]["answer"]
+    assert payload["final_answer"]["answer"] == "D"
     assert payload["cycles"][0]["probes"][0]["target_hypotheses"] == [
         "A",
         "B",

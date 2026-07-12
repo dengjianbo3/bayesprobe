@@ -17,6 +17,11 @@ from urllib.parse import urlparse
 from pydantic import BaseModel
 
 from bayesprobe.core import BayesProbeCore
+from bayesprobe.hypothesis_expansion import (
+    HypothesisExpansionError,
+    HypothesisExpansionService,
+    ModelHypothesisExpansionAdapter,
+)
 from bayesprobe.initialization import (
     BayesProbeInitializer,
     InitializeRunInput,
@@ -26,13 +31,20 @@ from bayesprobe.model_gateway import (
     DeterministicModelGateway,
     ModelGateway,
     ModelGatewayValidationError,
+    model_gateway_adapter_kind,
 )
 from bayesprobe.openai_gateway import (
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
 )
+from bayesprobe.probe_design import (
+    MODEL_REASONING_CAPABILITY,
+    ModelProbeDesigner,
+    ProbeDesignError,
+)
 from bayesprobe.probe_executor import ModelBackedProbeToolGateway, ProbeExecutor
+from bayesprobe.projections import AnswerProjectionError, TaskAwareAnswerProjector
 from bayesprobe.question_runner import (
     AutonomousQuestionCycleResult,
     AutonomousQuestionProgress,
@@ -300,6 +312,22 @@ def _serialize_progress_data(progress: AutonomousQuestionProgress) -> dict[str, 
             "probe_candidates": _dump_domain(progress.probe_candidates),
             "capability_decisions": _dump_domain(progress.capability_decisions),
         }
+    if progress.kind == AutonomousQuestionProgressKind.FRAME_ADEQUACY_ASSESSED:
+        return {
+            "frame_adequacy_decision": _dump_domain(
+                progress.frame_adequacy_decision
+            )
+        }
+    if progress.kind == AutonomousQuestionProgressKind.HYPOTHESIS_EXPANSION_COMPLETED:
+        return {
+            "belief_state": _dump_domain(progress.belief_state),
+            "hypothesis_evolutions": _dump_domain(progress.hypothesis_evolutions),
+            "probe_candidates": _dump_domain(progress.probe_candidates),
+        }
+    if progress.kind == AutonomousQuestionProgressKind.ANSWER_PROJECTION_STARTED:
+        return {}
+    if progress.kind == AutonomousQuestionProgressKind.ANSWER_PROJECTION_COMPLETED:
+        return {"answer_projection": _dump_domain(progress.answer_projection)}
     if progress.kind == AutonomousQuestionProgressKind.CYCLE_STARTED:
         belief_state = progress.belief_state
         return {
@@ -535,9 +563,18 @@ def _prepare_autonomous_run(
     gateway = _build_webui_model_gateway(
         request["provider"], client_factory=client_factory
     )
-    core = BayesProbeCore(model_gateway=gateway)
+    provider_backed = provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS
+    capability = MODEL_REASONING_CAPABILITY.model_copy(
+        update={"executor_adapter_id": model_gateway_adapter_kind(gateway)}
+    )
+    expander = (
+        HypothesisExpansionService(adapter=ModelHypothesisExpansionAdapter(gateway))
+        if provider_backed
+        else None
+    )
+    core = BayesProbeCore(model_gateway=gateway, hypothesis_expander=expander)
     executor = None
-    if provider_kind in OPENAI_COMPATIBLE_PROVIDER_KINDS:
+    if provider_backed:
         executor = ProbeExecutor(
             gateway=ModelBackedProbeToolGateway(gateway),
             ledger=core.ledger,
@@ -565,6 +602,11 @@ def _prepare_autonomous_run(
             config=request["runner_config"],
             progress_observer=progress_observer,
             task_admitter=task_admitter,
+            probe_designer=ModelProbeDesigner(gateway) if provider_backed else None,
+            available_capabilities=(capability,) if provider_backed else (),
+            answer_projector=(
+                TaskAwareAnswerProjector(gateway) if provider_backed else None
+            ),
         ),
         input=input,
         provider_kind=provider_kind,
@@ -936,6 +978,16 @@ def _provider_runtime_error_message(
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        for error_type, stage in (
+            (ProbeDesignError, "probe design"),
+            (HypothesisExpansionError, "hypothesis expansion"),
+            (AnswerProjectionError, "answer projection"),
+        ):
+            if isinstance(current, error_type):
+                return (
+                    f"provider request failed during {stage} for {provider_kind}. "
+                    "Check the provider configuration and retry."
+                )
         if isinstance(current, ModelGatewayValidationError) and (
             "exhausted max_tokens before producing structured content" in str(current)
         ):

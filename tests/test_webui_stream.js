@@ -451,7 +451,7 @@ test("uses relation-neutral permanent belief terminology", () => {
   assert.match(index, /<span class="eyebrow">Belief measure<\/span>/);
   assert.doesNotMatch(index, /<span class="eyebrow">Posterior<\/span>/);
   assert.match(app, /cycle_integrated: "Belief updated"/);
-  assert.match(app, /relation === "independent" \? "credence" : "posterior"/);
+  assert.match(app, /competition === "independent"/);
 });
 
 test("renders independent beliefs as non-normalized credence", () => {
@@ -459,7 +459,7 @@ test("renders independent beliefs as non-normalized credence", () => {
   const event = integratedCycleEvent();
   event.data.belief_state = {
     task_frame: {
-      hypothesis_frame: { relation: "independent" },
+      hypothesis_frame: { competition: "independent", coverage: "open" },
     },
     hypotheses: [
       { id: "H1", prior: 0.5, posterior: 0.8, statement: "First claim." },
@@ -485,6 +485,50 @@ test("renders independent beliefs as non-normalized credence", () => {
     elements.get("answer-panel").children[2].children[0].textContent,
     "Belief summary"
   );
+});
+
+test("renders projection contract sections before belief metadata", () => {
+  const { api, elements } = loadApp();
+  const event = integratedCycleEvent();
+  event.data.answer_projection = {
+    mode: "synthesis",
+    answer: "Use a matched-budget evaluation.",
+    contract_sections: {
+      hypotheses: "Test the competing explanations.",
+      controls: "Hold the task and budget fixed.",
+    },
+    posterior_summary: "H1=0.750",
+    main_uncertainty: "Deployment conditions may differ.",
+    weakest_assumption: "The fixture represents deployment.",
+  };
+
+  api.handleProgressEvent(event);
+
+  const labels = elements.get("answer-panel").children.map(
+    (row) => row.children[0].textContent
+  );
+  assert.deepEqual(labels.slice(0, 4), ["Projection", "Answer", "hypotheses", "controls"]);
+  assert.ok(labels.indexOf("Belief summary") > labels.indexOf("controls"));
+});
+
+test("renders unresolved mass for exclusive open frames without reading legacy relation", () => {
+  const { api, elements } = loadApp();
+  const event = integratedCycleEvent();
+  event.data.belief_state = {
+    task_frame: {
+      hypothesis_frame: { competition: "exclusive", coverage: "open" },
+    },
+    frame_state: { unresolved_alternative_mass: 0.25 },
+    hypotheses: [{ id: "H1", prior: 0.5, posterior: 0.75, statement: "Named candidate." }],
+    posterior_summary: { total_active_posterior: 0.75, top_hypothesis: "H1", posterior_gap: 0.5 },
+    uncertainty_summary: "An unnamed alternative remains possible.",
+  };
+
+  api.handleProgressEvent(event);
+
+  const rows = elements.get("belief-panel").children;
+  assert.equal(rows[2].children[0].textContent, "Unresolved alternative mass");
+  assert.equal(rows[2].children[1].textContent, "0.250");
 });
 
 test("handleSubmit preserves integrated output after a terminal stream failure", async () => {

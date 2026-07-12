@@ -6,6 +6,7 @@ from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ScriptedModelGateway, StructuredModelRequest
+from bayesprobe.projections import build_answer_projection
 from bayesprobe.recorded_gateway import RecordedModelGateway
 from bayesprobe.probe_executor import (
     ModelBackedProbeToolGateway,
@@ -105,6 +106,19 @@ class RecordingProbeDesigner:
     def propose(self, context):
         self.contexts.append(context)
         return ProbeDesignResult(candidates=[], capability_decisions=[])
+
+
+class RecordingAnswerProjector:
+    def __init__(self):
+        self.inputs = []
+
+    def project(self, input):
+        self.inputs.append(input)
+        return build_answer_projection(
+            input.cycle_id,
+            input.previous_belief_state,
+            input.cycle_result,
+        )
 
 
 def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
@@ -355,9 +369,7 @@ def test_runner_uses_explicit_seeded_initializer_discriminator_before_fresh_desi
     assert result.cycle_results[0].probe_set.probes[0].method == (
         "frame_discrimination_support"
     )
-    assert [context.cycle_id for context in designer.contexts] == [
-        result.cycle_results[0].cycle.cycle_id
-    ]
+    assert designer.contexts == []
 
 
 def test_open_question_framing_precedes_belief_initialization():
@@ -706,6 +718,32 @@ def test_question_runner_runs_multiple_cycles_with_candidate_pool_from_projectio
     assert second_cycle.probe_set.probes[0].cycle_id == "run_question_multi_cycle_2"
 
 
+def test_question_runner_projects_with_prospective_stop_reason_and_reuses_candidates():
+    projector = RecordingAnswerProjector()
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        answer_projector=projector,
+        config=AutonomousQuestionRunConfig(max_cycles=2, max_probes_per_cycle=1),
+    )
+
+    result = runner.run_question(
+        InitializeRunInput(
+            run_id="run_projector_wiring",
+            problem="Can a projection inform the next autonomous cycle?",
+            hypothesis_seeds=explicit_test_hypothesis_seeds(),
+        )
+    )
+
+    assert [input.stop_reason for input in projector.inputs] == [None, "max_cycles"]
+    first_candidate = (
+        result.cycle_results[0]
+        .answer_projection.change_my_mind_condition.structured_probe_candidates[0]
+    )
+    assert result.cycle_results[1].probe_set.probes[0].id.startswith(
+        first_candidate.candidate_probe.id
+    )
+
+
 def test_question_runner_stops_on_confidence_threshold():
     runner = AutonomousQuestionRunner(
         core=BayesProbeCore(),
@@ -904,9 +942,10 @@ def test_question_runner_emits_truthful_progress_for_integrated_cycle():
         AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED,
         AutonomousQuestionProgressKind.SIGNALS_COLLECTED,
         AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED,
+        AutonomousQuestionProgressKind.FRAME_ADEQUACY_ASSESSED,
+        AutonomousQuestionProgressKind.ANSWER_PROJECTION_STARTED,
+        AutonomousQuestionProgressKind.ANSWER_PROJECTION_COMPLETED,
         AutonomousQuestionProgressKind.CYCLE_INTEGRATED,
-        AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
-        AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
         AutonomousQuestionProgressKind.RUN_COMPLETED,
     ]
     cycle_event = next(
@@ -1089,7 +1128,13 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
         AutonomousQuestionProgressKind.PROBE_EXECUTION_STARTED,
         AutonomousQuestionProgressKind.SIGNALS_COLLECTED,
         AutonomousQuestionProgressKind.EVIDENCE_INTEGRATION_STARTED,
+        AutonomousQuestionProgressKind.FRAME_ADEQUACY_ASSESSED,
+        AutonomousQuestionProgressKind.ANSWER_PROJECTION_STARTED,
+        AutonomousQuestionProgressKind.ANSWER_PROJECTION_COMPLETED,
         AutonomousQuestionProgressKind.CYCLE_INTEGRATED,
+    ]
+    non_terminal_cycle = [
+        *per_cycle,
         AutonomousQuestionProgressKind.PROBE_DESIGN_STARTED,
         AutonomousQuestionProgressKind.PROBE_DESIGN_COMPLETED,
     ]
@@ -1098,7 +1143,7 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
         AutonomousQuestionProgressKind.TASK_FRAMING_STARTED,
         AutonomousQuestionProgressKind.TASK_FRAMING_COMPLETED,
         AutonomousQuestionProgressKind.INITIALIZATION_COMPLETED,
-        *per_cycle,
+        *non_terminal_cycle,
         *per_cycle,
         AutonomousQuestionProgressKind.RUN_COMPLETED,
     ]

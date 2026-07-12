@@ -28,6 +28,12 @@ const PROGRESS_LABEL_BY_EVENT = {
   task_framing_started: "Framing task",
   task_framing_completed: "Task framed",
   initialization_completed: "Belief initialized",
+  probe_design_started: "Designing probes",
+  probe_design_completed: "Probe design completed",
+  frame_adequacy_assessed: "Frame adequacy assessed",
+  hypothesis_expansion_completed: "Hypothesis expansion completed",
+  answer_projection_started: "Projecting answer",
+  answer_projection_completed: "Answer projection completed",
   cycle_started: "Cycle started",
   probe_set_planned: "Probes planned",
   probe_execution_started: "Executing probes",
@@ -402,8 +408,11 @@ function renderAnswer(answer) {
     return;
   }
 
-  answerPanel.appendChild(kv("Best answer / hypothesis", answer.current_best_hypothesis));
+  answerPanel.appendChild(kv("Projection", answer.mode));
   answerPanel.appendChild(kv("Answer", answer.answer));
+  for (const [section, content] of Object.entries(answer.contract_sections || {})) {
+    answerPanel.appendChild(kv(section, content));
+  }
   answerPanel.appendChild(kv("Belief summary", answer.posterior_summary));
   answerPanel.appendChild(kv("Main uncertainty", answer.main_uncertainty));
   answerPanel.appendChild(kv("Weakest assumption", answer.weakest_assumption));
@@ -419,9 +428,11 @@ function renderBeliefs(beliefState) {
   }
 
   const summary = beliefState?.posterior_summary || {};
-  const relation = beliefState?.task_frame?.hypothesis_frame?.relation ||
-    "exclusive_exhaustive";
-  if (relation === "independent") {
+  const hypothesisFrame = beliefState?.task_frame?.hypothesis_frame || {};
+  const competition = hypothesisFrame.competition || "exclusive";
+  const coverage = hypothesisFrame.coverage || "exhaustive";
+  const isIndependent = competition === "independent";
+  if (isIndependent) {
     beliefPanel.appendChild(
       kv("Total credence (not normalized)", formatNumber(summary.total_active_credence))
     );
@@ -440,6 +451,13 @@ function renderBeliefs(beliefState) {
         "Top / posterior gap",
         `${summary.top_hypothesis || "n/a"} / ${formatNumber(summary.posterior_gap)}`
       )
+    );
+  }
+  const unresolvedMass = beliefState?.frame_state?.unresolved_alternative_mass ??
+    hypothesisFrame.unresolved_alternative_mass;
+  if (competition === "exclusive" && coverage === "open" && typeof unresolvedMass === "number") {
+    beliefPanel.appendChild(
+      kv("Unresolved alternative mass", formatNumber(unresolvedMass))
     );
   }
   beliefPanel.appendChild(
@@ -461,7 +479,7 @@ function renderBeliefs(beliefState) {
     metrics.className = "belief-metrics";
     metrics.textContent = [
       `prior ${formatNumber(hypothesis.prior)}`,
-      `${relation === "independent" ? "credence" : "posterior"} ${formatNumber(hypothesis.posterior)}`,
+      `${isIndependent ? "credence" : "posterior"} ${formatNumber(hypothesis.posterior)}`,
     ].join(" | ");
 
     const statement = document.createElement("div");
