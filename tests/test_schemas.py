@@ -581,6 +581,12 @@ def test_v1_evidence_memory_identity_remains_compatible():
     assert snapshot.source_content_fingerprints["S1"] == identity
 
 
+@pytest.mark.parametrize("memory_version", [0, 3, 999])
+def test_evidence_memory_rejects_unsupported_versions(memory_version):
+    with pytest.raises(ValueError, match="memory_version"):
+        EvidenceMemorySnapshot(memory_version=memory_version)
+
+
 @pytest.mark.parametrize("value", [["E1", " e1 "], [""]])
 def test_evidence_memory_rejects_invalid_nested_counterevidence_ids(value):
     with pytest.raises(ValueError, match="counterevidence_ids_by_hypothesis"):

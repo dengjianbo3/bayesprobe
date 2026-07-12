@@ -31,6 +31,7 @@ CorrelationStatus = Literal[
 ]
 
 _CURRENT_MEMORY_VERSION = 2
+_SUPPORTED_MEMORY_VERSIONS = frozenset({1, 2})
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,11 @@ class SignalProvenanceNormalizer:
         _reject_secret_signal(signal)
         run_session = _clean_text(run_id)
         supplied = signal.provenance
+        supplied_correlation_group = None
+        if supplied is not None:
+            supplied_correlation_group = (
+                supplied.supplied_correlation_group or supplied.correlation_group
+            )
         origin = supplied.epistemic_origin if supplied else _origin_for(signal)
         raw_source_identity = (
             supplied.source_identity
@@ -120,6 +126,7 @@ class SignalProvenanceNormalizer:
             parent_signal_ids=list(supplied.parent_signal_ids) if supplied else [],
             derivation_root_id=derivation_root_id,
             correlation_group=correlation_group,
+            supplied_correlation_group=supplied_correlation_group,
             canonical_content_fingerprint=fingerprint,
             citations=list(supplied.citations) if supplied else [],
             artifact_refs=list(supplied.artifact_refs) if supplied else [],
@@ -142,6 +149,7 @@ class EvidenceMemoryManager:
         *,
         canonical_correlation_group: str | None = None,
     ) -> None:
+        _require_supported_memory_version(snapshot)
         provenance = _required_provenance(signal)
         prior_source_content = snapshot.source_content_fingerprints.get(signal.id)
         prior_content = snapshot.content_fingerprints.get(signal.id)
@@ -158,7 +166,7 @@ class EvidenceMemoryManager:
             prior_identity is None
             or prior_identity[0] != provenance.source_identity
             or prior_identity[1] != provenance.canonical_content_fingerprint
-            or prior_identity[3] != provenance.correlation_group
+            or prior_identity[3] != _supplied_correlation_group(provenance)
             or prior_content != provenance.canonical_content_fingerprint
             or prior_root != provenance.derivation_root_id
             or (
@@ -176,6 +184,7 @@ class EvidenceMemoryManager:
         *,
         canonical_correlation_group: str | None = None,
     ) -> EvidenceMemorySnapshot:
+        _require_supported_memory_version(snapshot)
         provenance = _required_provenance(signal)
         prior_identities = {
             signal_id: parts
@@ -208,7 +217,7 @@ class EvidenceMemoryManager:
         derivation_roots[signal.id] = provenance.derivation_root_id
 
         if (
-            snapshot.memory_version >= _CURRENT_MEMORY_VERSION
+            snapshot.memory_version == _CURRENT_MEMORY_VERSION
             and content_fingerprints == snapshot.content_fingerprints
             and source_content_fingerprints == snapshot.source_content_fingerprints
             and derivation_roots == snapshot.derivation_roots
@@ -216,7 +225,7 @@ class EvidenceMemoryManager:
             return snapshot
 
         return EvidenceMemorySnapshot(
-            memory_version=max(snapshot.memory_version, _CURRENT_MEMORY_VERSION),
+            memory_version=_CURRENT_MEMORY_VERSION,
             accepted_evidence_ids=list(snapshot.accepted_evidence_ids),
             content_fingerprints=content_fingerprints,
             source_content_fingerprints=source_content_fingerprints,
@@ -240,6 +249,7 @@ class EvidenceMemoryManager:
         frame_version: int = 1,
         base_effective_weight: float = 0.0,
     ) -> EvidenceMemoryDecision:
+        _require_supported_memory_version(snapshot)
         provenance = _required_provenance(signal)
         prior_identities = {
             signal_id: parts
@@ -514,6 +524,18 @@ def _required_provenance(signal: ExternalSignal) -> SignalProvenance:
     return signal.provenance
 
 
+def _require_supported_memory_version(snapshot: EvidenceMemorySnapshot) -> None:
+    if (
+        type(snapshot.memory_version) is not int
+        or snapshot.memory_version not in _SUPPORTED_MEMORY_VERSIONS
+    ):
+        raise ValueError("unsupported evidence memory version")
+
+
+def _supplied_correlation_group(provenance: SignalProvenance) -> str:
+    return provenance.supplied_correlation_group or provenance.correlation_group
+
+
 def _source_content_identity(
     provenance: SignalProvenance,
     *,
@@ -524,7 +546,7 @@ def _source_content_identity(
             provenance.source_identity,
             provenance.canonical_content_fingerprint,
             correlation_group or provenance.correlation_group,
-            provenance.correlation_group,
+            _supplied_correlation_group(provenance),
         ],
         ensure_ascii=False,
         separators=(",", ":"),

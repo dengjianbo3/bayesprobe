@@ -2849,6 +2849,33 @@ def _memory_signal(signal_id: str, content: str, *, root: str) -> ExternalSignal
     )
 
 
+def _model_memory_signal(
+    signal_id: str,
+    content: str,
+    *,
+    root: str,
+    supplied_group: str,
+) -> ExternalSignal:
+    return ExternalSignal(
+        id=signal_id,
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="custom_model_adapter",
+        source="provider/model-a",
+        raw_content=content,
+        initial_target_hypotheses=["H1", "H2"],
+        provenance=SignalProvenance(
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+            source_identity="provider/model-a",
+            provider_model_or_tool_identity="provider/model-a",
+            session_id="session-1",
+            derivation_root_id=root,
+            correlation_group=supplied_group,
+            canonical_content_fingerprint="normalize-me",
+        ),
+    )
+
+
 def _native_open_judgment():
     return {
         "evidence_type": "supporting",
@@ -2903,6 +2930,168 @@ def test_core_commits_memory_once_and_ledgers_normalized_cross_cycle_duplicate(
     signal_records = ledger.read_all("external_signal")
     assert len(signal_records) == 2
     assert all(record["payload"]["provenance"] for record in signal_records)
+
+
+def test_model_supplied_group_is_audited_and_changed_reuse_fails_atomically(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger_path = tmp_path / "model-supplied-group-ledger.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    cycle = make_cycle("cycle_model_supplied_group")
+    signal = _model_memory_signal(
+        "S_model_supplied",
+        "The model favors H1.",
+        root="root-model-supplied",
+        supplied_group="caller-model-group-1",
+    )
+
+    first = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[signal],
+    )
+    replayed = core.integrate_cycle(
+        cycle=cycle.model_copy(update={"cycle_index": 2}),
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[signal],
+    )
+    provenance_payload = ledger.read_all("external_signal")[-1]["payload"]["provenance"]
+    persisted_provenance = SignalProvenance.model_validate(provenance_payload)
+    canonical_group = persisted_provenance.correlation_group
+    identity = json.loads(
+        replayed.belief_state.evidence_memory.source_content_fingerprints[signal.id]
+    )
+
+    assert len(gateway.requests) == 1
+    assert replayed.belief_state.evidence_memory == first.belief_state.evidence_memory
+    assert canonical_group.startswith("model:")
+    assert persisted_provenance.supplied_correlation_group == "caller-model-group-1"
+    assert identity[2:] == [canonical_group, "caller-model-group-1"]
+    assert all(
+        key.startswith(f"{canonical_group}|")
+        for key in first.belief_state.evidence_memory.correlation_credit
+    )
+
+    prior_memory_payload = replayed.belief_state.evidence_memory.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+    changed = signal.model_copy(
+        update={
+            "provenance": signal.provenance.model_copy(
+                update={"correlation_group": "caller-model-group-changed"}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="signal id lineage conflict"):
+        core.integrate_cycle(
+            cycle=cycle.model_copy(update={"cycle_index": 3}),
+            belief_state=replayed.belief_state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[changed],
+        )
+
+    assert len(gateway.requests) == 1
+    assert replayed.belief_state.evidence_memory.model_dump(mode="json") == prior_memory_payload
+    assert ledger_path.read_bytes() == prior_ledger
+
+
+def test_later_cross_cycle_batch_conflict_preflights_before_provider_or_ledger(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger_path = tmp_path / "cross-cycle-batch-preflight-ledger.jsonl"
+    ledger = JsonlLedgerStore(ledger_path)
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    first_cycle = make_cycle("cycle_batch_prior")
+    prior_signal = _memory_signal(
+        "S_batch_prior",
+        "Prior batch observation.",
+        root="root-batch-prior",
+    )
+    first = core.integrate_cycle(
+        cycle=first_cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(first_cycle.cycle_id),
+        signals=[prior_signal],
+    )
+    prior_memory_payload = first.belief_state.evidence_memory.model_dump(mode="json")
+    prior_ledger = ledger_path.read_bytes()
+    conflicting = prior_signal.model_copy(
+        update={
+            "provenance": prior_signal.provenance.model_copy(
+                update={"correlation_group": "changed-late-batch-group"}
+            )
+        }
+    )
+    second_cycle = make_cycle("cycle_batch_conflict").model_copy(update={"cycle_index": 2})
+
+    with pytest.raises(ValueError, match="signal id lineage conflict"):
+        core.integrate_cycle(
+            cycle=second_cycle,
+            belief_state=first.belief_state,
+            probe_set=make_empty_probe_set(second_cycle.cycle_id),
+            signals=[
+                _memory_signal(
+                    "S_batch_novel",
+                    "Novel signal before the late conflict.",
+                    root="root-batch-novel",
+                ),
+                conflicting,
+            ],
+        )
+
+    assert len(gateway.requests) == 1
+    assert first.belief_state.evidence_memory.model_dump(mode="json") == prior_memory_payload
+    assert ledger_path.read_bytes() == prior_ledger
+
+
+@pytest.mark.parametrize("conflict", ["source", "content", "root", "group"])
+def test_same_batch_reused_signal_conflict_preflights_atomically(
+    tmp_path: Path,
+    conflict: str,
+):
+    gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
+    ledger_path = tmp_path / "same-batch-preflight-ledger.jsonl"
+    ledger_path.touch()
+    ledger = JsonlLedgerStore(ledger_path)
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    state = make_exact_belief_state()
+    state_memory_payload = state.evidence_memory.model_dump(mode="json")
+    first = _memory_signal(
+        "S_same_batch",
+        "First same-batch observation.",
+        root="root-same-batch",
+    )
+    signal_updates = {}
+    provenance_updates = {}
+    if conflict == "source":
+        provenance_updates["source_identity"] = "source.example/changed"
+    elif conflict == "content":
+        signal_updates["raw_content"] = "Changed same-batch observation."
+    elif conflict == "root":
+        provenance_updates["derivation_root_id"] = "root-same-batch-changed"
+    else:
+        provenance_updates["correlation_group"] = "same-batch-changed-group"
+    signal_updates["provenance"] = first.provenance.model_copy(
+        update=provenance_updates
+    )
+    conflicting = first.model_copy(update=signal_updates)
+    cycle = make_cycle("cycle_same_batch_preflight")
+
+    with pytest.raises(ValueError, match="signal id lineage conflict"):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[first, conflicting],
+        )
+
+    assert gateway.requests == []
+    assert state.evidence_memory.model_dump(mode="json") == state_memory_payload
+    assert ledger_path.read_bytes() == b""
 
 
 def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(

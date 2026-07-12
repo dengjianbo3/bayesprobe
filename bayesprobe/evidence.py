@@ -258,11 +258,21 @@ class EvidenceIntegrationGate:
         )
         identity_occurrences: dict[str, int] = {}
 
-        for index, raw_signal in enumerate(signals, start=1):
-            signal = self._provenance_normalizer.normalize(
+        normalized_signals = [
+            self._provenance_normalizer.normalize(
                 raw_signal,
                 run_id=cycle.run_id,
             )
+            for raw_signal in signals
+        ]
+        preflight_memory = working_memory
+        for signal in normalized_signals:
+            preflight_memory = self._memory_manager.remember_signal_identity(
+                preflight_memory,
+                signal,
+            )
+
+        for index, signal in enumerate(normalized_signals, start=1):
             self._memory_manager.validate_signal_lineage(working_memory, signal)
             closed_signals.append(signal)
             signal_identity = _canonical_signal_identity(signal)

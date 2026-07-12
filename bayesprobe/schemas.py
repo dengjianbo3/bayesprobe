@@ -643,8 +643,8 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     @field_validator("memory_version")
     @classmethod
     def validate_memory_version(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("memory_version must be at least one")
+        if value not in {1, 2}:
+            raise ValueError("memory_version must be one of 1 or 2")
         return value
 
     @field_validator(
@@ -776,6 +776,7 @@ class SignalProvenance(StrictTaskModel):
     parent_signal_ids: list[str] = Field(default_factory=list)
     derivation_root_id: str
     correlation_group: str
+    supplied_correlation_group: str | None = None
     canonical_content_fingerprint: str
     citations: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
@@ -792,6 +793,18 @@ class SignalProvenance(StrictTaskModel):
         clean_value = _required_text(value, info.field_name)
         if info.field_name == "correlation_group" and "|" in clean_value:
             raise ValueError("correlation_group must not contain the reserved '|' delimiter")
+        return clean_value
+
+    @field_validator("supplied_correlation_group")
+    @classmethod
+    def clean_supplied_correlation_group(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        clean_value = _required_text(value, "supplied_correlation_group")
+        if "|" in clean_value:
+            raise ValueError(
+                "supplied_correlation_group must not contain the reserved '|' delimiter"
+            )
         return clean_value
 
     @field_validator("parent_signal_ids", "citations", "artifact_refs")

@@ -290,6 +290,61 @@ def test_supplied_model_group_cannot_override_stable_provider_session_group():
         second_normalized.provenance.correlation_group
     )
     assert first_normalized.provenance.correlation_group.startswith("model:")
+    assert first_normalized.provenance.supplied_correlation_group == "caller-group-1"
+    assert second_normalized.provenance.supplied_correlation_group == "caller-group-2"
+
+    manager = EvidenceMemoryManager()
+    memory = EvidenceMemorySnapshot()
+    first_event = None
+    for index, signal in enumerate((first_normalized, second_normalized), start=1):
+        decision = manager.classify(
+            memory,
+            signal,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+            base_effective_weight=0.25,
+        )
+        event = EvidenceEvent(
+            id=f"E_supplied_model_{index}",
+            derived_from_signal=signal.id,
+            target_hypotheses=["A"],
+            evidence_type=EvidenceType.SUPPORTING,
+            content=signal.raw_content,
+            likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+            correlation_status=decision.correlation_status,
+            effective_update_weight=decision.effective_update_weight,
+        )
+        memory = manager.commit(memory, signal=signal, event=event, decision=decision)
+        if first_event is None:
+            first_event = event
+
+    canonical_group = first_normalized.provenance.correlation_group
+    first_identity = json.loads(
+        memory.source_content_fingerprints[first_normalized.id]
+    )
+    second_identity = json.loads(
+        memory.source_content_fingerprints[second_normalized.id]
+    )
+    replayed = manager.commit(
+        memory,
+        signal=first_normalized,
+        event=first_event,
+        decision=manager.classify(memory, first_normalized),
+    )
+    changed = base.model_copy(
+        update={
+            "provenance": base.provenance.model_copy(
+                update={"correlation_group": "caller-group-changed"}
+            )
+        }
+    )
+    changed_normalized = normalizer.normalize(changed, run_id="run_memory")
+
+    assert first_identity[2:] == [canonical_group, "caller-group-1"]
+    assert second_identity[2:] == [canonical_group, "caller-group-2"]
+    assert memory.correlation_credit == {f"{canonical_group}|A|confirming": 0.5}
+    assert replayed == memory
+    with pytest.raises(ValueError, match="signal id lineage conflict"):
+        manager.validate_signal_lineage(memory, changed_normalized)
 
 
 def test_normalization_rejects_secret_material_without_echoing_it():
@@ -401,6 +456,42 @@ def test_native_event_identity_is_unique_for_duplicate_signals_in_one_batch():
     assert result.evidence_events[0].id.endswith("_1")
     assert result.evidence_events[1].id.endswith("_2")
     assert len(gateway.requests) == 1
+
+
+def test_batch_preflight_normalizes_once_and_stops_before_provider():
+    class RecordingNormalizer(SignalProvenanceNormalizer):
+        def __init__(self):
+            self.calls = []
+
+        def normalize(self, signal, *, run_id):
+            self.calls.append((signal.id, signal.raw_content))
+            return super().normalize(signal, run_id=run_id)
+
+    normalizer = RecordingNormalizer()
+    gateway = CountingGateway()
+    first = _signal("S_same_batch", "First same-batch observation.", root="root-1")
+    conflicting = _signal(
+        "S_same_batch",
+        "Changed same-batch observation.",
+        root="root-2",
+    )
+
+    with pytest.raises(ValueError, match="signal id lineage conflict"):
+        EvidenceIntegrationGate(
+            model_gateway=gateway,
+            provenance_normalizer=normalizer,
+        ).integrate(
+            cycle=_cycle(1),
+            belief_state=_state(),
+            probe_set=_probe_set(1),
+            signals=[first, conflicting],
+        )
+
+    assert normalizer.calls == [
+        (first.id, first.raw_content),
+        (conflicting.id, conflicting.raw_content),
+    ]
+    assert gateway.requests == []
 
 
 def test_native_event_identity_distinguishes_same_content_with_different_roots():
@@ -1466,6 +1557,53 @@ def test_evidence_memory_snapshot_requires_exact_canonical_source_identity(ident
 def test_evidence_memory_snapshot_rejects_malformed_credit_key_grammar(key):
     with pytest.raises(ValueError, match="correlation credit"):
         EvidenceMemorySnapshot(correlation_credit={key: 0.2})
+
+
+def test_identity_write_rejects_unsupported_memory_version():
+    snapshot = EvidenceMemorySnapshot.model_construct(memory_version=3)
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_unsupported_memory", "Unsupported memory version."),
+        run_id="run_memory",
+    )
+
+    with pytest.raises(ValueError, match="unsupported evidence memory version"):
+        EvidenceMemoryManager().remember_signal_identity(snapshot, signal)
+
+
+def test_v1_identity_write_upgrades_all_identities_to_v2():
+    fingerprint = "sha256:" + "a" * 64
+    snapshot = EvidenceMemorySnapshot(
+        memory_version=1,
+        content_fingerprints={"S_legacy": fingerprint},
+        source_content_fingerprints={
+            "S_legacy": '["source.example/report","'
+            + fingerprint
+            + '","source.example/report"]'
+        },
+        derivation_roots={"S_legacy": "root-legacy"},
+    )
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_upgrade", "Identity upgrade observation.", root="root-upgrade"),
+        run_id="run_memory",
+    )
+
+    upgraded = EvidenceMemoryManager().remember_signal_identity(snapshot, signal)
+
+    assert upgraded.memory_version == 2
+    assert all(
+        len(json.loads(identity)) == 4
+        for identity in upgraded.source_content_fingerprints.values()
+    )
+
+
+@pytest.mark.parametrize("memory_version", [0, 3, 999])
+def test_native_belief_state_rejects_unsupported_memory_version(memory_version):
+    state = _state()
+    payload = state.model_dump(mode="python")
+    payload["evidence_memory"]["memory_version"] = memory_version
+
+    with pytest.raises(ValueError, match="memory_version"):
+        type(state).model_validate(payload)
 
 
 def test_native_belief_state_rejects_credit_for_unknown_hypothesis_subject():

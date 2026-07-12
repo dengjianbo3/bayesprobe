@@ -432,3 +432,48 @@ No blocking concerns.
 ### Concerns
 
 No blocking concerns.
+
+## Review Fix 7
+
+### Changes
+
+- Added optional `supplied_correlation_group` provenance. Model-origin
+  `correlation_group` remains the server-derived provider/model/session group;
+  caller input is persisted separately for audit and signal-id continuity and
+  never selects independence or directional credit keys.
+- Restricted evidence memory to versions 1 and 2 at direct and recursive schema
+  validation. Identity operations also reject bypass-constructed unsupported
+  snapshots, upgrade v1 to v2, and write exactly version 2.
+- Normalized every signal exactly once up front and preflighted the full batch
+  through a cycle-local identity-only shadow before provider access. The shadow
+  is discarded; normal classification, replay, credit, and event ordering still
+  start from the prior working memory.
+
+### Verification
+
+- RED: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py::test_supplied_model_group_cannot_override_stable_provider_session_group tests/test_evidence_memory.py::test_batch_preflight_normalizes_once_and_stops_before_provider tests/test_evidence_memory.py::test_identity_write_rejects_unsupported_memory_version tests/test_evidence_memory.py::test_v1_identity_write_upgrades_all_identities_to_v2 tests/test_evidence_memory.py::test_native_belief_state_rejects_unsupported_memory_version tests/test_schemas.py::test_evidence_memory_rejects_unsupported_versions tests/test_core_cycles.py::test_model_supplied_group_is_audited_and_changed_reuse_fails_atomically tests/test_core_cycles.py::test_later_cross_cycle_batch_conflict_preflights_before_provider_or_ledger tests/test_core_cycles.py::test_same_batch_reused_signal_conflict_preflights_atomically -q -p no:cacheprovider` -> `13 failed, 3 passed in 0.47s`.
+- GREEN: the same command -> `16 passed in 0.28s`.
+- Task 4 focused: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_evidence_memory.py tests/test_model_gateway.py tests/test_openai_gateway.py tests/test_core_cycles.py tests/test_probe_executor.py -q -p no:cacheprovider` -> `317 passed in 0.70s`.
+- Compatibility: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_schemas.py tests/test_migrations.py tests/test_task_framing.py tests/test_recorded_model_gateway.py -q -p no:cacheprovider` -> `306 passed in 0.41s`.
+- Full offline: `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider` -> `1129 passed, 10 skipped in 8.89s`.
+- Node: `node --test tests/test_webui_stream.js` -> `15 passed, 0 failed`.
+- `git diff --check` -> clean.
+
+### Self-Review
+
+- Model provenance now records both facts: distinct caller groups survive in
+  ledger and v2 identity field four, while identical provider/model/session
+  signals share one `model:` canonical field and only that field prefixes
+  credit. Unchanged replay is idempotent; changed caller group fails before
+  provider, ledger, or memory mutation; recursive secret checks include both.
+- Memory version validation accepts only v1 triples and v2 four-part identities.
+  Versions 0, 3, and future values fail directly, through BeliefState recursion,
+  and at identity-write defense; supported v1 writes upgrade all identities.
+- Full-batch preflight catches prior-state and newly introduced same-batch id
+  conflicts across source, content, root, and supplied group with zero new
+  provider calls or ledger/state mutation. Successful batches still classify
+  against actual working memory in original order, never the preflight shadow.
+
+### Concerns
+
+No blocking concerns.
