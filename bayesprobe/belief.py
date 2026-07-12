@@ -666,18 +666,23 @@ class CoverageAwareBeliefSolver:
             frame_state = frame_state.model_copy(
                 update={"unresolved_alternative_mass": unresolved_posterior}
             )
-            frame_mass_update = FrameMassUpdate(
-                update_id=f"{run_id}_{cycle_id}_FM{event_index}",
-                cycle_id=cycle_id,
-                evidence_id=event.id,
-                prior=round(unresolved_prior, _DISTRIBUTION_PRECISION),
-                posterior=unresolved_posterior,
-                direction=_direction(unresolved_prior, unresolved_posterior),
-                reason=(
-                    f"{event.evidence_type.value} is {unresolved_band.value} for "
-                    "unresolved alternative mass."
-                ),
+            rounded_unresolved_prior = round(
+                unresolved_prior,
+                _DISTRIBUTION_PRECISION,
             )
+            if unresolved_posterior != rounded_unresolved_prior:
+                frame_mass_update = FrameMassUpdate(
+                    update_id=f"{run_id}_{cycle_id}_FM{event_index}",
+                    cycle_id=cycle_id,
+                    evidence_id=event.id,
+                    prior=rounded_unresolved_prior,
+                    posterior=unresolved_posterior,
+                    direction=_direction(unresolved_prior, unresolved_posterior),
+                    reason=(
+                        f"{event.evidence_type.value} is {unresolved_band.value} for "
+                        "unresolved alternative mass."
+                    ),
+                )
         return updated_hypotheses, frame_state, updates, frame_mass_update
 
     @staticmethod

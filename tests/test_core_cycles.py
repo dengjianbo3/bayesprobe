@@ -2122,6 +2122,7 @@ def test_core_does_not_retire_an_already_retired_hypothesis_twice(tmp_path: Path
     unresolved_after_retirement = (
         first.belief_state.frame_state.unresolved_alternative_mass
     )
+    frame_mass_record_count = len(ledger.read_all("frame_mass_update"))
 
     core.static_gate.events = [
         event.model_copy(
@@ -2149,13 +2150,15 @@ def test_core_does_not_retire_an_already_retired_hypothesis_twice(tmp_path: Path
     assert second.belief_state.frame_state.unresolved_alternative_mass == (
         unresolved_after_retirement
     )
+    assert second.frame_mass_updates == []
     assert second.hypothesis_evolutions == []
-    assert [
-        update
-        for update in second.frame_mass_updates
-        if "_FM_retire_" in update.update_id
-    ] == []
     assert len(ledger.read_all("hypothesis_evolution")) == 1
+    assert len(ledger.read_all("frame_mass_update")) == frame_mass_record_count
+    assert [
+        record
+        for record in ledger.read_all("frame_mass_update")
+        if record["payload"]["cycle_id"] == second_cycle.cycle_id
+    ] == []
     assert len(
         [
             record
@@ -2163,6 +2166,66 @@ def test_core_does_not_retire_an_already_retired_hypothesis_twice(tmp_path: Path
             if "_FM_retire_" in record["payload"]["update_id"]
         ]
     ) == 1
+
+
+def test_core_rejects_non_open_all_retired_state_before_cycle_ledger_append(
+    tmp_path: Path,
+):
+    state_payload = make_exact_belief_state().model_dump(mode="python")
+    state_payload["task_frame"]["task_kind"] = "claim_verification"
+    state_payload["task_frame"]["hypothesis_frame"].update(
+        {
+            "competition": "independent",
+            "coverage": "open",
+            "rival_sets": {"H1": [], "H2": []},
+            "unresolved_alternative_mass": None,
+            "coverage_limitation": None,
+        }
+    )
+    state_payload["frame_state"].update(
+        {
+            "competition": "independent",
+            "coverage": "open",
+            "unresolved_alternative_mass": None,
+        }
+    )
+    for hypothesis in state_payload["hypotheses"]:
+        hypothesis["rivals"] = []
+    belief_state = BeliefState.model_validate(state_payload)
+    events = [
+        EvidenceEvent(
+            id=f"E_retire_independent_{index}",
+            derived_from_signal=f"S_retire_independent_{index}",
+            target_hypotheses=["H1", "H2"],
+            evidence_type=EvidenceType.COUNTEREVIDENCE,
+            content=f"Independent constraint {index} excludes both claims.",
+            reliability=1.0,
+            independence=1.0,
+            relevance=1.0,
+            novelty=1.0,
+            likelihoods={
+                "H1": LikelihoodBand.STRONGLY_DISCONFIRMING,
+                "H2": LikelihoodBand.STRONGLY_DISCONFIRMING,
+            },
+            effective_update_weight=1.0,
+        )
+        for index in (1, 2)
+    ]
+    ledger = JsonlLedgerStore(tmp_path / "invalid-all-retired-ledger.jsonl")
+    core = StaticEventCore(events, ledger=ledger)
+
+    with pytest.raises(
+        ValueError,
+        match="final belief state failed recursive validation",
+    ):
+        core.integrate_cycle(
+            cycle=make_cycle("cycle_invalid_all_retired"),
+            belief_state=belief_state,
+            probe_set=make_empty_probe_set("cycle_invalid_all_retired"),
+            signals=[make_active_signal("pending")],
+        )
+
+    assert ledger.read_all() == []
 
 
 def test_core_open_duplicate_event_moves_frame_mass_once(tmp_path: Path):

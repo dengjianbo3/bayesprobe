@@ -217,14 +217,17 @@ class BayesProbeCore:
                 "belief_state_id": f"{cycle.run_id}_bs_{cycle.cycle_index}",
                 "cycle_id": cycle.cycle_id,
                 "cycle_index": cycle.cycle_index,
-                "hypotheses": evolved_hypotheses,
-                "frame_state": next_frame_state,
+                "hypotheses": [
+                    hypothesis.model_dump(mode="python")
+                    for hypothesis in evolved_hypotheses
+                ],
+                "frame_state": next_frame_state.model_dump(mode="python"),
                 "posterior_summary": posterior_summary,
                 "uncertainty_summary": uncertainty_summary,
                 "ledger_refs": merged_ledger_refs,
             }
         )
-        updated_state = BeliefState.model_validate(updated_state_payload)
+        updated_state = _deep_revalidate_final_belief_state(updated_state_payload)
         integrated_cycle = closed_cycle.model_copy(
             update={
                 "boundary_status": BoundaryStatus.INTEGRATED,
@@ -380,6 +383,14 @@ def _scoped_cycle_key(run_id: str, cycle_id: str) -> str:
     if cycle_id.startswith(f"{run_id}_"):
         return cycle_id
     return f"{run_id}_{cycle_id}"
+
+
+def _deep_revalidate_final_belief_state(payload: dict[str, object]) -> BeliefState:
+    """Rebuild the final state so every nested domain validator runs."""
+    try:
+        return BeliefState.model_validate(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("final belief state failed recursive validation") from exc
 
 
 def _append_unique(existing: list[str], additions: list[str]) -> list[str]:

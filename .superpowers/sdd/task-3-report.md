@@ -228,3 +228,45 @@ Reviewed base: `b6165fd40866a93827ce3e8af3c961cf7e80b44c`.
 No blocking concerns. This fix exposes and integrates retirement only. Semantic
 expansion, anomaly spawning, reframing, and candidate creation remain deferred
 to Task 6, and no Task 4/5, provider, probe, or WebUI behavior was added.
+
+## Review Fix 3
+
+Reviewed base: `49a5276`.
+
+### Changes
+
+- Exclusive-open solving now emits an ordinary `FrameMassUpdate` only when the
+  final rounded unresolved posterior differs from the final rounded prior.
+  Meaningful unresolved movement keeps its existing ids, reasons, and ordering.
+- Strengthened the two-cycle public retirement regression so neutral evidence
+  targeting an already-retired hypothesis must return no frame-mass updates and
+  append no cycle-two `frame_mass_update` ledger record.
+- Final cycle state construction now dumps evolved hypotheses and `FrameState`
+  to plain data before a dedicated deep-revalidation helper reconstructs the
+  `BeliefState`. Validation failures are surfaced through the stable
+  `final belief state failed recursive validation` exception boundary.
+- Added a public independent-frame cycle regression where ordinary evolution
+  retires every active hypothesis. The invalid empty non-open `FrameState` is
+  rejected before the ledger receives any record for the cycle.
+- The existing public all-retired exclusive-open regression continues to prove
+  that zero active hypotheses with unresolved mass one remains valid.
+
+### RED Evidence
+
+The two targeted public regressions produced `2 failed`: cycle two returned two
+neutral ordinary frame-mass updates, and final-state validation did not expose
+the required stable recursive-validation boundary.
+
+### GREEN Evidence
+
+- Targeted regressions: `2 passed in 0.18s`.
+- Exact Task 3 focused suite: `135 passed in 0.34s`.
+- Full offline Python suite: `989 passed, 10 skipped in 8.00s`.
+- Node stream regression: `15 passed, 0 failed`.
+- `git diff --check`: clean.
+
+### Concerns
+
+No blocking concerns. The recursive final-state check remains immediately
+before ledger persistence, so failed cycles append nothing while valid
+exclusive-open fully unresolved states retain their reviewed semantics.
