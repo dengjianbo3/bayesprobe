@@ -29,6 +29,8 @@ class RecordedModelGateway:
             raise ValueError("recorded model fixture_name must not be empty")
         clean_fixture_name = fixture_name.strip()
         copied_responses = list(responses)
+        for entry in copied_responses:
+            _validate_entry(entry)
         copied_metadata = dict(metadata or {})
         _reject_secrets(
             {
@@ -91,6 +93,10 @@ def _matches_request(match: Mapping[str, Any], request: StructuredModelRequest) 
     signal_id = match.get("signal_id")
     if signal_id is not None and signal_id != request.input.get("signal_id"):
         return False
+    for key in ("cycle_id", "probe_id"):
+        expected = match.get(key)
+        if expected is not None and expected != request.metadata.get(key):
+            return False
     return True
 
 
@@ -100,6 +106,13 @@ def _validate_entry(entry: Any) -> None:
     match = entry.get("match")
     if not isinstance(match, Mapping):
         raise ValueError("recorded model response entry match must be an object")
+    unsupported_keys = set(match).difference(
+        {"task", "signal_id", "cycle_id", "probe_id"}
+    )
+    if unsupported_keys:
+        raise ValueError(
+            "recorded model response match contains unsupported match key"
+        )
     if "task" not in match:
         raise ValueError("recorded model response match must include task")
     response = entry.get("response")

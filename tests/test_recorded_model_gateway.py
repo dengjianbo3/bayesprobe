@@ -13,9 +13,14 @@ def write_fixture(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def make_request(signal_id: str = "S_chem_constant_volume") -> StructuredModelRequest:
+def make_request(
+    signal_id: str = "S_chem_constant_volume",
+    *,
+    task: str = "judge_evidence",
+    metadata: dict[str, str] | None = None,
+) -> StructuredModelRequest:
     return StructuredModelRequest(
-        task="judge_evidence",
+        task=task,
         input={
             "signal_id": signal_id,
             "raw_content": "Constant-volume inert gas evidence.",
@@ -25,6 +30,7 @@ def make_request(signal_id: str = "S_chem_constant_volume") -> StructuredModelRe
         prompt_version="v0.1",
         schema_name="EvidenceJudgment",
         schema_version="v0.1",
+        metadata=metadata or {},
     )
 
 
@@ -69,6 +75,61 @@ def test_recorded_model_gateway_replays_response_by_task_and_signal_id(tmp_path:
     assert result["evidence_type"] == "supporting"
     assert result["likelihoods"]["H1"] == "moderately_confirming"
     assert gateway.requests[0].input["signal_id"] == "S_chem_constant_volume"
+
+
+def test_recorded_model_gateway_matches_responses_by_cycle_and_probe_metadata(
+    tmp_path: Path,
+):
+    path = tmp_path / "metadata-matched.json"
+    payload = {
+        "fixture_name": "metadata_matched",
+        "responses": [
+            {
+                "match": {
+                    "task": "execute_probe",
+                    "cycle_id": "run_cycle_1",
+                    "probe_id": "P_first",
+                },
+                "response": {"raw_content": "first recorded probe"},
+            },
+            {
+                "match": {
+                    "task": "execute_probe",
+                    "cycle_id": "run_cycle_2",
+                    "probe_id": "P_second",
+                },
+                "response": {"raw_content": "second recorded probe"},
+            },
+        ],
+    }
+    write_fixture(path, payload)
+    gateway = RecordedModelGateway.from_json(path)
+
+    first = gateway.complete_structured(
+        make_request(
+            task="execute_probe",
+            metadata={"cycle_id": "run_cycle_1", "probe_id": "P_first"},
+        )
+    )
+    second = gateway.complete_structured(
+        make_request(
+            task="execute_probe",
+            metadata={"cycle_id": "run_cycle_2", "probe_id": "P_second"},
+        )
+    )
+
+    assert first == {"raw_content": "first recorded probe"}
+    assert second == {"raw_content": "second recorded probe"}
+
+
+def test_recorded_model_gateway_rejects_unsupported_match_keys(tmp_path: Path):
+    path = tmp_path / "unsupported-match.json"
+    payload = recorded_fixture_payload()
+    payload["responses"][0]["match"]["unsupported"] = "not allowed"
+    write_fixture(path, payload)
+
+    with pytest.raises(ValueError, match="unsupported match key"):
+        RecordedModelGateway.from_json(path)
 
 
 def test_recorded_model_identity_uses_safe_explicit_fixture_provider_model_metadata():
@@ -360,6 +421,31 @@ def test_open_question_v02_fixture_is_recursively_secret_free_and_task_only_matc
         {"task": "execute_probe"},
         {"task": "judge_evidence"},
     ]
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "model_scale_open_mvp_v0.1.json",
+        "exact_answer_expansion_mvp_v0.1.json",
+    ],
+)
+def test_open_question_mvp_fixtures_are_secret_free_and_use_supported_matches(
+    fixture_name: str,
+):
+    payload = json.loads(
+        (Path("tests/fixtures/open_questions") / fixture_name).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert _secret_like_entries(payload) == []
+    assert all(
+        set(entry["match"]).issubset(
+            {"task", "signal_id", "cycle_id", "probe_id"}
+        )
+        for entry in payload["responses"]
+    )
 
 
 def _secret_like_entries(value: Any, path: str = "$") -> list[str]:

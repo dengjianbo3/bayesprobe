@@ -3,10 +3,14 @@ from pathlib import Path
 import pytest
 
 from bayesprobe.core import BayesProbeCore
+from bayesprobe.hypothesis_expansion import (
+    HypothesisExpansionService,
+    ModelHypothesisExpansionAdapter,
+)
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ScriptedModelGateway, StructuredModelRequest
-from bayesprobe.projections import build_answer_projection
+from bayesprobe.projections import TaskAwareAnswerProjector, build_answer_projection
 from bayesprobe.recorded_gateway import RecordedModelGateway
 from bayesprobe.probe_executor import (
     ModelBackedProbeToolGateway,
@@ -49,6 +53,7 @@ from bayesprobe.schemas import (
     ProbeCandidate,
     ProbeDesign,
     ProbeSet,
+    ProjectionMode,
     RunRegime,
     RunStatus,
     SignalKind,
@@ -56,6 +61,38 @@ from bayesprobe.schemas import (
     TaskAdmissionStatus,
     TaskKind,
 )
+
+
+def recorded_open_mvp_runtime(
+    gateway: RecordedModelGateway,
+    *,
+    max_cycles: int,
+) -> tuple[AutonomousQuestionRunner, InitializeRunInput]:
+    runner = AutonomousQuestionRunner(
+        core=BayesProbeCore(
+            model_gateway=gateway,
+            hypothesis_expander=HypothesisExpansionService(
+                adapter=ModelHypothesisExpansionAdapter(gateway)
+            ),
+        ),
+        initializer=BayesProbeInitializer(task_framer=ModelTaskFramer(gateway)),
+        executor=ProbeExecutor(ModelBackedProbeToolGateway(gateway)),
+        config=AutonomousQuestionRunConfig(
+            max_cycles=max_cycles,
+            max_probes_per_cycle=2,
+        ),
+        task_admitter=ModelTaskAdmitter(gateway),
+        probe_designer=ModelProbeDesigner(gateway),
+        available_capabilities=(MODEL_REASONING_CAPABILITY,),
+        answer_projector=TaskAwareAnswerProjector(gateway),
+    )
+    return (
+        runner,
+        InitializeRunInput(
+            run_id="recorded_open_mvp",
+            problem="What conclusion follows from the stated open question?",
+        ),
+    )
 
 
 class EmptyPlanner:
@@ -1170,3 +1207,97 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
     assert sum(
         hypothesis.posterior for hypothesis in result.final_belief_state.hypotheses
     ) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "max_cycles", "mode", "answer_value"),
+    [
+        ("model_scale_open_mvp_v0.1.json", 1, ProjectionMode.SYNTHESIS, None),
+        ("exact_answer_expansion_mvp_v0.1.json", 2, ProjectionMode.SELECTION, 4),
+    ],
+)
+def test_recorded_open_question_mvp_vertical_slice(
+    fixture_name, max_cycles, mode, answer_value
+):
+    gateway = RecordedModelGateway.from_json(
+        Path("tests/fixtures/open_questions") / fixture_name
+    )
+    runner, input = recorded_open_mvp_runtime(gateway, max_cycles=max_cycles)
+
+    result = runner.run_question(input)
+
+    assert result.final_answer_projection.mode == mode
+    assert result.final_answer_projection.answer_value == answer_value
+    assert len(result.cycle_results) == max_cycles
+
+
+def test_recorded_open_question_mvp_synthesis_projects_required_sections():
+    gateway = RecordedModelGateway.from_json(
+        Path("tests/fixtures/open_questions/model_scale_open_mvp_v0.1.json")
+    )
+    runner, input = recorded_open_mvp_runtime(gateway, max_cycles=1)
+
+    result = runner.run_question(input)
+
+    projection = result.final_answer_projection
+    assert projection.mode == ProjectionMode.SYNTHESIS
+    assert set(projection.contract_sections) == {
+        "hypotheses",
+        "controls",
+        "metrics",
+        "decision_rule",
+        "limitations",
+    }
+    assert not projection.answer.startswith("Current best hypothesis")
+    assert [request.task for request in gateway.requests] == [
+        "assess_task_admission",
+        "frame_open_question",
+        "design_probes",
+        "execute_probe",
+        "judge_evidence",
+        "project_answer",
+    ]
+
+
+def test_recorded_open_question_mvp_expands_before_selecting_new_integer_answer():
+    gateway = RecordedModelGateway.from_json(
+        Path("tests/fixtures/open_questions/exact_answer_expansion_mvp_v0.1.json")
+    )
+    runner, input = recorded_open_mvp_runtime(gateway, max_cycles=2)
+
+    result = runner.run_question(input)
+
+    first_cycle = result.cycle_results[0]
+    spawned_ids = {
+        evolution.to_hypothesis
+        for evolution in first_cycle.hypothesis_evolutions
+        if evolution.operation.value == "spawn"
+    }
+    discovery_evidence_id = first_cycle.evidence_events[0].id
+    assert result.final_answer_projection.mode == ProjectionMode.SELECTION
+    assert result.final_answer_projection.answer == "4"
+    assert result.final_answer_projection.answer_value == 4
+    assert result.final_belief_state.frame_state.frame_version == 2
+    assert spawned_ids
+    assert {
+        hypothesis.answer_value
+        for hypothesis in result.final_belief_state.hypotheses
+        if hypothesis.id in spawned_ids
+    } == {4, 5}
+    assert discovery_evidence_id in result.final_belief_state.evidence_memory.discovery_evidence_ids
+    assert not {
+        update.hypothesis_id for update in first_cycle.belief_updates
+    }.intersection(spawned_ids)
+    assert [request.task for request in gateway.requests] == [
+        "assess_task_admission",
+        "frame_open_question",
+        "design_probes",
+        "execute_probe",
+        "judge_evidence",
+        "expand_hypotheses",
+        "design_probes",
+        "execute_probe",
+        "execute_probe",
+        "judge_evidence",
+        "judge_evidence",
+    ]

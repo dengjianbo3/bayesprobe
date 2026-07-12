@@ -1,0 +1,185 @@
+{
+  "fixture_name": "exact_answer_expansion_mvp_v0.1",
+  "metadata": {
+    "purpose": "offline exact-answer expansion and selection"
+  },
+  "responses": [
+    {
+      "match": {"task": "assess_task_admission"},
+      "response": {
+        "status": "admitted",
+        "epistemic_basis": ["The anatomical description permits a finite integer answer frame with explicit unresolved mass."],
+        "proposed_task_kind": "exact_answer",
+        "answer_contract_outline": {
+          "objective": "Select the integer that matches the anatomical description.",
+          "answer_value_type": "integer",
+          "decision_form": "integer_selection",
+          "permits_synthesis": false,
+          "required_sections": ["answer"]
+        },
+        "clarification_questions": [],
+        "reason": "The requested output is a typed exact answer."
+      }
+    },
+    {
+      "match": {"task": "frame_open_question"},
+      "response": {
+        "task_kind": "exact_answer",
+        "answer_relationship": "selection",
+        "answer_contract": {
+          "objective": "Select the integer that matches the anatomical description.",
+          "answer_value_type": "integer",
+          "answer_format": "integer",
+          "required_sections": ["answer"],
+          "decision_form": "integer_selection",
+          "permits_synthesis": false
+        },
+        "competition": "exclusive",
+        "coverage": "open",
+        "hypotheses": [
+          {
+            "statement": "The anatomical structure has one relevant component.",
+            "type": "integer_candidate",
+            "scope": "The stated anatomical description.",
+            "falsifiers": ["The description requires more than one component."],
+            "predictions": ["One component accounts for all described attachments."],
+            "answer_value": 1
+          },
+          {
+            "statement": "The anatomical structure has two relevant components.",
+            "type": "integer_candidate",
+            "scope": "The stated anatomical description.",
+            "falsifiers": ["The description requires a count other than two."],
+            "predictions": ["Two components account for all described attachments."],
+            "answer_value": 2
+          },
+          {
+            "statement": "The anatomical structure has three relevant components.",
+            "type": "integer_candidate",
+            "scope": "The stated anatomical description.",
+            "falsifiers": ["The description requires a count other than three."],
+            "predictions": ["Three components account for all described attachments."],
+            "answer_value": 3
+          }
+        ],
+        "coverage_statement": "The initial candidates are provisional and reserve unresolved mass for omitted counts.",
+        "coverage_limitation": "The initial frame omits counts greater than three."
+      }
+    },
+    {
+      "match": {"task": "design_probes", "cycle_id": "cycle_0"},
+      "response": {
+        "proposals": [
+          {
+            "purpose": "frame_coverage",
+            "target_hypotheses": ["H1", "H2", "H3"],
+            "inquiry_goal": "Check whether the stated attachments are compatible with any initially named count.",
+            "expected_observation": "A count constraint that either fits one named candidate or exposes an omitted count.",
+            "support_condition": {"H1": "The description fits one.", "H2": "The description fits two.", "H3": "The description fits three."},
+            "weaken_condition": {"H1": "The description excludes one.", "H2": "The description excludes two.", "H3": "The description excludes three."},
+            "reframe_condition": {"frame": "All named counts are anatomically inconsistent."},
+            "required_capability": "model_reasoning"
+          }
+        ]
+      }
+    },
+    {
+      "match": {"task": "execute_probe", "cycle_id": "recorded_open_mvp_cycle_1"},
+      "response": {
+        "raw_content": "MODEL REASONING: the anatomical description requires more attachments than counts one, two, or three can provide, so every initial candidate is inconsistent."
+      }
+    },
+    {
+      "match": {"task": "judge_evidence", "cycle_id": "recorded_open_mvp_cycle_1"},
+      "response": {
+        "evidence_type": "counterevidence",
+        "likelihoods": {"H1": "strongly_disconfirming", "H2": "strongly_disconfirming", "H3": "strongly_disconfirming"},
+        "unresolved_likelihood": "strongly_confirming",
+        "frame_fit": "supports_unresolved",
+        "unexplained_observation": "No initial count can satisfy the attachment pattern.",
+        "interpretation": "The first frame is missing a higher-count alternative.",
+        "quality_overrides": {}
+      }
+    },
+    {
+      "match": {"task": "expand_hypotheses", "cycle_id": "recorded_open_mvp_cycle_1"},
+      "response": {
+        "candidates": [
+          {
+            "statement": "The anatomical structure has four relevant components.",
+            "type": "integer_candidate",
+            "scope": "The stated anatomical description.",
+            "falsifiers": ["A required attachment is absent from a four-component account."],
+            "predictions": ["Four components account for the described attachment pattern."],
+            "answer_value": 4,
+            "why_current_frame_missed": "The initial frame stopped at three.",
+            "required_next_probe": "Compare the four-component and five-component attachment maps."
+          },
+          {
+            "statement": "The anatomical structure has five relevant components.",
+            "type": "integer_candidate",
+            "scope": "The stated anatomical description.",
+            "falsifiers": ["A required attachment is absent from a five-component account."],
+            "predictions": ["Five components account for the described attachment pattern."],
+            "answer_value": 5,
+            "why_current_frame_missed": "The initial frame stopped at three.",
+            "required_next_probe": "Compare the four-component and five-component attachment maps."
+          }
+        ]
+      }
+    },
+    {
+      "match": {"task": "design_probes", "cycle_id": "recorded_open_mvp_cycle_1"},
+      "response": {
+        "proposals": [
+          {
+            "purpose": "hypothesis_discrimination",
+            "target_hypotheses": ["H_exp_f2_1", "H_exp_f2_2"],
+            "inquiry_goal": "Discriminate the expanded four-component and five-component candidates against the retained frame.",
+            "expected_observation": "The attachment map fits four components and excludes five.",
+            "support_condition": {"H_exp_f2_1": "Four components cover every described attachment."},
+            "weaken_condition": {"H_exp_f2_2": "Five components introduce an unsupported attachment."},
+            "reframe_condition": {"frame": "Neither expanded count matches the attachment map."},
+            "required_capability": "model_reasoning"
+          }
+        ]
+      }
+    },
+    {
+      "match": {"task": "execute_probe", "cycle_id": "recorded_open_mvp_cycle_2", "probe_id": "P_recorded_open_mvp_cycle_1_expansion_610a0e2a228b_recorded_open_mvp_cycle_2"},
+      "response": {
+        "raw_content": "MODEL REASONING: the expansion follow-up finds that four components complete the attachment map while five requires an absent attachment."
+      }
+    },
+    {
+      "match": {"task": "execute_probe", "cycle_id": "recorded_open_mvp_cycle_2", "probe_id": "P_recorded_open_mvp_cycle_1_a70af361fe9c_recorded_open_mvp_cycle_2"},
+      "response": {
+        "raw_content": "MODEL REASONING: the expanded-candidate discriminator supports four components and excludes a fifth component."
+      }
+    },
+    {
+      "match": {"task": "judge_evidence", "cycle_id": "recorded_open_mvp_cycle_2", "signal_id": "S_recorded_open_mvp_cycle_2_P_recorded_open_mvp_cycle_1_expansion_610a0e2a228b_recorded_open_mvp_cycle_2"},
+      "response": {
+        "evidence_type": "supporting",
+        "likelihoods": {"H1": "strongly_disconfirming", "H2": "strongly_disconfirming", "H3": "strongly_disconfirming", "H_exp_f2_1": "strongly_confirming", "H_exp_f2_2": "strongly_disconfirming"},
+        "unresolved_likelihood": "strongly_disconfirming",
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
+        "interpretation": "The expanded four-component candidate explains the complete map better than five or the original counts.",
+        "quality_overrides": {}
+      }
+    },
+    {
+      "match": {"task": "judge_evidence", "cycle_id": "recorded_open_mvp_cycle_2", "signal_id": "S_recorded_open_mvp_cycle_2_P_recorded_open_mvp_cycle_1_a70af361fe9c_recorded_open_mvp_cycle_2"},
+      "response": {
+        "evidence_type": "supporting",
+        "likelihoods": {"H_exp_f2_1": "strongly_confirming", "H_exp_f2_2": "strongly_disconfirming"},
+        "unresolved_likelihood": "strongly_disconfirming",
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
+        "interpretation": "The expanded-candidate discriminator independently favors four over five.",
+        "quality_overrides": {}
+      }
+    }
+  ]
+}

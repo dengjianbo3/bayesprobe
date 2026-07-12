@@ -1,0 +1,121 @@
+{
+  "fixture_name": "model_scale_open_mvp_v0.1",
+  "metadata": {
+    "purpose": "offline open-question explanatory synthesis"
+  },
+  "responses": [
+    {
+      "match": {"task": "assess_task_admission"},
+      "response": {
+        "status": "admitted",
+        "epistemic_basis": ["The causal claim can be separated from confounders with matched comparisons."],
+        "proposed_task_kind": "claim_verification",
+        "answer_contract_outline": {
+          "objective": "Design a test for independent model-scale effects.",
+          "answer_value_type": "structured_text",
+          "decision_form": "experimental_protocol",
+          "permits_synthesis": true,
+          "required_sections": ["hypotheses", "controls", "metrics", "decision_rule", "limitations"]
+        },
+        "clarification_questions": [],
+        "reason": "The question admits a bounded experimental synthesis."
+      }
+    },
+    {
+      "match": {"task": "frame_open_question"},
+      "response": {
+        "task_kind": "claim_verification",
+        "answer_relationship": "synthesis",
+        "answer_contract": {
+          "objective": "Design a test for independent model-scale effects.",
+          "answer_value_type": "structured_text",
+          "answer_format": "experimental protocol",
+          "required_sections": ["hypotheses", "controls", "metrics", "decision_rule", "limitations"],
+          "decision_form": "experimental_protocol",
+          "permits_synthesis": true
+        },
+        "competition": "independent",
+        "coverage": "open",
+        "hypotheses": [
+          {
+            "statement": "Model scale has an independent positive effect when task, scaffold, and inference budget are matched.",
+            "type": "causal_claim",
+            "scope": "Matched agent task evaluations.",
+            "falsifiers": ["The matched scale coefficient is negligible or negative."],
+            "predictions": ["Larger models improve matched task outcomes."],
+            "answer_value": null
+          },
+          {
+            "statement": "Observed scale gains are materially explained by data, scaffold, or inference-budget confounding.",
+            "type": "confounding_explanation",
+            "scope": "Comparisons with unmatched resources.",
+            "falsifiers": ["The effect remains after all planned controls."],
+            "predictions": ["The apparent scale effect contracts after matching."],
+            "answer_value": null
+          },
+          {
+            "statement": "The scale effect depends on task family and tool conditions rather than holding uniformly.",
+            "type": "boundary_condition",
+            "scope": "Task families, tool reliability, and interaction depth.",
+            "falsifiers": ["All preregistered strata show the same effect."],
+            "predictions": ["Scale interacts with task and tool conditions."],
+            "answer_value": null
+          }
+        ],
+        "coverage_statement": "The frame covers direct scale effects, confounding, and boundary interactions.",
+        "coverage_limitation": "It does not exhaust every data-contamination or evaluation-leakage mechanism."
+      }
+    },
+    {
+      "match": {"task": "design_probes", "cycle_id": "cycle_0"},
+      "response": {
+        "proposals": [
+          {
+            "purpose": "hypothesis_discrimination",
+            "target_hypotheses": ["H1", "H2", "H3"],
+            "inquiry_goal": "Use a matched-budget factorial comparison to distinguish independent scale effects, confounding, and task interactions.",
+            "expected_observation": "Main effects and scale-by-task interaction estimates under matched resources.",
+            "support_condition": {"H1": "A preregistered scale coefficient remains positive after controls.", "H2": "The scale coefficient contracts after matching resources.", "H3": "Scale-by-task or scale-by-tool interactions are material."},
+            "weaken_condition": {"H1": "The controlled scale effect is negligible.", "H2": "Confound controls do not change the scale estimate.", "H3": "Interactions are consistently negligible."},
+            "reframe_condition": null,
+            "required_capability": "model_reasoning"
+          }
+        ]
+      }
+    },
+    {
+      "match": {"task": "execute_probe", "cycle_id": "recorded_open_mvp_cycle_1"},
+      "response": {
+        "raw_content": "MODEL REASONING: run a matched-budget factorial design with fixed scaffold, inference budget, task strata, preregistered outcome metrics, and explicit scale-by-task interaction checks."
+      }
+    },
+    {
+      "match": {"task": "judge_evidence", "cycle_id": "recorded_open_mvp_cycle_1"},
+      "response": {
+        "evidence_type": "supporting",
+        "likelihoods": {"H1": "weakly_confirming", "H2": "neutral", "H3": "weakly_confirming"},
+        "unresolved_likelihood": null,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": null,
+        "interpretation": "The proposed protocol names controls, metrics, and the interaction check needed to compare the frame hypotheses.",
+        "quality_overrides": {}
+      }
+    },
+    {
+      "match": {"task": "project_answer", "cycle_id": "recorded_open_mvp_cycle_1"},
+      "response": {
+        "answer": "Use a matched-budget factorial evaluation that treats scale effects, confounding, and task interactions as competing explanations to be measured rather than assumed.",
+        "contract_sections": {
+          "hypotheses": "Estimate the independent scale effect, the confounded alternative, and scale-by-condition interactions.",
+          "controls": "Fix scaffold, inference budget, task allocation, and evaluation procedures across model sizes.",
+          "metrics": "Report preregistered task success, cost-normalized success, and stratified error rates.",
+          "decision_rule": "Treat a stable controlled scale coefficient and material interaction estimates as the discriminating outcomes.",
+          "limitations": "This design cannot rule out every contamination or leakage mechanism without separate audits."
+        },
+        "main_uncertainty": "The protocol is a design recommendation, not an executed experiment.",
+        "weakest_assumption": "Matched resource controls adequately represent the relevant deployment conditions.",
+        "cited_evidence_ids": []
+      }
+    }
+  ]
+}
