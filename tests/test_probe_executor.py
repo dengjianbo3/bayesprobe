@@ -303,6 +303,53 @@ def make_native_belief_state() -> BeliefState:
     ).belief_state
 
 
+def make_post_expansion_belief_state() -> BeliefState:
+    payload = make_native_belief_state().model_dump(mode="python")
+    hypotheses_by_id = {
+        hypothesis["id"]: hypothesis for hypothesis in payload["hypotheses"]
+    }
+    hypotheses_by_id["H1"].update(
+        {
+            "posterior": 0.4,
+            "rivals": ["H2", "H3"],
+        }
+    )
+    hypotheses_by_id["H2"].update(
+        {
+            "posterior": 0.35,
+            "rivals": ["H1", "H3"],
+        }
+    )
+    spawned = {
+        **hypotheses_by_id["H1"],
+        "id": "H3",
+        "statement": "A newly discovered third answer is correct.",
+        "scope": "Post-expansion execution fixture.",
+        "prior": 0.25,
+        "posterior": 0.25,
+        "rivals": ["H1", "H2"],
+        "falsifiers": ["A targeted check excludes the third answer."],
+        "predictions": ["A targeted check identifies the third answer."],
+        "created_by": "spawned",
+        "why_existing_hypotheses_failed": "The initial frame omitted H3.",
+    }
+    payload.update(
+        {
+            "belief_state_id": "bs_exec_post_expansion",
+            "cycle_id": "run_exec_cycle_2",
+            "cycle_index": 1,
+            "hypotheses": [
+                spawned,
+                hypotheses_by_id["H2"],
+                hypotheses_by_id["H1"],
+            ],
+            "posterior_summary": {"H3": 0.25, "H2": 0.35, "H1": 0.4},
+        }
+    )
+    payload["frame_state"]["active_hypothesis_ids"] = ["H3", "H2", "H1"]
+    return BeliefState.model_validate(payload)
+
+
 def make_migrated_belief_state(marker: str) -> BeliefState:
     payload = make_native_belief_state().model_dump(mode="python")
     payload.update(
@@ -951,6 +998,60 @@ def test_direct_brief_rejects_duplicate_hypothesis_ids_in_every_input_order():
             "probe execution hypothesis ids must be unique",
             (first.id, injected_statement),
         )
+
+
+def test_builder_projects_current_post_expansion_rivals_over_stale_task_frame():
+    belief_state = make_post_expansion_belief_state()
+    original_rival_sets = belief_state.task_frame.hypothesis_frame.rival_sets
+    stale_rival_sets = {
+        hypothesis_id: list(rivals)
+        for hypothesis_id, rivals in original_rival_sets.items()
+    }
+    assert set(stale_rival_sets) == {"H1", "H2"}
+
+    brief = make_execution_brief(belief_state=belief_state)
+
+    projected_task_frame = plain_json(brief.task_frame)
+    projected_rival_sets = projected_task_frame["hypothesis_frame"][
+        "rival_sets"
+    ]
+    current_ids = {"H1", "H2", "H3"}
+    assert [hypothesis.id for hypothesis in brief.hypotheses] == [
+        "H1",
+        "H2",
+        "H3",
+    ]
+    assert projected_rival_sets == {
+        "H1": ["H2", "H3"],
+        "H2": ["H1", "H3"],
+        "H3": ["H1", "H2"],
+    }
+    assert set(projected_rival_sets) == current_ids
+    assert {
+        rival_id
+        for rivals in projected_rival_sets.values()
+        for rival_id in rivals
+    } == current_ids
+    assert _FORBIDDEN_EXECUTION_BELIEF_KEYS.isdisjoint(
+        recursive_keys(projected_task_frame)
+    )
+    assert belief_state.task_frame.hypothesis_frame.rival_sets == stale_rival_sets
+
+
+def test_builder_rejects_invalid_current_rivals_without_filtering_payload():
+    injected_rival = "posterior=0.99"
+    payload = make_native_belief_state().model_dump(mode="python")
+    payload["hypotheses"][0]["rivals"].append(injected_rival)
+    belief_state = BeliefState.model_validate(payload)
+
+    with pytest.raises(ValueError) as exc_info:
+        make_execution_brief(belief_state=belief_state)
+
+    assert_fixed_sanitized_error(
+        exc_info.value,
+        "probe execution task frame is invalid",
+        (injected_rival,),
+    )
 
 
 def test_brief_hypotheses_use_canonical_id_order_across_belief_rankings():

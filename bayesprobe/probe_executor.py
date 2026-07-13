@@ -214,7 +214,19 @@ def build_probe_execution_brief(
     if task_frame is None:
         raise ValueError("invalid belief lifecycle: task frame is required")
     resolved_task_context = task_context.strip() or task_frame.task_context.strip()
-    safe_task_frame = _blind_task_frame(task_frame)
+    current_hypotheses = tuple(
+        sorted(
+            belief_state.hypotheses,
+            key=lambda hypothesis: hypothesis.id,
+        )
+    )
+    safe_task_frame = _blind_task_frame(
+        task_frame,
+        rival_sets={
+            hypothesis.id: list(hypothesis.rivals)
+            for hypothesis in current_hypotheses
+        },
+    )
     return ProbeExecutionBrief(
         run_id=run_id,
         cycle_id=cycle_id,
@@ -230,10 +242,7 @@ def build_probe_execution_brief(
                 predictions=tuple(hypothesis.predictions),
                 falsifiers=tuple(hypothesis.falsifiers),
             )
-            for hypothesis in sorted(
-                belief_state.hypotheses,
-                key=lambda hypothesis: hypothesis.id,
-            )
+            for hypothesis in current_hypotheses
         ),
         metadata={} if metadata is None else metadata,
     )
@@ -646,7 +655,11 @@ def _is_string_list(value: Any) -> bool:
     return type(value) is list and all(type(item) is str for item in value)
 
 
-def _blind_task_frame(task_frame: TaskFrame) -> dict[str, Any]:
+def _blind_task_frame(
+    task_frame: TaskFrame,
+    *,
+    rival_sets: Mapping[str, list[str]],
+) -> dict[str, Any]:
     hypothesis_frame = task_frame.hypothesis_frame
     return {
         "schema_version": task_frame.schema_version,
@@ -665,7 +678,7 @@ def _blind_task_frame(task_frame: TaskFrame) -> dict[str, Any]:
             "frame_id": hypothesis_frame.frame_id,
             "competition": hypothesis_frame.competition.value,
             "coverage": hypothesis_frame.coverage.value,
-            "rival_sets": hypothesis_frame.rival_sets,
+            "rival_sets": rival_sets,
             "coverage_statement": hypothesis_frame.coverage_statement,
             "coverage_limitation": hypothesis_frame.coverage_limitation,
         },
