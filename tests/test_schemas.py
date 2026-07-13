@@ -806,6 +806,225 @@ def test_contribution_delta_roots_match_its_root_id():
         )
 
 
+def test_contribution_delta_rejects_fabricated_numeric_delta():
+    previous = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood={"H1": 0.1},
+    )
+    current = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=2,
+        assessment_event_ids=["E1", "E2"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood={"H1": 0.4},
+    )
+
+    with pytest.raises(ValueError, match="per_hypothesis_delta"):
+        EvidenceContributionDelta(
+            contribution_root_id="eroot:model-run",
+            mode=EvidenceContributionMode.REVISE_ROOT,
+            previous_contribution=previous,
+            current_contribution=current,
+            per_hypothesis_delta={"H1": 0.4},
+            caused_by_event_ids=["E2"],
+        )
+
+
+def test_contribution_delta_rejects_fabricated_unresolved_delta():
+    previous = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        unresolved_log_likelihood=0.1,
+    )
+    current = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=2,
+        assessment_event_ids=["E1", "E2"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        unresolved_log_likelihood=0.4,
+    )
+
+    with pytest.raises(ValueError, match="unresolved_delta"):
+        EvidenceContributionDelta(
+            contribution_root_id="eroot:model-run",
+            mode=EvidenceContributionMode.REVISE_ROOT,
+            previous_contribution=previous,
+            current_contribution=current,
+            unresolved_delta=0.4,
+            caused_by_event_ids=["E2"],
+        )
+
+
+def test_contribution_delta_new_root_rejects_previous_contribution():
+    contribution = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood={"H1": 0.1},
+    )
+
+    with pytest.raises(ValueError, match="new_root"):
+        EvidenceContributionDelta(
+            contribution_root_id="eroot:model-run",
+            mode=EvidenceContributionMode.NEW_ROOT,
+            previous_contribution=contribution,
+            current_contribution=contribution,
+            per_hypothesis_delta={"H1": 0.0},
+            caused_by_event_ids=["E1"],
+        )
+
+
+def test_contribution_delta_retract_root_rejects_active_current_contribution():
+    previous = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood={"H1": 0.1},
+    )
+    current = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=2,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood={"H1": 0.0},
+        active=True,
+    )
+
+    with pytest.raises(ValueError, match="retract_root"):
+        EvidenceContributionDelta(
+            contribution_root_id="eroot:model-run",
+            mode=EvidenceContributionMode.RETRACT_ROOT,
+            previous_contribution=previous,
+            current_contribution=current,
+            per_hypothesis_delta={"H1": -0.1},
+            caused_by_event_ids=["E2"],
+        )
+
+
+def test_contribution_delta_no_change_rejects_nonzero_delta():
+    contribution = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood={"H1": 0.1},
+    )
+
+    with pytest.raises(ValueError, match="no_change"):
+        EvidenceContributionDelta(
+            contribution_root_id="eroot:model-run",
+            mode=EvidenceContributionMode.NO_CHANGE,
+            previous_contribution=contribution,
+            current_contribution=contribution,
+            per_hypothesis_delta={"H1": 0.1},
+            caused_by_event_ids=["E2"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "previous", "current", "per_hypothesis_delta", "unresolved_delta"),
+    [
+        (
+            EvidenceContributionMode.NEW_ROOT,
+            None,
+            EvidenceRootContribution(
+                contribution_root_id="eroot:model-run",
+                revision=1,
+                assessment_event_ids=["E1"],
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                per_hypothesis_log_likelihood={"H1": 0.2},
+                unresolved_log_likelihood=0.1,
+            ),
+            {"H1": 0.2},
+            0.1,
+        ),
+        (
+            EvidenceContributionMode.REVISE_ROOT,
+            EvidenceRootContribution(
+                contribution_root_id="eroot:model-run",
+                revision=1,
+                assessment_event_ids=["E1"],
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                per_hypothesis_log_likelihood={"H1": 0.1},
+            ),
+            EvidenceRootContribution(
+                contribution_root_id="eroot:model-run",
+                revision=2,
+                assessment_event_ids=["E1", "E2"],
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                per_hypothesis_log_likelihood={"H1": 0.3, "H2": -0.2},
+            ),
+            {"H1": 0.2, "H2": -0.2},
+            None,
+        ),
+        (
+            EvidenceContributionMode.RETRACT_ROOT,
+            EvidenceRootContribution(
+                contribution_root_id="eroot:model-run",
+                revision=1,
+                assessment_event_ids=["E1"],
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                per_hypothesis_log_likelihood={"H1": 0.1},
+                unresolved_log_likelihood=-0.2,
+            ),
+            EvidenceRootContribution(
+                contribution_root_id="eroot:model-run",
+                revision=2,
+                assessment_event_ids=["E1"],
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                active=False,
+            ),
+            {"H1": -0.1},
+            0.2,
+        ),
+        (
+            EvidenceContributionMode.NO_CHANGE,
+            EvidenceRootContribution(
+                contribution_root_id="eroot:model-run",
+                revision=1,
+                assessment_event_ids=["E1"],
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                per_hypothesis_log_likelihood={"H1": 0.1},
+            ),
+            EvidenceRootContribution(
+                contribution_root_id="eroot:model-run",
+                revision=2,
+                assessment_event_ids=["E1", "E2"],
+                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                per_hypothesis_log_likelihood={"H1": 0.1},
+            ),
+            {},
+            None,
+        ),
+    ],
+)
+def test_contribution_delta_accepts_coherent_modes(
+    mode,
+    previous,
+    current,
+    per_hypothesis_delta,
+    unresolved_delta,
+):
+    delta = EvidenceContributionDelta(
+        contribution_root_id="eroot:model-run",
+        mode=mode,
+        previous_contribution=previous,
+        current_contribution=current,
+        per_hypothesis_delta=per_hypothesis_delta,
+        unresolved_delta=unresolved_delta,
+        caused_by_event_ids=["E2"],
+    )
+
+    assert delta.mode is mode
+
+
 def test_epistemic_progress_defaults_to_zero_reconciliation_progress():
     assert EpistemicProgress().model_dump() == {
         "new_root_count": 0,

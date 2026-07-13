@@ -698,6 +698,18 @@ def _validate_finite_log_likelihood_map(
     return result
 
 
+_CONTRIBUTION_DELTA_ABS_TOLERANCE = 1e-12
+
+
+def _contribution_values_match(left: float, right: float) -> bool:
+    return math.isclose(
+        left,
+        right,
+        rel_tol=0.0,
+        abs_tol=_CONTRIBUTION_DELTA_ABS_TOLERANCE,
+    )
+
+
 class EvidenceContributionMode(StrEnum):
     NEW_ROOT = "new_root"
     REVISE_ROOT = "revise_root"
@@ -754,6 +766,40 @@ class EvidenceRootContribution(StrictTaskModel):
         return self
 
 
+def _contribution_vectors_match(
+    left: EvidenceRootContribution,
+    right: EvidenceRootContribution,
+) -> bool:
+    hypothesis_ids = set(left.per_hypothesis_log_likelihood).union(
+        right.per_hypothesis_log_likelihood
+    )
+    if any(
+        not _contribution_values_match(
+            left.per_hypothesis_log_likelihood.get(hypothesis_id, 0.0),
+            right.per_hypothesis_log_likelihood.get(hypothesis_id, 0.0),
+        )
+        for hypothesis_id in hypothesis_ids
+    ):
+        return False
+    return _contribution_values_match(
+        left.unresolved_log_likelihood or 0.0,
+        right.unresolved_log_likelihood or 0.0,
+    )
+
+
+def _contribution_vector_is_zero(contribution: EvidenceRootContribution) -> bool:
+    return (
+        all(
+            _contribution_values_match(value, 0.0)
+            for value in contribution.per_hypothesis_log_likelihood.values()
+        )
+        and _contribution_values_match(
+            contribution.unresolved_log_likelihood or 0.0,
+            0.0,
+        )
+    )
+
+
 class EvidenceContributionDelta(StrictTaskModel):
     contribution_root_id: str
     mode: EvidenceContributionMode
@@ -794,6 +840,87 @@ class EvidenceContributionDelta(StrictTaskModel):
             contribution_roots.add(self.previous_contribution.contribution_root_id)
         if contribution_roots != {self.contribution_root_id}:
             raise ValueError("contribution roots must match contribution_root_id")
+
+        previous = self.previous_contribution
+        if self.mode is EvidenceContributionMode.NEW_ROOT:
+            if previous is not None or not self.current_contribution.active:
+                raise ValueError(
+                    "new_root mode requires no previous contribution and an active current contribution"
+                )
+        elif self.mode is EvidenceContributionMode.REVISE_ROOT:
+            if previous is None or not self.current_contribution.active:
+                raise ValueError(
+                    "revise_root mode requires a previous contribution and an active current contribution"
+                )
+            if _contribution_vectors_match(previous, self.current_contribution):
+                raise ValueError(
+                    "revise_root mode requires a changed contribution vector"
+                )
+        elif self.mode is EvidenceContributionMode.RETRACT_ROOT:
+            if previous is None or not previous.active:
+                raise ValueError(
+                    "retract_root mode requires an active previous contribution"
+                )
+            if self.current_contribution.active or not _contribution_vector_is_zero(
+                self.current_contribution
+            ):
+                raise ValueError(
+                    "retract_root mode requires an inactive zero current contribution"
+                )
+            if _contribution_vector_is_zero(previous):
+                raise ValueError(
+                    "retract_root mode requires a nonzero previous contribution"
+                )
+        elif self.mode is EvidenceContributionMode.NO_CHANGE:
+            if previous is None:
+                raise ValueError("no_change mode requires a previous contribution")
+            if not _contribution_vectors_match(previous, self.current_contribution):
+                raise ValueError("no_change mode requires equal contribution vectors")
+            if (
+                any(
+                    not _contribution_values_match(delta, 0.0)
+                    for delta in self.per_hypothesis_delta.values()
+                )
+                or not _contribution_values_match(
+                    self.unresolved_delta or 0.0,
+                    0.0,
+                )
+            ):
+                raise ValueError("no_change mode requires zero deltas")
+
+        previous_by_hypothesis = (
+            {} if previous is None else previous.per_hypothesis_log_likelihood
+        )
+        hypothesis_ids = set(previous_by_hypothesis).union(
+            self.current_contribution.per_hypothesis_log_likelihood,
+            self.per_hypothesis_delta,
+        )
+        for hypothesis_id in hypothesis_ids:
+            expected_delta = (
+                self.current_contribution.per_hypothesis_log_likelihood.get(
+                    hypothesis_id,
+                    0.0,
+                )
+                - previous_by_hypothesis.get(hypothesis_id, 0.0)
+            )
+            actual_delta = self.per_hypothesis_delta.get(hypothesis_id, 0.0)
+            if not _contribution_values_match(actual_delta, expected_delta):
+                raise ValueError(
+                    "per_hypothesis_delta must equal current contribution minus previous contribution"
+                )
+
+        expected_unresolved_delta = (
+            (self.current_contribution.unresolved_log_likelihood or 0.0)
+            - (0.0 if previous is None else previous.unresolved_log_likelihood or 0.0)
+        )
+        actual_unresolved_delta = self.unresolved_delta or 0.0
+        if not _contribution_values_match(
+            actual_unresolved_delta,
+            expected_unresolved_delta,
+        ):
+            raise ValueError(
+                "unresolved_delta must equal current contribution minus previous contribution"
+            )
         if _contains_secret_material(self.model_dump(mode="python")):
             raise ValueError("evidence contribution delta must not contain secret material")
         return self
