@@ -27,6 +27,7 @@ from bayesprobe.schemas import (
     HypothesisStatus,
     LikelihoodBand,
     UpdateDirection,
+    is_secret_like_value,
 )
 
 _MIN_PROBABILITY = 1e-12
@@ -345,6 +346,8 @@ def legacy_event_contribution_deltas(
     events: list[EvidenceEvent],
 ) -> list[EvidenceContributionDelta]:
     """Adapt accepted historical Events into one synthetic root apiece."""
+    if any(is_secret_like_value(event.id) for event in events):
+        raise ValueError("secret-like legacy event id is not allowed")
     deltas: list[EvidenceContributionDelta] = []
     for event in sorted(events, key=lambda item: item.id):
         if event.discard_reason is not None:
@@ -437,9 +440,18 @@ def _validate_contribution_deltas(
                 "unknown hypothesis coordinate(s): "
                 + ", ".join(sorted(unknown_ids))
             )
-        if not open_exclusive and delta.unresolved_delta is not None:
+        has_unresolved_coordinate = (
+            delta.unresolved_delta is not None
+            or delta.current_contribution.unresolved_log_likelihood is not None
+            or (
+                delta.previous_contribution is not None
+                and delta.previous_contribution.unresolved_log_likelihood is not None
+            )
+        )
+        if not open_exclusive and has_unresolved_coordinate:
             raise ValueError(
-                "unresolved delta is valid only for an exclusive-open frame"
+                "unresolved delta or contribution coordinate is valid only "
+                "for an exclusive-open frame"
             )
     return validated
 
@@ -499,16 +511,41 @@ class CoverageAwareBeliefSolver:
             if _participates_in_distribution(hypothesis)
         ]
         active_ids = [hypothesis.id for hypothesis in active_hypotheses]
+        active_id_set = set(active_ids)
         unresolved_mass = frame_state.unresolved_alternative_mass
-        if (
+        open_exclusive = (
             frame_state.competition == HypothesisCompetition.EXCLUSIVE
             and frame_state.coverage == HypothesisCoverage.OPEN
-        ):
+        )
+        if open_exclusive:
             if unresolved_mass is None:
                 raise ValueError("exclusive-open frame requires unresolved mass")
             retired_ids = set(frame_state.active_hypothesis_ids).difference(active_ids)
             if retired_ids:
                 raise ValueError("retirement transfer requires audit context")
+        effective_deltas = [
+            delta
+            for delta in contribution_deltas
+            if delta.mode != EvidenceContributionMode.NO_CHANGE
+            and (
+                any(
+                    hypothesis_id in active_id_set and value != 0.0
+                    for hypothesis_id, value in delta.per_hypothesis_delta.items()
+                )
+                or (
+                    open_exclusive
+                    and delta.unresolved_delta is not None
+                    and delta.unresolved_delta != 0.0
+                )
+            )
+        ]
+        if not effective_deltas:
+            return BeliefSolveResult(
+                hypotheses=belief_state.hypotheses,
+                frame_state=frame_state,
+                belief_updates=[],
+                frame_mass_updates=[],
+            )
         working_frame_state = frame_state.model_copy(
             update={
                 "active_hypothesis_ids": active_ids,
@@ -519,14 +556,14 @@ class CoverageAwareBeliefSolver:
             return self._solve_independent_deltas(
                 working_hypotheses,
                 working_frame_state,
-                contribution_deltas,
+                effective_deltas,
                 run_id=run_id,
                 cycle_id=cycle_id,
             )
         return self._solve_exclusive_deltas(
             working_hypotheses,
             working_frame_state,
-            contribution_deltas,
+            effective_deltas,
             run_id=run_id,
             cycle_id=cycle_id,
         )
@@ -652,14 +689,17 @@ class CoverageAwareBeliefSolver:
         effective_deltas = [
             delta
             for delta in contribution_deltas
-            if any(
-                hypothesis_id in participant_ids and value != 0.0
-                for hypothesis_id, value in delta.per_hypothesis_delta.items()
-            )
-            or (
-                open_frame
-                and delta.unresolved_delta is not None
-                and delta.unresolved_delta != 0.0
+            if delta.mode != EvidenceContributionMode.NO_CHANGE
+            and (
+                any(
+                    hypothesis_id in participant_ids and value != 0.0
+                    for hypothesis_id, value in delta.per_hypothesis_delta.items()
+                )
+                or (
+                    open_frame
+                    and delta.unresolved_delta is not None
+                    and delta.unresolved_delta != 0.0
+                )
             )
         ]
         if not effective_deltas:
@@ -829,7 +869,8 @@ class CoverageAwareBeliefSolver:
         effective_deltas = [
             delta
             for delta in contribution_deltas
-            if any(
+            if delta.mode != EvidenceContributionMode.NO_CHANGE
+            and any(
                 hypothesis_id in active_by_id and value != 0.0
                 for hypothesis_id, value in delta.per_hypothesis_delta.items()
             )
