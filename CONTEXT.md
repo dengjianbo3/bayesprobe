@@ -213,8 +213,20 @@ The source, derivation root, correlation group, parent signals, and content iden
 _Avoid_: source label only, cycle-local duplicate flag
 
 **Model Reasoning Signal**:
-A signal produced by model inference without external retrieval, tool observation, or source verification. It may inform belief conservatively but is not independent external-world evidence.
+A Signal produced by model inference without external retrieval, tool observation, or source verification. It remains inside the one Signal-to-Evidence path and may revise one run-scoped Model Reasoning Root, but repeated model calls from that root do not accumulate as independent support.
 _Avoid_: search result, verified evidence, tool result
+
+**Evidence Root**:
+The canonical unit of potentially independent information behind one or more Signals and Evidence Events. An Evidence Root owns one current likelihood contribution to Belief State; later assessments from the same root revise that contribution instead of adding another independent contribution.
+_Avoid_: one root per cycle, one root per paraphrase, correlation cap as repeated evidence allowance
+
+**Evidence Root Revision**:
+The replacement, weakening, reversal, or retraction of an Evidence Root's current likelihood contribution. Belief Update applies only the difference between the root's new and previous contributions.
+_Avoid_: appending a fresh Bayes factor for every same-root Event, freezing the first assessment forever
+
+**No-New-Information Rule**:
+If a cycle adds no independent Evidence Root, produces no nonzero Evidence Root Revision, and performs no hypothesis-frame revision, it cannot increase confidence. Autonomous mode should stop for epistemic stagnation or seek a materially different capability.
+_Avoid_: confidence gain from repetition, max-cycle self-confirmation
 
 **Probe Designer**:
 The BayesProbe module that proposes hypothesis-conditioned inquiries from the Task Frame, current Belief State, Evidence Memory, uncertainty, and available capabilities.
@@ -229,7 +241,7 @@ The run-scoped declaration of available probe capabilities and their provenance,
 _Avoid_: model impersonating tools, hidden capability fallback
 
 **Evidence Memory**:
-The compact cross-cycle record of accepted evidence identity, provenance, correlation, and lifecycle relevance needed for deterministic future belief revision.
+The compact cross-cycle record of accepted evidence identity, provenance, Evidence Roots, current root contributions, and lifecycle relevance needed for deterministic future belief revision.
 _Avoid_: raw chain of thought, ledger replacement, cycle-local seen set
 
 **Discovery Evidence**:
