@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import math
 from typing import Any
 
+from bayesprobe.evidence_roots import LIKELIHOOD_RATIO_BY_BAND
 from bayesprobe.kernel_config import OpenCoveragePolicy
 
 from bayesprobe.schemas import (
     BeliefState,
     BeliefUpdate,
+    EpistemicOrigin,
+    EvidenceContributionDelta,
+    EvidenceContributionMode,
     EvidenceEvent,
+    EvidenceRootContribution,
+    EvolutionOperation,
     FrameMassUpdate,
     FrameState,
     Hypothesis,
@@ -19,20 +26,8 @@ from bayesprobe.schemas import (
     HypothesisRelation,
     HypothesisStatus,
     LikelihoodBand,
-    EvolutionOperation,
     UpdateDirection,
 )
-
-
-LR_BY_BAND: dict[LikelihoodBand, float] = {
-    LikelihoodBand.STRONGLY_DISCONFIRMING: 0.1,
-    LikelihoodBand.MODERATELY_DISCONFIRMING: 0.3,
-    LikelihoodBand.WEAKLY_DISCONFIRMING: 0.7,
-    LikelihoodBand.NEUTRAL: 1.0,
-    LikelihoodBand.WEAKLY_CONFIRMING: 1.5,
-    LikelihoodBand.MODERATELY_CONFIRMING: 3.0,
-    LikelihoodBand.STRONGLY_CONFIRMING: 10.0,
-}
 
 _MIN_PROBABILITY = 1e-12
 _DISTRIBUTION_PRECISION = 4
@@ -53,7 +48,7 @@ class BeliefSolveResult:
 
 
 def likelihood_band_to_lr(band: LikelihoodBand) -> float:
-    return LR_BY_BAND[band]
+    return LIKELIHOOD_RATIO_BY_BAND[band]
 
 
 def _direction(prior: float, posterior: float) -> UpdateDirection:
@@ -81,6 +76,11 @@ def _softmax(scores: dict[str, float]) -> dict[str, float]:
         hypothesis_id: value / total
         for hypothesis_id, value in exponentials.items()
     }
+
+
+def _require_finite_scores(scores: dict[str, float]) -> None:
+    if not all(math.isfinite(score) for score in scores.values()):
+        raise ValueError("belief update arithmetic must remain finite")
 
 
 def _round_distribution(
@@ -313,22 +313,6 @@ def _sigmoid(value: float) -> float:
     return exponential / (1.0 + exponential)
 
 
-def _independent_event_posterior(
-    prior: float,
-    band: LikelihoodBand,
-    weight: float,
-    complexity_delta: float,
-    ad_hoc_delta: float,
-) -> float:
-    score = (
-        _logit(prior)
-        + math.log(likelihood_band_to_lr(band)) * weight
-        - complexity_delta
-        - ad_hoc_delta
-    )
-    return round(_sigmoid(score), _DISTRIBUTION_PRECISION)
-
-
 def _penalty_deltas(hypothesis: Hypothesis) -> tuple[float, float]:
     return (
         max(
@@ -357,6 +341,109 @@ def mark_replayed_evidence_events(
     return marked
 
 
+def legacy_event_contribution_deltas(
+    events: list[EvidenceEvent],
+) -> list[EvidenceContributionDelta]:
+    """Adapt accepted historical Events into one synthetic root apiece."""
+    deltas: list[EvidenceContributionDelta] = []
+    for event in sorted(events, key=lambda item: item.id):
+        if event.discard_reason is not None:
+            continue
+        if (
+            event.contribution_root_id is not None
+            and event.effective_update_weight is None
+        ):
+            raise ValueError(
+                "legacy adapter rejects root-bound evidence without an explicit weight"
+            )
+        weight = _effective_update_weight(event)
+        digest = hashlib.sha256(
+            b"bayesprobe:legacy-event-root:v1\x00" + event.id.encode("utf-8")
+        ).hexdigest()
+        root_id = f"legacy-event-root:sha256:{digest}"
+        hypothesis_values = {
+            hypothesis_id: weight * math.log(LIKELIHOOD_RATIO_BY_BAND[band])
+            for hypothesis_id, band in sorted(event.likelihoods.items())
+        }
+        unresolved_value = (
+            None
+            if event.unresolved_likelihood is None
+            else weight
+            * math.log(LIKELIHOOD_RATIO_BY_BAND[event.unresolved_likelihood])
+        )
+        contribution = EvidenceRootContribution(
+            contribution_root_id=root_id,
+            revision=1,
+            assessment_event_ids=[event.id],
+            epistemic_origin=(
+                event.epistemic_origin or EpistemicOrigin.MODEL_REASONING
+            ),
+            per_hypothesis_log_likelihood=hypothesis_values,
+            unresolved_log_likelihood=unresolved_value,
+            active=True,
+        )
+        deltas.append(
+            EvidenceContributionDelta(
+                contribution_root_id=root_id,
+                mode=EvidenceContributionMode.NEW_ROOT,
+                current_contribution=contribution,
+                per_hypothesis_delta=hypothesis_values,
+                unresolved_delta=unresolved_value,
+                caused_by_event_ids=[event.id],
+            )
+        )
+    return deltas
+
+
+def _validate_contribution_deltas(
+    belief_state: BeliefState,
+    contribution_deltas: list[EvidenceContributionDelta],
+) -> list[EvidenceContributionDelta]:
+    validated: list[EvidenceContributionDelta] = []
+    for delta in contribution_deltas:
+        if not isinstance(delta, EvidenceContributionDelta):
+            raise TypeError(
+                "coverage-aware solving requires validated "
+                "EvidenceContributionDelta objects"
+            )
+        validated.append(
+            EvidenceContributionDelta.model_validate(
+                delta.model_dump(mode="python")
+            )
+        )
+    validated.sort(key=lambda item: item.contribution_root_id)
+    root_ids = [item.contribution_root_id for item in validated]
+    if len(root_ids) != len(set(root_ids)):
+        raise ValueError("duplicate contribution root ids are not allowed")
+
+    known_hypothesis_ids = {item.id for item in belief_state.hypotheses}
+    open_exclusive = (
+        belief_state.frame_state is not None
+        and belief_state.frame_state.competition == HypothesisCompetition.EXCLUSIVE
+        and belief_state.frame_state.coverage == HypothesisCoverage.OPEN
+    )
+    for delta in validated:
+        coordinate_ids = set(delta.per_hypothesis_delta)
+        coordinate_ids.update(
+            delta.current_contribution.per_hypothesis_log_likelihood
+        )
+        if delta.previous_contribution is not None:
+            coordinate_ids.update(
+                delta.previous_contribution.per_hypothesis_log_likelihood
+            )
+        unknown_ids = coordinate_ids.difference(known_hypothesis_ids)
+        if unknown_ids:
+            raise ValueError(
+                "unknown hypothesis coordinate(s): "
+                + ", ".join(sorted(unknown_ids))
+            )
+        if not open_exclusive and delta.unresolved_delta is not None:
+            raise ValueError(
+                "unresolved delta is valid only for an exclusive-open frame"
+            )
+    return validated
+
+
 def solve_updates(
     run_id: str,
     cycle_id: str,
@@ -370,9 +457,10 @@ def solve_updates(
         raise ValueError("belief state requires hypothesis relation metadata")
     from bayesprobe.migrations import migrate_belief_state_v0_1
 
+    events = mark_replayed_evidence_events(belief_state, events)
     result = CoverageAwareBeliefSolver().solve(
         migrate_belief_state_v0_1(belief_state),
-        events,
+        legacy_event_contribution_deltas(events),
         run_id=run_id,
         cycle_id=cycle_id,
     )
@@ -390,7 +478,7 @@ class CoverageAwareBeliefSolver:
     def solve(
         self,
         belief_state: BeliefState,
-        events: list[EvidenceEvent],
+        contribution_deltas: list[EvidenceContributionDelta],
         *,
         run_id: str,
         cycle_id: str,
@@ -400,7 +488,10 @@ class CoverageAwareBeliefSolver:
         if belief_state.task_frame is None or belief_state.frame_state is None:
             raise ValueError("v0.2 belief state requires task and frame state")
         frame_state = belief_state.frame_state
-        events = mark_replayed_evidence_events(belief_state, events)
+        contribution_deltas = _validate_contribution_deltas(
+            belief_state,
+            contribution_deltas,
+        )
         working_hypotheses = list(belief_state.hypotheses)
         active_hypotheses = [
             hypothesis
@@ -424,44 +515,20 @@ class CoverageAwareBeliefSolver:
                 "unresolved_alternative_mass": unresolved_mass,
             }
         )
-        belief_updates: list[BeliefUpdate] = []
-        frame_mass_updates: list[FrameMassUpdate] = []
-
-        for event_index, event in enumerate(events, start=1):
-            if event.discard_reason is not None:
-                continue
-            if working_frame_state.competition == HypothesisCompetition.INDEPENDENT:
-                working_hypotheses, event_updates = self._solve_independent_event(
-                    working_hypotheses,
-                    event,
-                    run_id=run_id,
-                    cycle_id=cycle_id,
-                    event_index=event_index,
-                )
-                belief_updates.extend(event_updates)
-                continue
-            (
+        if working_frame_state.competition == HypothesisCompetition.INDEPENDENT:
+            return self._solve_independent_deltas(
                 working_hypotheses,
                 working_frame_state,
-                event_updates,
-                frame_mass_update,
-            ) = self._solve_exclusive_event(
-                working_hypotheses,
-                working_frame_state,
-                event,
+                contribution_deltas,
                 run_id=run_id,
                 cycle_id=cycle_id,
-                event_index=event_index,
             )
-            belief_updates.extend(event_updates)
-            if frame_mass_update is not None:
-                frame_mass_updates.append(frame_mass_update)
-
-        return BeliefSolveResult(
-            hypotheses=working_hypotheses,
-            frame_state=working_frame_state,
-            belief_updates=belief_updates,
-            frame_mass_updates=frame_mass_updates,
+        return self._solve_exclusive_deltas(
+            working_hypotheses,
+            working_frame_state,
+            contribution_deltas,
+            run_id=run_id,
+            cycle_id=cycle_id,
         )
 
     def reconcile_retirements(
@@ -566,177 +633,316 @@ class CoverageAwareBeliefSolver:
             ],
         )
 
-    def _solve_exclusive_event(
+    def _solve_exclusive_deltas(
         self,
         hypotheses: list[Hypothesis],
         frame_state: FrameState,
-        event: EvidenceEvent,
+        contribution_deltas: list[EvidenceContributionDelta],
         *,
         run_id: str,
         cycle_id: str,
-        event_index: int,
-    ) -> tuple[list[Hypothesis], FrameState, list[BeliefUpdate], FrameMassUpdate | None]:
+    ) -> BeliefSolveResult:
         participants = [
             hypothesis
             for hypothesis in hypotheses
             if _participates_in_distribution(hypothesis)
         ]
-        if not participants:
-            return hypotheses, frame_state, [], None
-        weight = _effective_update_weight(event)
+        participant_ids = {hypothesis.id for hypothesis in participants}
+        open_frame = frame_state.coverage == HypothesisCoverage.OPEN
+        effective_deltas = [
+            delta
+            for delta in contribution_deltas
+            if any(
+                hypothesis_id in participant_ids and value != 0.0
+                for hypothesis_id, value in delta.per_hypothesis_delta.items()
+            )
+            or (
+                open_frame
+                and delta.unresolved_delta is not None
+                and delta.unresolved_delta != 0.0
+            )
+        ]
+        if not effective_deltas:
+            return BeliefSolveResult(
+                hypotheses=hypotheses,
+                frame_state=frame_state,
+                belief_updates=[],
+                frame_mass_updates=[],
+            )
+
         penalty_deltas = {
             hypothesis.id: _penalty_deltas(hypothesis)
             for hypothesis in participants
         }
         scores = {
-            hypothesis.id: (
-                math.log(max(hypothesis.posterior, _MIN_PROBABILITY))
-                + math.log(
-                    likelihood_band_to_lr(
-                        event.likelihoods.get(
-                            hypothesis.id,
-                            LikelihoodBand.NEUTRAL,
-                        )
-                    )
-                )
-                * weight
-                - penalty_deltas[hypothesis.id][0]
-                - penalty_deltas[hypothesis.id][1]
-            )
+            hypothesis.id: math.log(max(hypothesis.posterior, _MIN_PROBABILITY))
             for hypothesis in participants
         }
         unresolved_prior = frame_state.unresolved_alternative_mass
-        if frame_state.coverage == HypothesisCoverage.OPEN:
+        if open_frame:
             if unresolved_prior is None:
                 raise ValueError("exclusive-open frame requires unresolved mass")
-            unresolved_band = event.unresolved_likelihood or LikelihoodBand.NEUTRAL
-            scores[_UNRESOLVED_SLOT] = (
-                math.log(max(unresolved_prior, _MIN_PROBABILITY))
-                + math.log(likelihood_band_to_lr(unresolved_band)) * weight
+            scores[_UNRESOLVED_SLOT] = math.log(
+                max(unresolved_prior, _MIN_PROBABILITY)
             )
-        distribution = _softmax(scores)
-        if frame_state.coverage == HypothesisCoverage.OPEN:
-            distribution = _preserve_unresolved_reserve(
-                distribution,
-                reserve=self.open_coverage_policy.minimum_unresolved_reserve,
-            )
-        event_posteriors = _round_distribution(
-            distribution,
+
+        audit_prior = {
+            hypothesis.id: hypothesis.posterior for hypothesis in participants
+        }
+        if open_frame:
+            audit_prior[_UNRESOLVED_SLOT] = unresolved_prior
+        transitions: list[
+            tuple[
+                EvidenceContributionDelta,
+                dict[str, float],
+                dict[str, float],
+            ]
+        ] = []
+        for root_index, delta in enumerate(effective_deltas):
+            before = audit_prior
+            for hypothesis_id, value in delta.per_hypothesis_delta.items():
+                if hypothesis_id in participant_ids:
+                    scores[hypothesis_id] += value
+            if open_frame and delta.unresolved_delta is not None:
+                scores[_UNRESOLVED_SLOT] += delta.unresolved_delta
+            if root_index == 0:
+                for hypothesis in participants:
+                    complexity_delta, ad_hoc_delta = penalty_deltas[hypothesis.id]
+                    scores[hypothesis.id] -= complexity_delta + ad_hoc_delta
+            _require_finite_scores(scores)
+            after = _softmax(scores)
+            if open_frame:
+                after = _preserve_unresolved_reserve(
+                    after,
+                    reserve=self.open_coverage_policy.minimum_unresolved_reserve,
+                )
+            transitions.append((delta, before, after))
+            audit_prior = after
+
+        final_distribution = transitions[-1][2]
+        final_posteriors = _round_distribution(
+            final_distribution,
             minimums=(
                 {
                     _UNRESOLVED_SLOT:
                     self.open_coverage_policy.minimum_unresolved_reserve,
                 }
-                if frame_state.coverage == HypothesisCoverage.OPEN
+                if open_frame
                 else None
             ),
         )
-        replacements: dict[str, Hypothesis] = {}
-        updates: list[BeliefUpdate] = []
-        for hypothesis in participants:
-            prior = hypothesis.posterior
-            posterior = event_posteriors[hypothesis.id]
-            band = event.likelihoods.get(hypothesis.id, LikelihoodBand.NEUTRAL)
-            complexity_delta, ad_hoc_delta = penalty_deltas[hypothesis.id]
-            replacements[hypothesis.id] = _updated_hypothesis(hypothesis, posterior)
-            updates.append(
-                _belief_update(
-                    hypothesis=hypothesis,
-                    prior=prior,
-                    posterior=posterior,
-                    band=band,
-                    event=event,
-                    weight=weight,
-                    complexity_delta=complexity_delta,
-                    ad_hoc_delta=ad_hoc_delta,
-                    update_id=(
-                        f"{run_id}_{cycle_id}_U{event_index}_{hypothesis.id}"
-                    ),
-                    cycle_id=cycle_id,
-                )
+        replacements = {
+            hypothesis.id: _updated_hypothesis(
+                hypothesis,
+                final_posteriors[hypothesis.id],
             )
+            for hypothesis in participants
+        }
+        updates: list[BeliefUpdate] = []
+        frame_mass_updates: list[FrameMassUpdate] = []
+        for root_index, (delta, before, after) in enumerate(transitions, start=1):
+            final_root = root_index == len(transitions)
+            for hypothesis in participants:
+                complexity_delta, ad_hoc_delta = (
+                    penalty_deltas[hypothesis.id]
+                    if root_index == 1
+                    else (0.0, 0.0)
+                )
+                updates.append(
+                    _belief_update_for_delta(
+                        hypothesis=hypothesis,
+                        prior=before[hypothesis.id],
+                        posterior=(
+                            final_posteriors[hypothesis.id]
+                            if final_root
+                            else after[hypothesis.id]
+                        ),
+                        delta=delta,
+                        complexity_delta=complexity_delta,
+                        ad_hoc_delta=ad_hoc_delta,
+                        update_id=(
+                            f"{run_id}_{cycle_id}_U{root_index}_{hypothesis.id}"
+                        ),
+                        cycle_id=cycle_id,
+                    )
+                )
+            if open_frame:
+                prior_mass = round(before[_UNRESOLVED_SLOT], _DISTRIBUTION_PRECISION)
+                posterior_mass = (
+                    final_posteriors[_UNRESOLVED_SLOT]
+                    if final_root
+                    else round(after[_UNRESOLVED_SLOT], _DISTRIBUTION_PRECISION)
+                )
+                if posterior_mass != prior_mass:
+                    frame_mass_updates.append(
+                        FrameMassUpdate(
+                            update_id=f"{run_id}_{cycle_id}_FM{root_index}",
+                            cycle_id=cycle_id,
+                            evidence_id=delta.contribution_root_id,
+                            prior=prior_mass,
+                            posterior=posterior_mass,
+                            direction=_direction(
+                                before[_UNRESOLVED_SLOT],
+                                after[_UNRESOLVED_SLOT],
+                            ),
+                            reason=(
+                                f"Contribution root {delta.contribution_root_id} "
+                                f"({delta.mode.value}) updates unresolved "
+                                "alternative mass."
+                            ),
+                        )
+                    )
+
         updated_hypotheses = [
             replacements.get(hypothesis.id, hypothesis)
             for hypothesis in hypotheses
         ]
-        frame_mass_update = None
-        if frame_state.coverage == HypothesisCoverage.OPEN:
-            unresolved_posterior = event_posteriors[_UNRESOLVED_SLOT]
-            unresolved_band = event.unresolved_likelihood or LikelihoodBand.NEUTRAL
+        if open_frame:
             frame_state = frame_state.model_copy(
-                update={"unresolved_alternative_mass": unresolved_posterior}
+                update={
+                    "unresolved_alternative_mass": final_posteriors[
+                        _UNRESOLVED_SLOT
+                    ]
+                }
             )
-            rounded_unresolved_prior = round(
-                unresolved_prior,
-                _DISTRIBUTION_PRECISION,
-            )
-            if unresolved_posterior != rounded_unresolved_prior:
-                frame_mass_update = FrameMassUpdate(
-                    update_id=f"{run_id}_{cycle_id}_FM{event_index}",
-                    cycle_id=cycle_id,
-                    evidence_id=event.id,
-                    prior=rounded_unresolved_prior,
-                    posterior=unresolved_posterior,
-                    direction=_direction(unresolved_prior, unresolved_posterior),
-                    reason=(
-                        f"{event.evidence_type.value} is {unresolved_band.value} for "
-                        "unresolved alternative mass."
-                    ),
-                )
-        return updated_hypotheses, frame_state, updates, frame_mass_update
+        return BeliefSolveResult(
+            hypotheses=updated_hypotheses,
+            frame_state=frame_state,
+            belief_updates=updates,
+            frame_mass_updates=frame_mass_updates,
+        )
 
     @staticmethod
-    def _solve_independent_event(
+    def _solve_independent_deltas(
         hypotheses: list[Hypothesis],
-        event: EvidenceEvent,
+        frame_state: FrameState,
+        contribution_deltas: list[EvidenceContributionDelta],
         *,
         run_id: str,
         cycle_id: str,
-        event_index: int,
-    ) -> tuple[list[Hypothesis], list[BeliefUpdate]]:
+    ) -> BeliefSolveResult:
         active_by_id = {
             hypothesis.id: hypothesis
             for hypothesis in hypotheses
             if _participates_in_distribution(hypothesis)
         }
-        participants = [
-            active_by_id[hypothesis_id]
-            for hypothesis_id in dict.fromkeys(event.target_hypotheses)
-            if hypothesis_id in active_by_id
+        effective_deltas = [
+            delta
+            for delta in contribution_deltas
+            if any(
+                hypothesis_id in active_by_id and value != 0.0
+                for hypothesis_id, value in delta.per_hypothesis_delta.items()
+            )
         ]
-        weight = _effective_update_weight(event)
-        replacements: dict[str, Hypothesis] = {}
-        updates: list[BeliefUpdate] = []
-        for hypothesis in participants:
-            band = event.likelihoods.get(hypothesis.id, LikelihoodBand.NEUTRAL)
-            complexity_delta, ad_hoc_delta = _penalty_deltas(hypothesis)
-            posterior = _independent_event_posterior(
-                hypothesis.posterior,
-                band,
-                weight,
+        if not effective_deltas:
+            return BeliefSolveResult(
+                hypotheses=hypotheses,
+                frame_state=frame_state,
+                belief_updates=[],
+                frame_mass_updates=[],
+            )
+
+        scores = {
+            hypothesis_id: _logit(hypothesis.posterior)
+            for hypothesis_id, hypothesis in active_by_id.items()
+        }
+        audit_prior = {
+            hypothesis_id: hypothesis.posterior
+            for hypothesis_id, hypothesis in active_by_id.items()
+        }
+        penalty_applied: set[str] = set()
+        transitions: list[
+            tuple[
+                int,
+                EvidenceContributionDelta,
+                Hypothesis,
+                float,
+                float,
+                float,
+                float,
+            ]
+        ] = []
+        for root_index, delta in enumerate(effective_deltas, start=1):
+            for hypothesis in hypotheses:
+                value = delta.per_hypothesis_delta.get(hypothesis.id, 0.0)
+                if hypothesis.id not in active_by_id or value == 0.0:
+                    continue
+                prior = audit_prior[hypothesis.id]
+                complexity_delta = 0.0
+                ad_hoc_delta = 0.0
+                scores[hypothesis.id] += value
+                if hypothesis.id not in penalty_applied:
+                    complexity_delta, ad_hoc_delta = _penalty_deltas(hypothesis)
+                    scores[hypothesis.id] -= complexity_delta + ad_hoc_delta
+                    penalty_applied.add(hypothesis.id)
+                if not math.isfinite(scores[hypothesis.id]):
+                    raise ValueError("belief update arithmetic must remain finite")
+                posterior = _sigmoid(scores[hypothesis.id])
+                transitions.append(
+                    (
+                        root_index,
+                        delta,
+                        hypothesis,
+                        prior,
+                        posterior,
+                        complexity_delta,
+                        ad_hoc_delta,
+                    )
+                )
+                audit_prior[hypothesis.id] = posterior
+
+        final_posteriors = {
+            hypothesis_id: round(
+                _sigmoid(scores[hypothesis_id]),
+                _DISTRIBUTION_PRECISION,
+            )
+            for hypothesis_id in penalty_applied
+        }
+        last_transition_by_hypothesis: dict[str, int] = {}
+        for index, (_, _, hypothesis, *_rest) in enumerate(transitions):
+            last_transition_by_hypothesis[hypothesis.id] = index
+        updates = [
+            _belief_update_for_delta(
+                hypothesis=hypothesis,
+                prior=prior,
+                posterior=(
+                    final_posteriors[hypothesis.id]
+                    if last_transition_by_hypothesis[hypothesis.id] == index
+                    else posterior
+                ),
+                delta=delta,
+                complexity_delta=complexity_delta,
+                ad_hoc_delta=ad_hoc_delta,
+                update_id=(
+                    f"{run_id}_{cycle_id}_U{root_index}_{hypothesis.id}"
+                ),
+                cycle_id=cycle_id,
+            )
+            for index, (
+                root_index,
+                delta,
+                hypothesis,
+                prior,
+                posterior,
                 complexity_delta,
                 ad_hoc_delta,
+            ) in enumerate(transitions)
+        ]
+        replacements = {
+            hypothesis_id: _updated_hypothesis(
+                active_by_id[hypothesis_id],
+                posterior,
             )
-            replacements[hypothesis.id] = _updated_hypothesis(hypothesis, posterior)
-            updates.append(
-                _belief_update(
-                    hypothesis=hypothesis,
-                    prior=hypothesis.posterior,
-                    posterior=posterior,
-                    band=band,
-                    event=event,
-                    weight=weight,
-                    complexity_delta=complexity_delta,
-                    ad_hoc_delta=ad_hoc_delta,
-                    update_id=(
-                        f"{run_id}_{cycle_id}_U{event_index}_{hypothesis.id}"
-                    ),
-                    cycle_id=cycle_id,
-                )
-            )
-        return (
-            [replacements.get(hypothesis.id, hypothesis) for hypothesis in hypotheses],
-            updates,
+            for hypothesis_id, posterior in final_posteriors.items()
+        }
+        return BeliefSolveResult(
+            hypotheses=[
+                replacements.get(hypothesis.id, hypothesis)
+                for hypothesis in hypotheses
+            ],
+            frame_state=frame_state,
+            belief_updates=updates,
+            frame_mass_updates=[],
         )
 
 
@@ -784,14 +990,12 @@ def _updated_hypothesis(hypothesis: Hypothesis, posterior: float) -> Hypothesis:
     )
 
 
-def _belief_update(
+def _belief_update_for_delta(
     *,
     hypothesis: Hypothesis,
     prior: float,
     posterior: float,
-    band: LikelihoodBand,
-    event: EvidenceEvent,
-    weight: float,
+    delta: EvidenceContributionDelta,
     complexity_delta: float,
     ad_hoc_delta: float,
     update_id: str,
@@ -800,17 +1004,22 @@ def _belief_update(
     return BeliefUpdate(
         update_id=update_id,
         cycle_id=cycle_id,
-        evidence_id=event.id,
+        evidence_id=delta.contribution_root_id,
         hypothesis_id=hypothesis.id,
         prior=round(prior, _DISTRIBUTION_PRECISION),
         posterior=round(posterior, _DISTRIBUTION_PRECISION),
         direction=_direction(prior, posterior),
         reason=(
-            f"{event.evidence_type.value} is {band.value} for {hypothesis.id}."
+            f"Contribution root {delta.contribution_root_id} ({delta.mode.value}) "
+            f"updates {hypothesis.id}."
         ),
         sensitivity={
-            "weight": round(weight, _DISTRIBUTION_PRECISION),
-            "likelihood_band": band.value,
+            "contribution_mode": delta.mode.value,
+            "caused_by_event_ids": list(delta.caused_by_event_ids),
+            "log_likelihood_delta": delta.per_hypothesis_delta.get(
+                hypothesis.id,
+                0.0,
+            ),
             "complexity_penalty": hypothesis.complexity_penalty,
             "ad_hoc_penalty": hypothesis.ad_hoc_penalty,
             "complexity_penalty_delta": round(
@@ -825,6 +1034,7 @@ def _belief_update(
 __all__ = [
     "BeliefSolveResult",
     "CoverageAwareBeliefSolver",
+    "legacy_event_contribution_deltas",
     "likelihood_band_to_lr",
     "mark_replayed_evidence_events",
     "normalize_hypotheses",

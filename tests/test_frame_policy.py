@@ -1,8 +1,12 @@
 from dataclasses import FrozenInstanceError
+import math
 
 import pytest
 
-from bayesprobe.belief import CoverageAwareBeliefSolver
+from bayesprobe.belief import (
+    CoverageAwareBeliefSolver,
+    legacy_event_contribution_deltas,
+)
 from bayesprobe.frame_policy import FrameAdequacyPolicy
 from bayesprobe.kernel_config import (
     ExpansionPolicy,
@@ -166,7 +170,7 @@ def test_exclusive_open_solver_updates_named_and_unresolved_as_one_distribution(
 
     result = CoverageAwareBeliefSolver().solve(
         state,
-        [event],
+        legacy_event_contribution_deltas([event]),
         run_id="run_exact",
         cycle_id="cycle_1",
     )
@@ -180,7 +184,9 @@ def test_exclusive_open_solver_updates_named_and_unresolved_as_one_distribution(
     assert all(hypothesis.posterior < 0.25 for hypothesis in result.hypotheses)
     assert {update.hypothesis_id for update in result.belief_updates} == {"H1", "H2"}
     assert len(result.frame_mass_updates) == 1
-    assert result.frame_mass_updates[0].evidence_id == event.id
+    assert result.frame_mass_updates[0].evidence_id.startswith(
+        "legacy-event-root:sha256:"
+    )
     assert all(
         update.hypothesis_id != "unresolved"
         for update in result.belief_updates
@@ -202,7 +208,7 @@ def test_all_named_candidates_can_lose_without_forced_winner():
 
     solve_result = CoverageAwareBeliefSolver().solve(
         state,
-        [event],
+        legacy_event_contribution_deltas([event]),
         run_id="run_exact",
         cycle_id="cycle_1",
     )
@@ -313,14 +319,15 @@ def test_explicit_zero_effective_weight_remains_zero():
 
     result = CoverageAwareBeliefSolver().solve(
         state,
-        [event],
+        legacy_event_contribution_deltas([event]),
         run_id="run_exact",
         cycle_id="cycle_1",
     )
 
     assert [hypothesis.posterior for hypothesis in result.hypotheses] == [0.25, 0.25]
     assert result.frame_state.unresolved_alternative_mass == 0.50
-    assert {update.sensitivity["weight"] for update in result.belief_updates} == {0.0}
+    assert result.belief_updates == []
+    assert result.frame_mass_updates == []
 
 
 def test_none_effective_weight_uses_legacy_quality_product():
@@ -330,17 +337,17 @@ def test_none_effective_weight_uses_legacy_quality_product():
         effective_update_weight=None,
     ).model_copy(update={"reliability": 0.5, "independence": 0.5})
 
+    deltas = legacy_event_contribution_deltas([event])
     result = CoverageAwareBeliefSolver().solve(
         state,
-        [event],
+        deltas,
         run_id="run_exact",
         cycle_id="cycle_1",
     )
 
-    h1_update = next(
-        update for update in result.belief_updates if update.hypothesis_id == "H1"
+    assert deltas[0].per_hypothesis_delta["H1"] == pytest.approx(
+        0.25 * math.log(10.0)
     )
-    assert h1_update.sensitivity["weight"] == 0.25
     assert result.hypotheses[0].posterior > 0.25
 
 
@@ -372,7 +379,7 @@ def test_open_solver_preserves_minimum_unresolved_reserve():
 
     result = CoverageAwareBeliefSolver().solve(
         state,
-        [event],
+        legacy_event_contribution_deltas([event]),
         run_id="run_exact",
         cycle_id="cycle_1",
     )
@@ -398,7 +405,7 @@ def test_open_solver_preserves_non_grid_reserve_after_rounding():
         )
     ).solve(
         state,
-        [event],
+        legacy_event_contribution_deltas([event]),
         run_id="run_exact",
         cycle_id="cycle_1",
     )
@@ -418,7 +425,7 @@ def test_discarded_event_does_not_change_named_or_unresolved_mass():
 
     result = CoverageAwareBeliefSolver().solve(
         state,
-        [event],
+        legacy_event_contribution_deltas([event]),
         run_id="run_exact",
         cycle_id="cycle_1",
     )

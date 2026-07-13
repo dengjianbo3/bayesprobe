@@ -1,11 +1,21 @@
+import math
+
 import pytest
 
-from bayesprobe.belief import CoverageAwareBeliefSolver, solve_updates
+from bayesprobe.belief import (
+    CoverageAwareBeliefSolver,
+    legacy_event_contribution_deltas,
+    solve_updates,
+)
 from bayesprobe.migrations import migrate_belief_state_v0_1
 from bayesprobe.schemas import (
     AnswerContract,
     BeliefState,
+    EpistemicOrigin,
+    EvidenceContributionDelta,
+    EvidenceContributionMode,
     EvidenceEvent,
+    EvidenceRootContribution,
     EvidenceType,
     FramedHypothesis,
     FramingMethod,
@@ -116,6 +126,422 @@ def _event(
     )
 
 
+def _contribution(
+    root: str,
+    *,
+    revision: int,
+    hypotheses: dict[str, float],
+    unresolved: float | None = None,
+    active: bool = True,
+    event_id: str | None = None,
+) -> EvidenceRootContribution:
+    return EvidenceRootContribution(
+        contribution_root_id=root,
+        revision=revision,
+        assessment_event_ids=[event_id or f"E_{root}"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood=hypotheses,
+        unresolved_log_likelihood=unresolved,
+        active=active,
+    )
+
+
+def _new_delta(
+    root: str,
+    hypotheses: dict[str, float],
+    *,
+    unresolved: float | None = None,
+    event_id: str | None = None,
+) -> EvidenceContributionDelta:
+    cause = event_id or f"E_{root}"
+    current = _contribution(
+        root,
+        revision=1,
+        hypotheses=hypotheses,
+        unresolved=unresolved,
+        event_id=cause,
+    )
+    return EvidenceContributionDelta(
+        contribution_root_id=root,
+        mode=EvidenceContributionMode.NEW_ROOT,
+        current_contribution=current,
+        per_hypothesis_delta=hypotheses,
+        unresolved_delta=unresolved,
+        caused_by_event_ids=[cause],
+    )
+
+
+def _revision_delta(
+    root: str,
+    hypotheses: dict[str, float],
+    *,
+    unresolved: float | None = None,
+    event_id: str | None = None,
+) -> EvidenceContributionDelta:
+    cause = event_id or f"E_{root}_revision"
+    previous_hypotheses = {hypothesis_id: 0.0 for hypothesis_id in hypotheses}
+    previous = _contribution(
+        root,
+        revision=1,
+        hypotheses=previous_hypotheses,
+        unresolved=0.0 if unresolved is not None else None,
+        event_id=f"E_{root}_previous",
+    )
+    current = _contribution(
+        root,
+        revision=2,
+        hypotheses=hypotheses,
+        unresolved=unresolved,
+        event_id=cause,
+    )
+    return EvidenceContributionDelta(
+        contribution_root_id=root,
+        mode=EvidenceContributionMode.REVISE_ROOT,
+        previous_contribution=previous,
+        current_contribution=current,
+        per_hypothesis_delta=hypotheses,
+        unresolved_delta=unresolved,
+        caused_by_event_ids=[cause],
+    )
+
+
+def _no_change_delta(
+    root: str,
+    hypotheses: dict[str, float],
+    *,
+    unresolved: float | None = None,
+) -> EvidenceContributionDelta:
+    previous = _contribution(
+        root,
+        revision=1,
+        hypotheses=hypotheses,
+        unresolved=unresolved,
+        event_id=f"E_{root}_previous",
+    )
+    current = _contribution(
+        root,
+        revision=2,
+        hypotheses=hypotheses,
+        unresolved=unresolved,
+        event_id=f"E_{root}_current",
+    )
+    return EvidenceContributionDelta(
+        contribution_root_id=root,
+        mode=EvidenceContributionMode.NO_CHANGE,
+        previous_contribution=previous,
+        current_contribution=current,
+        per_hypothesis_delta={hypothesis_id: 0.0 for hypothesis_id in hypotheses},
+        unresolved_delta=0.0 if unresolved is not None else None,
+        caused_by_event_ids=[f"E_{root}_current"],
+    )
+
+
+def _native_state(
+    hypotheses: list[Hypothesis],
+    *,
+    relation: HypothesisRelation = HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
+) -> BeliefState:
+    return migrate_belief_state_v0_1(
+        _belief_state(hypotheses, relation=relation)
+    )
+
+
+def test_no_change_delta_leaves_posterior_and_penalty_high_water_exact():
+    state = _native_state(
+        [
+            _hypothesis(
+                "H1",
+                0.6,
+                complexity_penalty=0.4,
+                ad_hoc_penalty=0.2,
+                applied_complexity_penalty=0.1,
+                applied_ad_hoc_penalty=0.1,
+            ),
+            _hypothesis("H2", 0.4),
+        ]
+    )
+
+    result = CoverageAwareBeliefSolver().solve(
+        state,
+        [_no_change_delta("eroot:model", {"H1": 0.7, "H2": -0.3})],
+        run_id=state.run_id,
+        cycle_id="cycle_2",
+    )
+
+    assert result.hypotheses == state.hypotheses
+    assert result.frame_state == state.frame_state
+    assert result.belief_updates == []
+    assert result.frame_mass_updates == []
+
+
+def test_zero_new_root_is_an_exact_no_op():
+    third = 1.0 / 3.0
+    state = _native_state(
+        [
+            _hypothesis("H1", third, complexity_penalty=0.2),
+            _hypothesis("H2", third),
+            _hypothesis("H3", third),
+        ]
+    )
+
+    result = CoverageAwareBeliefSolver().solve(
+        state,
+        [_new_delta("eroot:zero", {"H1": 0.0, "H2": 0.0, "H3": 0.0})],
+        run_id=state.run_id,
+        cycle_id="cycle_1",
+    )
+
+    assert result.hypotheses == state.hypotheses
+    assert [item.posterior for item in result.hypotheses] == [third, third, third]
+    assert result.belief_updates == []
+
+
+def test_revision_applies_only_current_minus_previous_contribution():
+    state = _native_state([_hypothesis("H1", 0.7), _hypothesis("H2", 0.3)])
+    delta = _revision_delta(
+        "eroot:model",
+        {"H1": -0.8, "H2": 0.8},
+        event_id="E_counterassessment",
+    )
+
+    result = CoverageAwareBeliefSolver().solve(
+        state,
+        [delta],
+        run_id=state.run_id,
+        cycle_id="cycle_2",
+    )
+
+    denominator = 0.7 * math.exp(-0.8) + 0.3 * math.exp(0.8)
+    expected_h1 = round(0.7 * math.exp(-0.8) / denominator, 4)
+    by_id = {item.id: item for item in result.hypotheses}
+    assert by_id["H1"].posterior == expected_h1
+    assert by_id["H2"].posterior == round(1.0 - expected_h1, 4)
+    assert {update.evidence_id for update in result.belief_updates} == {
+        "eroot:model"
+    }
+    assert {
+        update.sensitivity["contribution_mode"]
+        for update in result.belief_updates
+    } == {"revise_root"}
+    assert {
+        tuple(update.sensitivity["caused_by_event_ids"])
+        for update in result.belief_updates
+    } == {("E_counterassessment",)}
+
+
+def test_distinct_roots_are_order_invariant_and_round_only_final_distribution():
+    state = _native_state(
+        [
+            _hypothesis("H1", 0.3333),
+            _hypothesis("H2", 0.3333),
+            _hypothesis("H3", 0.3334),
+        ]
+    )
+    deltas = [
+        _new_delta("eroot:z", {"H1": 0.12345, "H2": -0.22222}),
+        _new_delta("eroot:a", {"H2": 0.33333, "H3": -0.11111}),
+    ]
+
+    forward = CoverageAwareBeliefSolver().solve(
+        state,
+        deltas,
+        run_id=state.run_id,
+        cycle_id="cycle_1",
+    )
+    reverse = CoverageAwareBeliefSolver().solve(
+        state,
+        list(reversed(deltas)),
+        run_id=state.run_id,
+        cycle_id="cycle_1",
+    )
+
+    scores = {
+        "H1": math.log(0.3333) + 0.12345,
+        "H2": math.log(0.3333) - 0.22222 + 0.33333,
+        "H3": math.log(0.3334) - 0.11111,
+    }
+    maximum = max(scores.values())
+    exponentials = {
+        hypothesis_id: math.exp(score - maximum)
+        for hypothesis_id, score in scores.items()
+    }
+    total = sum(exponentials.values())
+    expected = {
+        hypothesis_id: round(value / total, 4)
+        for hypothesis_id, value in exponentials.items()
+    }
+    expected[max(expected, key=expected.get)] = round(
+        expected[max(expected, key=expected.get)]
+        + 1.0
+        - sum(expected.values()),
+        4,
+    )
+    assert forward == reverse
+    assert {item.id: item.posterior for item in forward.hypotheses} == expected
+    assert [update.evidence_id for update in forward.belief_updates] == [
+        "eroot:a",
+        "eroot:a",
+        "eroot:a",
+        "eroot:z",
+        "eroot:z",
+        "eroot:z",
+    ]
+
+
+def test_independent_delta_uses_logit_arithmetic_without_cross_normalization():
+    state = _native_state(
+        [_hypothesis("H1", 0.4), _hypothesis("H2", 0.7)],
+        relation=HypothesisRelation.INDEPENDENT,
+    )
+    delta = _new_delta("eroot:independent", {"H1": math.log(3.0)})
+
+    result = CoverageAwareBeliefSolver().solve(
+        state,
+        [delta],
+        run_id=state.run_id,
+        cycle_id="cycle_1",
+    )
+
+    by_id = {item.id: item for item in result.hypotheses}
+    expected_h1 = round((0.4 * 3.0) / (1.0 - 0.4 + 0.4 * 3.0), 4)
+    assert by_id["H1"].posterior == expected_h1
+    assert by_id["H2"] == state.hypotheses_by_id()["H2"]
+    assert sum(item.posterior for item in result.hypotheses) > 1.0
+    assert [update.hypothesis_id for update in result.belief_updates] == ["H1"]
+
+
+def test_solver_applies_penalty_high_water_only_once_per_delta_batch():
+    state = _native_state(
+        [
+            _hypothesis(
+                "H1",
+                0.5,
+                complexity_penalty=0.2,
+                ad_hoc_penalty=0.1,
+            ),
+            _hypothesis("H2", 0.5),
+        ],
+        relation=HypothesisRelation.INDEPENDENT,
+    )
+
+    result = CoverageAwareBeliefSolver().solve(
+        state,
+        [
+            _new_delta("eroot:a", {"H1": 0.2}),
+            _new_delta("eroot:b", {"H1": 0.2}),
+        ],
+        run_id=state.run_id,
+        cycle_id="cycle_1",
+    )
+
+    expected = round(1.0 / (1.0 + math.exp(-0.1)), 4)
+    h1 = {item.id: item for item in result.hypotheses}["H1"]
+    assert h1.posterior == expected
+    assert h1.applied_complexity_penalty == 0.2
+    assert h1.applied_ad_hoc_penalty == 0.1
+    assert [
+        update.sensitivity["complexity_penalty_delta"]
+        for update in result.belief_updates
+    ] == [0.2, 0.0]
+    assert [
+        update.sensitivity["ad_hoc_penalty_delta"]
+        for update in result.belief_updates
+    ] == [0.1, 0.0]
+
+
+def test_solver_rejects_raw_events_duplicate_roots_and_unknown_coordinates():
+    state = _native_state([_hypothesis("H1", 0.5), _hypothesis("H2", 0.5)])
+    duplicate = _new_delta("eroot:duplicate", {"H1": 0.1})
+
+    with pytest.raises(TypeError, match="EvidenceContributionDelta"):
+        CoverageAwareBeliefSolver().solve(
+            state,
+            [_event({"H1": LikelihoodBand.WEAKLY_CONFIRMING})],
+            run_id=state.run_id,
+            cycle_id="cycle_1",
+        )
+    with pytest.raises(ValueError, match="duplicate contribution root"):
+        CoverageAwareBeliefSolver().solve(
+            state,
+            [duplicate, duplicate],
+            run_id=state.run_id,
+            cycle_id="cycle_1",
+        )
+    with pytest.raises(ValueError, match="unknown hypothesis coordinate"):
+        CoverageAwareBeliefSolver().solve(
+            state,
+            [_new_delta("eroot:unknown", {"H_unknown": 0.1})],
+            run_id=state.run_id,
+            cycle_id="cycle_1",
+        )
+
+
+def test_independent_solver_rejects_unresolved_coordinate():
+    state = _native_state(
+        [_hypothesis("H1", 0.5), _hypothesis("H2", 0.5)],
+        relation=HypothesisRelation.INDEPENDENT,
+    )
+
+    with pytest.raises(ValueError, match="unresolved delta"):
+        CoverageAwareBeliefSolver().solve(
+            state,
+            [_new_delta("eroot:invalid-frame", {"H1": 0.1}, unresolved=0.2)],
+            run_id=state.run_id,
+            cycle_id="cycle_1",
+        )
+
+
+def test_legacy_adapter_matches_historical_weight_and_ignores_discarded_events():
+    accepted = _event(
+        {"H1": LikelihoodBand.MODERATELY_CONFIRMING},
+        event_id="E_legacy_accepted",
+    ).model_copy(
+        update={
+            "reliability": 0.5,
+            "independence": 0.4,
+            "relevance": 0.75,
+            "novelty": 0.8,
+        }
+    )
+    discarded = _event(
+        {"H1": LikelihoodBand.STRONGLY_CONFIRMING},
+        event_id="E_legacy_discarded",
+    ).model_copy(update={"discard_reason": "replayed"})
+
+    deltas = legacy_event_contribution_deltas([discarded, accepted])
+
+    assert len(deltas) == 1
+    delta = deltas[0]
+    expected_weight = 0.5 * 0.4 * 0.75 * 0.8
+    assert delta.per_hypothesis_delta["H1"] == pytest.approx(
+        expected_weight * math.log(3.0)
+    )
+    assert delta.current_contribution.assessment_event_ids == [accepted.id]
+    assert delta.caused_by_event_ids == [accepted.id]
+    assert delta.contribution_root_id.startswith("legacy-event-root:sha256:")
+    assert accepted.id not in delta.contribution_root_id
+
+
+def test_legacy_adapter_rejects_native_root_bound_event_without_weight():
+    event = EvidenceEvent(
+        schema_version="v0.2",
+        id="E_native_root",
+        derived_from_signal="S_native_root",
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        derivation_root_id="derivation:model",
+        contribution_root_id="eroot:model",
+        target_hypotheses=["H1"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content="A native root-bound event.",
+        likelihoods={"H1": LikelihoodBand.WEAKLY_CONFIRMING},
+        correlation_status="novel",
+        effective_update_weight=None,
+    )
+
+    with pytest.raises(ValueError, match="root-bound"):
+        legacy_event_contribution_deltas([event])
+
+
 def test_solve_updates_normalizes_exclusive_rivals_and_audits_rival_movement():
     state = _belief_state(
         [
@@ -166,7 +592,7 @@ def test_solve_updates_applies_complexity_and_ad_hoc_penalties():
         events=[
             _event(
                 {
-                    "H1": LikelihoodBand.NEUTRAL,
+                    "H1": LikelihoodBand.WEAKLY_CONFIRMING,
                     "H2": LikelihoodBand.NEUTRAL,
                 }
             )
@@ -203,8 +629,8 @@ def test_independent_update_does_not_cross_normalize_untargeted_hypothesis():
     assert [update.hypothesis_id for update in updates] == ["H1"]
 
 
-def test_static_penalties_are_not_subtracted_again_on_later_events():
-    state = _belief_state(
+def test_static_penalties_are_not_subtracted_again_on_later_deltas():
+    state = _native_state(
         [
             _hypothesis(
                 "H1",
@@ -216,18 +642,27 @@ def test_static_penalties_are_not_subtracted_again_on_later_events():
         ],
         relation=HypothesisRelation.INDEPENDENT,
     )
-    neutral = _event(
-        {"H1": LikelihoodBand.NEUTRAL},
-        target_hypotheses=["H1"],
+    first = CoverageAwareBeliefSolver().solve(
+        state,
+        [_new_delta("eroot:first", {"H1": 0.5})],
+        run_id=state.run_id,
+        cycle_id="cycle_1",
+    )
+    state_after_first = state.model_copy(update={"hypotheses": first.hypotheses})
+    second = CoverageAwareBeliefSolver().solve(
+        state_after_first,
+        [_new_delta("eroot:second", {"H1": 0.5})],
+        run_id=state.run_id,
+        cycle_id="cycle_2",
     )
 
-    after_first, _ = solve_updates("run_belief", "cycle_1", state, [neutral])
-    state_after_first = state.model_copy(update={"hypotheses": after_first})
-    after_second, _ = solve_updates(
-        "run_belief", "cycle_2", state_after_first, [neutral]
+    assert first.hypotheses[0].posterior == round(1.0 / (1.0 + math.exp(-0.2)), 4)
+    assert second.hypotheses[0].posterior == round(
+        1.0 / (1.0 + math.exp(-0.7)),
+        4,
     )
-
-    assert after_second[0].posterior == after_first[0].posterior
+    assert second.belief_updates[0].sensitivity["complexity_penalty_delta"] == 0.0
+    assert second.belief_updates[0].sensitivity["ad_hoc_penalty_delta"] == 0.0
 
 
 def test_discarded_event_applies_neither_evidence_nor_static_penalties():
@@ -402,7 +837,16 @@ def test_penalty_high_water_survives_decrease_and_reincrease_below_peak():
         }
     )
     above_peak, updates = solve_updates(
-        "run_belief", "cycle_3", above_peak_state, [neutral]
+        "run_belief",
+        "cycle_3",
+        above_peak_state,
+        [
+            _event(
+                {"H1": LikelihoodBand.WEAKLY_DISCONFIRMING},
+                target_hypotheses=["H1"],
+                event_id="E_above_peak",
+            )
+        ],
     )
     assert above_peak[0].posterior < 0.5
     assert above_peak[0].applied_complexity_penalty == 0.5
