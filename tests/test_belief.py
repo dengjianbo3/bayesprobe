@@ -634,16 +634,40 @@ def test_solver_sanitizes_invalid_native_delta_validation_errors():
         )
 
     error = exc_info.value
-    rendered_errors = [str(error), repr(error)]
-    errors = getattr(error, "errors", None)
-    if callable(errors):
-        rendered_errors.append(json.dumps(errors(), default=str, sort_keys=True))
-    json_error = getattr(error, "json", None)
-    if callable(json_error):
-        rendered_errors.append(json_error())
+    reachable_errors: list[BaseException] = []
+    pending_errors = [error]
+    seen_error_ids: set[int] = set()
+    rendered_errors: list[str] = []
+    while pending_errors:
+        current_error = pending_errors.pop()
+        if id(current_error) in seen_error_ids:
+            continue
+        seen_error_ids.add(id(current_error))
+        reachable_errors.append(current_error)
+        rendered_errors.extend([str(current_error), repr(current_error)])
 
+        errors = getattr(current_error, "errors", None)
+        if callable(errors):
+            rendered_errors.append(
+                json.dumps(errors(), default=str, sort_keys=True)
+            )
+        json_error = getattr(current_error, "json", None)
+        if callable(json_error):
+            rendered_errors.append(json_error())
+
+        for chained_error in (
+            current_error.__cause__,
+            current_error.__context__,
+        ):
+            if chained_error is not None:
+                pending_errors.append(chained_error)
+
+    if len(reachable_errors) != 1:
+        pytest.fail("raised error retained a reachable cause or context")
     assert all(secret not in rendered for rendered in rendered_errors)
     assert type(error) is ValueError
+    assert error.__cause__ is None
+    assert error.__context__ is None
 
 
 def test_independent_solver_rejects_unresolved_coordinate():
