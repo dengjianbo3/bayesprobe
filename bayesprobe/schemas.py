@@ -1020,6 +1020,7 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     content_fingerprints: dict[str, str] = Field(default_factory=dict)
     source_content_fingerprints: dict[str, str] = Field(default_factory=dict)
     derivation_roots: dict[str, str] = Field(default_factory=dict)
+    signal_contribution_roots: dict[str, str] = Field(default_factory=dict)
     event_signal_identity_digests: dict[str, str] = Field(default_factory=dict)
     correlation_credit: dict[str, float] = Field(default_factory=dict)
     root_contributions: dict[str, EvidenceRootContribution] = Field(
@@ -1100,6 +1101,28 @@ class EvidenceMemorySnapshot(StrictTaskModel):
             result[clean_key] = clean_value
         return result
 
+    @field_validator("signal_contribution_roots")
+    @classmethod
+    def validate_signal_contribution_roots(
+        cls,
+        value: dict[str, str],
+    ) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for signal_id, root_id in value.items():
+            clean_signal_id = _required_text(
+                signal_id,
+                "signal contribution root key",
+            )
+            clean_root_id = _required_text(root_id, "signal contribution root id")
+            if clean_signal_id != signal_id or clean_root_id != root_id:
+                raise ValueError(
+                    "signal contribution roots must use exact canonical text"
+                )
+            if _contains_secret_material({clean_signal_id: clean_root_id}):
+                raise ValueError("evidence memory must not contain secret material")
+            result[clean_signal_id] = clean_root_id
+        return result
+
     @field_validator("event_signal_identity_digests")
     @classmethod
     def validate_event_signal_identity_digests(
@@ -1174,6 +1197,10 @@ class EvidenceMemorySnapshot(StrictTaskModel):
             raise ValueError("memory v3 does not use correlation credit")
         if self.memory_version in {1, 2} and self.root_contributions:
             raise ValueError("root contributions require memory version 3")
+        if self.memory_version in {1, 2} and self.signal_contribution_roots:
+            raise ValueError(
+                "signal contribution roots require memory version 3"
+            )
         if self.memory_version not in {2, 3} and self.event_signal_identity_digests:
             raise ValueError(
                 "event signal identity bindings require memory version 2 or 3"
@@ -1185,6 +1212,12 @@ class EvidenceMemorySnapshot(StrictTaskModel):
         }
         if len(identity_key_sets) != 1:
             raise ValueError("evidence memory identity map keys must match exactly")
+        if set(self.signal_contribution_roots).difference(
+            self.derivation_roots
+        ):
+            raise ValueError(
+                "signal contribution root bindings require remembered signal identity"
+            )
         discarded_event_ids = [
             decode_discard_history_entry(entry)[0]
             for entry in self.discard_and_schema_history

@@ -429,7 +429,7 @@ def migrate_belief_state_v0_1(payload: Any) -> BeliefState:
             ),
             adequacy_status=adequacy,
         ),
-        evidence_memory=EvidenceMemorySnapshot(),
+        evidence_memory=EvidenceMemorySnapshot(memory_version=1),
     )
     return _mark_v01_migration(migrated)
 

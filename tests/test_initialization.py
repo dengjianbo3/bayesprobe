@@ -138,7 +138,9 @@ def test_initializer_uses_supplied_admission_once_and_writes_v02_state_in_order(
     assert result.belief_state.frame_state.frame_id == (
         result.task_frame.hypothesis_frame.frame_id
     )
+    assert result.belief_state.evidence_memory.memory_version == 3
     assert result.belief_state.evidence_memory.accepted_evidence_ids == []
+    assert result.belief_state.evidence_memory.root_contributions == {}
     assert [record["record_type"] for record in ledger.read_all()[:4]] == [
         "task_admission",
         "task_frame",

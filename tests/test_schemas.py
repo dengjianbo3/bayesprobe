@@ -733,6 +733,54 @@ def test_v3_memory_owns_root_contributions_without_correlation_credit():
     assert memory.correlation_credit == {}
 
 
+def test_v3_memory_owns_coherent_signal_contribution_root_bindings():
+    fingerprint = "sha256:" + "a" * 64
+    memory = EvidenceMemorySnapshot(
+        memory_version=3,
+        content_fingerprints={"S1": fingerprint},
+        source_content_fingerprints={
+            "S1": '["source.example","'
+            + fingerprint
+            + '","source.example","source.example"]'
+        },
+        derivation_roots={"S1": "derivation-root-1"},
+        signal_contribution_roots={"S1": "evidence-root:sha256:" + "b" * 64},
+    )
+
+    assert memory.signal_contribution_roots == {
+        "S1": "evidence-root:sha256:" + "b" * 64
+    }
+
+
+@pytest.mark.parametrize("memory_version", [1, 2])
+def test_historical_memory_rejects_signal_contribution_root_bindings(
+    memory_version,
+):
+    with pytest.raises(
+        ValueError,
+        match="signal contribution roots require memory version 3",
+    ):
+        EvidenceMemorySnapshot(
+            memory_version=memory_version,
+            signal_contribution_roots={
+                "S1": "evidence-root:sha256:" + "b" * 64
+            },
+        )
+
+
+def test_v3_memory_rejects_signal_contribution_root_without_identity():
+    with pytest.raises(
+        ValueError,
+        match="signal contribution root bindings require remembered signal identity",
+    ):
+        EvidenceMemorySnapshot(
+            memory_version=3,
+            signal_contribution_roots={
+                "S1": "evidence-root:sha256:" + "b" * 64
+            },
+        )
+
+
 def test_v3_memory_rejects_correlation_credit():
     with pytest.raises(ValueError, match="memory v3 does not use correlation credit"):
         EvidenceMemorySnapshot(

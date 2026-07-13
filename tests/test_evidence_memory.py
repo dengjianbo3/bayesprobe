@@ -12,6 +12,11 @@ from bayesprobe.evidence_memory import (
     EvidenceMemoryManager,
     SignalProvenanceNormalizer,
     derive_deterministic_computation_root,
+    resolve_signal_contribution_roots,
+)
+from bayesprobe.evidence_roots import (
+    EvidenceRootReconciler,
+    resolve_contribution_root_id,
 )
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.kernel_config import CorrelationCreditPolicy
@@ -3600,7 +3605,7 @@ def test_evidence_memory_snapshot_rejects_malformed_credit_key_grammar(key):
 
 
 def test_identity_write_rejects_unsupported_memory_version():
-    snapshot = EvidenceMemorySnapshot.model_construct(memory_version=3)
+    snapshot = EvidenceMemorySnapshot.model_construct(memory_version=4)
     signal = SignalProvenanceNormalizer().normalize(
         _signal("S_unsupported_memory", "Unsupported memory version."),
         run_id="run_memory",
@@ -3608,6 +3613,467 @@ def test_identity_write_rejects_unsupported_memory_version():
 
     with pytest.raises(ValueError, match="unsupported evidence memory version"):
         EvidenceMemoryManager().remember_signal_identity(snapshot, signal)
+
+
+def test_v3_commit_identity_persists_root_binding_without_credit():
+    manager = EvidenceMemoryManager()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_native_identity", "A native root-bound observation."),
+        run_id="run_memory",
+    )
+    root_id = resolve_contribution_root_id(signal)
+    event = EvidenceEvent(
+        schema_version="v0.2",
+        id="E_native_identity",
+        derived_from_signal=signal.id,
+        epistemic_origin=signal.provenance.epistemic_origin,
+        derivation_root_id=signal.provenance.derivation_root_id,
+        contribution_root_id=root_id,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.SUPPORTING,
+        content=signal.raw_content,
+        likelihoods={"A": LikelihoodBand.MODERATELY_CONFIRMING},
+        correlation_status="novel",
+        effective_update_weight=None,
+    )
+
+    committed = manager.commit_identity(
+        EvidenceMemorySnapshot(memory_version=3),
+        signal=signal,
+        event=event,
+    )
+
+    assert committed.memory_version == 3
+    assert committed.accepted_evidence_ids == [event.id]
+    assert committed.signal_contribution_roots == {signal.id: root_id}
+    assert committed.correlation_credit == {}
+
+
+def test_v3_classification_never_allocates_correlation_credit():
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_native_classification", "A native classified observation."),
+        run_id="run_memory",
+    )
+
+    decision = EvidenceMemoryManager().classify(
+        EvidenceMemorySnapshot(memory_version=3),
+        signal,
+        likelihoods={"A": LikelihoodBand.STRONGLY_CONFIRMING},
+        base_effective_weight=1.0,
+    )
+
+    assert decision.correlation_status == "novel"
+    assert decision.effective_update_weight == 0.0
+    assert decision.remaining_credit == {}
+    assert decision.discard_reason is None
+
+
+def test_v3_commit_identity_rejects_changed_root_for_repeated_signal_id():
+    manager = EvidenceMemoryManager()
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_repeated_root", "A repeated root-bound observation."),
+        run_id="run_memory",
+    )
+
+    root_id = resolve_contribution_root_id(signal)
+
+    def event(event_id, contribution_root_id):
+        return EvidenceEvent(
+            schema_version="v0.2",
+            id=event_id,
+            derived_from_signal=signal.id,
+            epistemic_origin=signal.provenance.epistemic_origin,
+            derivation_root_id=signal.provenance.derivation_root_id,
+            contribution_root_id=contribution_root_id,
+            target_hypotheses=["A"],
+            evidence_type=EvidenceType.NEUTRAL,
+            content=signal.raw_content,
+            likelihoods={"A": LikelihoodBand.NEUTRAL},
+            correlation_status="novel",
+            effective_update_weight=None,
+        )
+
+    committed = manager.commit_identity(
+        EvidenceMemorySnapshot(memory_version=3),
+        signal=signal,
+        event=event("E_repeated_root_1", root_id),
+    )
+
+    with pytest.raises(ValueError, match="signal contribution root conflict"):
+        manager.commit_identity(
+            committed,
+            signal=signal,
+            event=event(
+                "E_repeated_root_2",
+                "evidence-root:sha256:" + "b" * 64,
+            ),
+        )
+
+
+def test_v3_commit_identity_rejects_unresolved_root_binding():
+    signal = SignalProvenanceNormalizer().normalize(
+        _signal("S_wrong_root", "An observation with the wrong root binding."),
+        run_id="run_memory",
+    )
+    event = EvidenceEvent(
+        schema_version="v0.2",
+        id="E_wrong_root",
+        derived_from_signal=signal.id,
+        epistemic_origin=signal.provenance.epistemic_origin,
+        derivation_root_id=signal.provenance.derivation_root_id,
+        contribution_root_id="evidence-root:sha256:" + "f" * 64,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=signal.raw_content,
+        likelihoods={"A": LikelihoodBand.NEUTRAL},
+        correlation_status="novel",
+        effective_update_weight=None,
+    )
+
+    with pytest.raises(ValueError, match="signal contribution root conflict"):
+        EvidenceMemoryManager().commit_identity(
+            EvidenceMemorySnapshot(memory_version=3),
+            signal=signal,
+            event=event,
+        )
+
+
+def test_v3_commit_identity_rejects_child_whose_parent_is_not_bound():
+    child = SignalProvenanceNormalizer().normalize(
+        _derived_signal(
+            "S_unbound_parent_child",
+            "A summary whose parent root is unavailable.",
+            parent_id="S_unbound_parent",
+            root="root-unbound-parent",
+        ),
+        run_id="run_memory",
+    )
+    event = EvidenceEvent(
+        schema_version="v0.2",
+        id="E_unbound_parent_child",
+        derived_from_signal=child.id,
+        epistemic_origin=child.provenance.epistemic_origin,
+        derivation_root_id=child.provenance.derivation_root_id,
+        contribution_root_id="evidence-root:sha256:" + "e" * 64,
+        target_hypotheses=["A"],
+        evidence_type=EvidenceType.NEUTRAL,
+        content=child.raw_content,
+        likelihoods={"A": LikelihoodBand.NEUTRAL},
+        correlation_status="correlated_restatement",
+        effective_update_weight=None,
+    )
+
+    with pytest.raises(ValueError, match="missing a parent contribution root"):
+        EvidenceMemoryManager().commit_identity(
+            EvidenceMemorySnapshot(memory_version=3),
+            signal=child,
+            event=event,
+        )
+
+
+def test_v3_root_resolution_is_input_order_independent_for_same_cycle_parent():
+    normalizer = SignalProvenanceNormalizer()
+    parent = normalizer.normalize(
+        _signal("S_root_parent", "A root observation.", root="root-shared"),
+        run_id="run_memory",
+    )
+    child = normalizer.normalize(
+        _derived_signal(
+            "S_root_child",
+            "A summary of the root observation.",
+            parent_id=parent.id,
+            root="root-shared",
+        ),
+        run_id="run_memory",
+    )
+    snapshot = EvidenceMemorySnapshot(memory_version=3)
+
+    forward = resolve_signal_contribution_roots(snapshot, [parent, child])
+    reversed_result = resolve_signal_contribution_roots(snapshot, [child, parent])
+
+    expected_root = resolve_contribution_root_id(parent)
+    assert forward == reversed_result
+    assert forward.ordered_signal_ids == (parent.id, child.id)
+    assert forward.signal_contribution_roots == {
+        parent.id: expected_root,
+        child.id: expected_root,
+    }
+
+
+def test_v3_transition_reconstruction_is_input_order_independent_for_parent_child():
+    manager = EvidenceMemoryManager()
+    normalizer = SignalProvenanceNormalizer()
+    parent = normalizer.normalize(
+        _signal(
+            "S_transition_parent",
+            "A transition root observation.",
+            root="root-transition-shared",
+        ),
+        run_id="run_memory",
+    )
+    child = normalizer.normalize(
+        _derived_signal(
+            "S_transition_child",
+            "A transition summary.",
+            parent_id=parent.id,
+            root="root-transition-shared",
+        ),
+        run_id="run_memory",
+    )
+    signals_by_id = {signal.id: signal for signal in (parent, child)}
+    prior = EvidenceMemorySnapshot(memory_version=3)
+    resolution = resolve_signal_contribution_roots(prior, [child, parent])
+    expected = prior
+    events_by_signal_id = {}
+    for signal_id in resolution.ordered_signal_ids:
+        signal = signals_by_id[signal_id]
+        decision = manager.classify(expected, signal)
+        event = EvidenceEvent(
+            schema_version="v0.2",
+            id=f"E_{signal_id}",
+            derived_from_signal=signal.id,
+            epistemic_origin=signal.provenance.epistemic_origin,
+            derivation_root_id=signal.provenance.derivation_root_id,
+            contribution_root_id=(
+                resolution.signal_contribution_roots[signal.id]
+            ),
+            target_hypotheses=["A"],
+            evidence_type=EvidenceType.NEUTRAL,
+            content=signal.raw_content,
+            reliability=0.0,
+            independence=0.0,
+            relevance=0.0,
+            novelty=0.0,
+            specificity=0.0,
+            verifiability=0.0,
+            likelihoods={"A": LikelihoodBand.NEUTRAL},
+            correlation_status=decision.correlation_status,
+            effective_update_weight=None,
+        )
+        events_by_signal_id[signal.id] = event
+        expected = manager.commit_identity(
+            expected,
+            signal=signal,
+            event=event,
+        )
+    expected = EvidenceRootReconciler().reconcile_cycle(
+        expected,
+        list(events_by_signal_id.values()),
+        falsification_probe_executed=False,
+    ).evidence_memory
+
+    for signals in ([parent, child], [child, parent]):
+        events = [events_by_signal_id[signal.id] for signal in signals]
+        assert manager.validate_transition(
+            prior,
+            expected,
+            evidence_events=events,
+            normalized_signals=signals,
+            existing_evidence_ids=[],
+            frame_version=1,
+        ) == expected
+
+
+def test_v3_root_resolution_rejects_missing_parent():
+    child = SignalProvenanceNormalizer().normalize(
+        _derived_signal(
+            "S_missing_parent_child",
+            "A summary without its parent.",
+            parent_id="S_missing_parent",
+            root="root-missing-parent",
+        ),
+        run_id="run_memory",
+    )
+
+    with pytest.raises(ValueError, match="missing a parent signal"):
+        resolve_signal_contribution_roots(
+            EvidenceMemorySnapshot(memory_version=3),
+            [child],
+        )
+
+
+def test_v3_root_resolution_rejects_parent_cycle():
+    normalizer = SignalProvenanceNormalizer()
+    first = normalizer.normalize(
+        _derived_signal(
+            "S_cycle_first",
+            "The first cyclic summary.",
+            parent_id="S_cycle_second",
+            root="root-cycle",
+        ),
+        run_id="run_memory",
+    )
+    second = normalizer.normalize(
+        _derived_signal(
+            "S_cycle_second",
+            "The second cyclic summary.",
+            parent_id="S_cycle_first",
+            root="root-cycle",
+        ),
+        run_id="run_memory",
+    )
+
+    with pytest.raises(ValueError, match="contains a cycle"):
+        resolve_signal_contribution_roots(
+            EvidenceMemorySnapshot(memory_version=3),
+            [first, second],
+        )
+
+
+def test_v3_root_resolution_rejects_cycle_between_previously_bound_signal_ids():
+    normalizer = SignalProvenanceNormalizer()
+    first = normalizer.normalize(
+        _signal("S_bound_cycle_first", "First bound signal.", root="root-cycle"),
+        run_id="run_memory",
+    )
+    second = normalizer.normalize(
+        _signal("S_bound_cycle_second", "Second bound signal.", root="root-cycle"),
+        run_id="run_memory",
+    )
+    memory = EvidenceMemorySnapshot(memory_version=3)
+    manager = EvidenceMemoryManager()
+    for signal in (first, second):
+        memory = manager.remember_signal_identity(memory, signal)
+    payload = memory.model_dump(mode="python")
+    root_id = resolve_contribution_root_id(first)
+    payload["signal_contribution_roots"] = {
+        first.id: root_id,
+        second.id: root_id,
+    }
+    memory = EvidenceMemorySnapshot.model_validate(payload)
+    first_cycle = normalizer.normalize(
+        first.model_copy(
+            update={
+                "provenance": first.provenance.model_copy(
+                    update={"parent_signal_ids": [second.id]}
+                )
+            }
+        ),
+        run_id="run_memory",
+    )
+    second_cycle = normalizer.normalize(
+        second.model_copy(
+            update={
+                "provenance": second.provenance.model_copy(
+                    update={"parent_signal_ids": [first.id]}
+                )
+            }
+        ),
+        run_id="run_memory",
+    )
+
+    with pytest.raises(ValueError, match="contains a cycle"):
+        resolve_signal_contribution_roots(
+            memory,
+            [first_cycle, second_cycle],
+        )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_v3_root_resolution_rejects_duplicate_signal_id_definitions(reverse):
+    normalizer = SignalProvenanceNormalizer()
+    root_signal = normalizer.normalize(
+        _signal(
+            "S_duplicate_definition",
+            "One signal id must have one root definition.",
+        ),
+        run_id="run_memory",
+    )
+    self_parent = normalizer.normalize(
+        root_signal.model_copy(
+            update={
+                "provenance": root_signal.provenance.model_copy(
+                    update={"parent_signal_ids": [root_signal.id]}
+                )
+            }
+        ),
+        run_id="run_memory",
+    )
+    signals = [root_signal, self_parent]
+    if reverse:
+        signals.reverse()
+
+    with pytest.raises(ValueError, match="signal id lineage conflict"):
+        resolve_signal_contribution_roots(
+            EvidenceMemorySnapshot(memory_version=3),
+            signals,
+        )
+
+
+def test_v3_root_resolution_rejects_conflicting_parent_roots():
+    normalizer = SignalProvenanceNormalizer()
+    first = normalizer.normalize(
+        _signal("S_parent_first", "First root.", root="root-first").model_copy(
+            update={
+                "provenance": _signal(
+                    "S_parent_first",
+                    "First root.",
+                    root="root-first",
+                ).provenance.model_copy(
+                    update={"epistemic_origin": EpistemicOrigin.EXTERNAL_OBSERVATION}
+                )
+            }
+        ),
+        run_id="run_memory",
+    )
+    second_raw = _signal("S_parent_second", "Second root.", root="root-second")
+    second = normalizer.normalize(
+        second_raw.model_copy(
+            update={
+                "provenance": second_raw.provenance.model_copy(
+                    update={"epistemic_origin": EpistemicOrigin.EXTERNAL_OBSERVATION}
+                )
+            }
+        ),
+        run_id="run_memory",
+    )
+    child_raw = _derived_signal(
+        "S_conflicting_child",
+        "A summary joining incompatible roots.",
+        parent_id=first.id,
+        root="root-first",
+    )
+    child = normalizer.normalize(
+        child_raw.model_copy(
+            update={
+                "provenance": child_raw.provenance.model_copy(
+                    update={"parent_signal_ids": [first.id, second.id]}
+                )
+            }
+        ),
+        run_id="run_memory",
+    )
+
+    with pytest.raises(ValueError, match="exactly one parent contribution root"):
+        resolve_signal_contribution_roots(
+            EvidenceMemorySnapshot(memory_version=3),
+            [child, second, first],
+        )
+
+
+def test_v3_root_resolution_rejects_parentless_derived_summary():
+    raw = _derived_signal(
+        "S_parentless_summary",
+        "A parentless derived summary.",
+        parent_id="S_removed_parent",
+        root="root-parentless",
+    )
+    parentless = SignalProvenanceNormalizer().normalize(
+        raw.model_copy(
+            update={
+                "provenance": raw.provenance.model_copy(
+                    update={"parent_signal_ids": []}
+                )
+            }
+        ),
+        run_id="run_memory",
+    )
+
+    with pytest.raises(ValueError, match="derived summary requires parent signals"):
+        resolve_signal_contribution_roots(
+            EvidenceMemorySnapshot(memory_version=3),
+            [parentless],
+        )
 
 
 def test_v1_identity_write_upgrades_all_identities_to_v2():
@@ -3636,7 +4102,7 @@ def test_v1_identity_write_upgrades_all_identities_to_v2():
     )
 
 
-@pytest.mark.parametrize("memory_version", [0, 3, 999])
+@pytest.mark.parametrize("memory_version", [0, 4, 999])
 def test_native_belief_state_rejects_unsupported_memory_version(memory_version):
     state = _state()
     payload = state.model_dump(mode="python")
@@ -3646,12 +4112,12 @@ def test_native_belief_state_rejects_unsupported_memory_version(memory_version):
         type(state).model_validate(payload)
 
 
-def test_native_belief_state_rejects_credit_for_unknown_hypothesis_subject():
+def test_native_belief_state_rejects_correlation_credit():
     state = _state()
     payload = state.model_dump(mode="python")
     payload["evidence_memory"]["correlation_credit"] = {
         "group|UNKNOWN|confirming": 0.2
     }
 
-    with pytest.raises(ValueError, match="unknown hypothesis"):
+    with pytest.raises(ValueError, match="memory v3 does not use correlation credit"):
         type(state).model_validate(payload)

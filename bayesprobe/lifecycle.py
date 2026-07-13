@@ -52,6 +52,9 @@ def resolve_belief_lifecycle(belief_state: BeliefState) -> BeliefLifecycle:
         raise _invalid_lifecycle_error()
     has_migration_marker = "migration" in task_frame.framing_trace
     marker = task_frame.framing_trace.get("migration")
+    evidence_memory = validated.evidence_memory
+    if evidence_memory is None:
+        raise _invalid_lifecycle_error()
     if task_frame.framing_method == FramingMethod.LEGACY_MIGRATION:
         if (
             not isinstance(marker, str)
@@ -59,7 +62,15 @@ def resolve_belief_lifecycle(belief_state: BeliefState) -> BeliefLifecycle:
             or not _has_v01_migration_receipt(belief_state)
         ):
             raise _invalid_lifecycle_error()
+        if evidence_memory.memory_version not in {1, 2}:
+            raise ValueError(
+                "legacy migration requires evidence memory version 1 or 2"
+            )
         return BeliefLifecycle.LEGACY_V01_MIGRATION
     if has_migration_marker:
         raise _invalid_lifecycle_error()
+    if evidence_memory.memory_version != 3:
+        raise ValueError(
+            "native v0.2 requires evidence memory version 3"
+        )
     return BeliefLifecycle.NATIVE_V02

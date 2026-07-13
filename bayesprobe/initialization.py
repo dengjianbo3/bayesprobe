@@ -176,7 +176,7 @@ class BayesProbeInitializer:
             hypotheses,
             frame_state=frame_state,
         )
-        evidence_memory = EvidenceMemorySnapshot()
+        evidence_memory = EvidenceMemorySnapshot(memory_version=3)
         belief_state = BeliefState(
             schema_version="v0.2",
             belief_state_id=f"{run_id}_bs_0",

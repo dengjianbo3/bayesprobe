@@ -1,6 +1,7 @@
 import pytest
 
 from bayesprobe.migrations import (
+    _carry_v01_migration_receipt,
     _has_v01_migration_receipt,
     migrate_belief_state_v0_1,
     migrate_task_frame_v0_1,
@@ -9,11 +10,14 @@ from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
 from bayesprobe.schemas import (
     AnswerRelationship,
     BeliefState,
+    EvidenceMemorySnapshot,
     FrameAdequacyStatus,
     FramingMethod,
     HypothesisCompetition,
     HypothesisCoverage,
 )
+from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.schemas import AnswerChoice
 
 
 def legacy_mcq_frame_payload() -> dict:
@@ -161,6 +165,52 @@ def test_migrates_belief_state_with_frame_and_empty_memory():
     assert migrated.evidence_memory.memory_version == 1
     assert migrated.evidence_memory.accepted_evidence_ids == []
     assert [item.answer_value for item in migrated.hypotheses] == [None, None]
+
+
+def test_native_lifecycle_rejects_historical_memory_semantics():
+    native = BayesProbeInitializer().initialize(
+        InitializeRunInput(
+            run_id="native_memory_lifecycle",
+            problem="Which option is supported?",
+            answer_choices=[
+                AnswerChoice(label="A", text="Option A"),
+                AnswerChoice(label="B", text="Option B"),
+            ],
+        )
+    ).belief_state
+    historical_memory = EvidenceMemorySnapshot(memory_version=2)
+    native = native.model_copy(
+        update={"evidence_memory": historical_memory}
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="native v0.2 requires evidence memory version 3",
+    ):
+        resolve_belief_lifecycle(native)
+
+
+def test_legacy_lifecycle_accepts_memory_v2():
+    migrated = migrate_belief_state_v0_1(legacy_belief_state_payload())
+    evolved = migrated.model_copy(
+        update={"evidence_memory": EvidenceMemorySnapshot(memory_version=2)}
+    )
+    evolved = _carry_v01_migration_receipt(migrated, evolved)
+
+    assert resolve_belief_lifecycle(evolved) == (
+        BeliefLifecycle.LEGACY_V01_MIGRATION
+    )
+
+
+def test_legacy_lifecycle_rejects_native_memory_semantics():
+    migrated = migrate_belief_state_v0_1(legacy_belief_state_payload())
+    migrated.evidence_memory = EvidenceMemorySnapshot(memory_version=3)
+
+    with pytest.raises(
+        ValueError,
+        match="invalid belief lifecycle",
+    ):
+        resolve_belief_lifecycle(migrated)
 
 
 @pytest.mark.parametrize(

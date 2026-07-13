@@ -8,6 +8,10 @@ import math
 import unicodedata
 from typing import Any, Literal
 
+from bayesprobe.evidence_roots import (
+    EvidenceRootReconciler,
+    resolve_contribution_root_id,
+)
 from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.schemas import (
     EpistemicOrigin,
@@ -33,7 +37,7 @@ CorrelationStatus = Literal[
 ]
 
 _CURRENT_MEMORY_VERSION = 2
-_SUPPORTED_MEMORY_VERSIONS = frozenset({1, 2})
+_SUPPORTED_MEMORY_VERSIONS = frozenset({1, 2, 3})
 _MODEL_PROVIDER_FALLBACK_PREFIX = "model_provider_fallback:v1:"
 SIGNAL_QUALITY_METRICS = (
     "reliability",
@@ -214,6 +218,71 @@ class EvidenceMemoryDecision:
 class ModelProvenanceKeys:
     source_identity: str
     correlation_group: str
+
+
+@dataclass(frozen=True)
+class SignalContributionRootResolution:
+    signal_contribution_roots: dict[str, str]
+    ordered_signal_ids: tuple[str, ...]
+
+
+def resolve_signal_contribution_roots(
+    snapshot: EvidenceMemorySnapshot,
+    signals: list[ExternalSignal],
+) -> SignalContributionRootResolution:
+    if snapshot.memory_version != 3:
+        raise ValueError("signal contribution root resolution requires memory version 3")
+
+    signals_by_id: dict[str, ExternalSignal] = {}
+    for signal in signals:
+        if signal.id in signals_by_id:
+            raise ValueError("signal id lineage conflict")
+        signals_by_id[signal.id] = signal
+
+    bindings = dict(snapshot.signal_contribution_roots)
+    same_cycle_ids = set(signals_by_id)
+    for signal in signals_by_id.values():
+        provenance = _required_provenance(signal)
+        missing_parent_ids = set(provenance.parent_signal_ids).difference(
+            bindings,
+            same_cycle_ids,
+        )
+        if missing_parent_ids:
+            raise ValueError(
+                "signal contribution root resolution is missing a parent signal"
+            )
+
+    unresolved = set(signals_by_id)
+    ordered_signal_ids: list[str] = []
+    while unresolved:
+        resolved_this_pass: list[str] = []
+        for signal_id in sorted(unresolved):
+            signal = signals_by_id[signal_id]
+            provenance = _required_provenance(signal)
+            if any(
+                parent_id in unresolved
+                for parent_id in provenance.parent_signal_ids
+            ):
+                continue
+            root_id = resolve_contribution_root_id(
+                signal,
+                parent_contribution_roots=bindings,
+            )
+            prior_root_id = bindings.get(signal_id)
+            if prior_root_id is not None and prior_root_id != root_id:
+                raise ValueError("signal contribution root conflict")
+            bindings[signal_id] = root_id
+            resolved_this_pass.append(signal_id)
+        if not resolved_this_pass:
+            raise ValueError("signal contribution root resolution contains a cycle")
+        for signal_id in resolved_this_pass:
+            unresolved.remove(signal_id)
+            ordered_signal_ids.append(signal_id)
+
+    return SignalContributionRootResolution(
+        signal_contribution_roots=bindings,
+        ordered_signal_ids=tuple(ordered_signal_ids),
+    )
 
 
 def derive_model_gateway_signal_source(adapter_kind: str) -> str:
@@ -482,8 +551,13 @@ class EvidenceMemoryManager:
         )
         derivation_roots[signal.id] = provenance.derivation_root_id
 
+        target_memory_version = (
+            3
+            if snapshot.memory_version == 3
+            else _CURRENT_MEMORY_VERSION
+        )
         if (
-            snapshot.memory_version == _CURRENT_MEMORY_VERSION
+            snapshot.memory_version == target_memory_version
             and content_fingerprints == snapshot.content_fingerprints
             and source_content_fingerprints == snapshot.source_content_fingerprints
             and derivation_roots == snapshot.derivation_roots
@@ -491,15 +565,19 @@ class EvidenceMemoryManager:
             return snapshot
 
         return EvidenceMemorySnapshot(
-            memory_version=_CURRENT_MEMORY_VERSION,
+            memory_version=target_memory_version,
             accepted_evidence_ids=list(snapshot.accepted_evidence_ids),
             content_fingerprints=content_fingerprints,
             source_content_fingerprints=source_content_fingerprints,
             derivation_roots=derivation_roots,
+            signal_contribution_roots=dict(
+                snapshot.signal_contribution_roots
+            ),
             event_signal_identity_digests=dict(
                 snapshot.event_signal_identity_digests
             ),
             correlation_credit=dict(snapshot.correlation_credit),
+            root_contributions=dict(snapshot.root_contributions),
             discovery_evidence_ids=list(snapshot.discovery_evidence_ids),
             counterevidence_ids_by_hypothesis={
                 hypothesis_id: list(evidence_ids)
@@ -603,6 +681,78 @@ class EvidenceMemoryManager:
             )
         for signal in normalized_signals:
             self.validate_signal_lineage(identity_shadow, signal)
+
+        if prior.memory_version == 3:
+            if candidate.memory_version != 3:
+                raise ValueError("evidence memory transition is invalid")
+            resolution = resolve_signal_contribution_roots(
+                prior,
+                normalized_signals,
+            )
+            order_by_signal_id = {
+                signal_id: index
+                for index, signal_id in enumerate(
+                    resolution.ordered_signal_ids
+                )
+            }
+            ordered_groups = sorted(
+                signal_event_groups,
+                key=lambda item: order_by_signal_id[item[0].id],
+            )
+            expected = prior
+            quality_assessor = SignalQualityAssessor()
+            seen_signatures: set[tuple[str, str]] = set()
+            for signal, events in ordered_groups:
+                is_cycle_duplicate = observe_cycle_signal_duplicate(
+                    signal,
+                    seen_signatures,
+                )
+                decision = self.classify(expected, signal)
+                for event in events:
+                    if (
+                        event.schema_version != "v0.2"
+                        or event.contribution_root_id
+                        != resolution.signal_contribution_roots[signal.id]
+                        or event.effective_update_weight is not None
+                        or event.correlation_status
+                        != decision.correlation_status
+                        or not _matches_required_discard_semantics(
+                            event.discard_reason,
+                            decision.discard_reason,
+                        )
+                    ):
+                        raise ValueError("evidence memory transition is invalid")
+                    quality_cap = quality_assessor.assess(
+                        signal=signal,
+                        event_type=event.evidence_type,
+                        is_duplicate=(
+                            is_cycle_duplicate
+                            or decision.correlation_status == "duplicate_exact"
+                        ),
+                    )
+                    if any(
+                        getattr(event, metric) > getattr(quality_cap, metric)
+                        for metric in SIGNAL_QUALITY_METRICS
+                    ):
+                        raise ValueError("evidence memory transition is invalid")
+                    if (
+                        decision.correlation_status == "correlated_restatement"
+                        and (event.independence != 0.0 or event.novelty > 0.25)
+                    ):
+                        raise ValueError("evidence memory transition is invalid")
+                    expected = self.commit_identity(
+                        expected,
+                        signal=signal,
+                        event=event,
+                    )
+            expected = EvidenceRootReconciler().reconcile_cycle(
+                expected,
+                ordered_events,
+                falsification_probe_executed=False,
+            ).evidence_memory
+            if candidate != expected:
+                raise ValueError("evidence memory transition is invalid")
+            return
 
         expected = prior
         quality_assessor = SignalQualityAssessor()
@@ -738,6 +888,17 @@ class EvidenceMemoryManager:
         else:
             status = "novel"
 
+        if snapshot.memory_version == 3:
+            return EvidenceMemoryDecision(
+                correlation_status=status,
+                effective_update_weight=0.0,
+                discard_reason=(
+                    "duplicate_exact" if status == "duplicate_exact" else None
+                ),
+                remaining_credit={},
+                canonical_correlation_group=canonical_group,
+            )
+
         cap = self._policy.max_cumulative_effective_weight_per_direction
         credit_keys = _credit_keys(
             canonical_group,
@@ -808,7 +969,67 @@ class EvidenceMemoryManager:
         event: EvidenceEvent,
         decision: EvidenceMemoryDecision,
     ) -> EvidenceMemorySnapshot:
+        if snapshot.memory_version == 3:
+            raise ValueError("legacy correlation credit commit requires memory version 1 or 2")
         self.validate_policy_snapshot(snapshot)
+        event_known = _event_id_in_lifecycle(snapshot, event.id)
+        snapshot = self.remember_signal_identity(
+            snapshot,
+            signal,
+            canonical_correlation_group=decision.canonical_correlation_group,
+        )
+        identity_snapshot = self.commit_identity(
+            snapshot,
+            signal=signal,
+            event=event,
+        )
+        if event_known:
+            return identity_snapshot
+
+        correlation_credit = self._commit_correlation_credit(
+            identity_snapshot,
+            event=event,
+            decision=decision,
+        )
+        payload = identity_snapshot.model_dump(mode="python")
+        payload["correlation_credit"] = correlation_credit
+        return EvidenceMemorySnapshot.model_validate(payload)
+
+    def commit_identity(
+        self,
+        snapshot: EvidenceMemorySnapshot,
+        *,
+        signal: ExternalSignal,
+        event: EvidenceEvent,
+    ) -> EvidenceMemorySnapshot:
+        """Commit canonical signal/event identity without assigning update credit."""
+        self.validate_policy_snapshot(snapshot)
+        if snapshot.memory_version == 3:
+            provenance = _required_provenance(signal)
+            if (
+                event.schema_version != "v0.2"
+                or event.contribution_root_id is None
+                or event.effective_update_weight is not None
+            ):
+                raise ValueError(
+                    "memory v3 identity commits require root-bound v0.2 evidence"
+                )
+            if (
+                event.derived_from_signal != signal.id
+                or event.content != signal.raw_content
+                or event.epistemic_origin != provenance.epistemic_origin
+                or event.derivation_root_id != provenance.derivation_root_id
+            ):
+                raise ValueError(
+                    "memory v3 identity commits require canonical signal evidence"
+                )
+            resolved_root_id = resolve_contribution_root_id(
+                signal,
+                parent_contribution_roots=snapshot.signal_contribution_roots,
+            )
+            if event.contribution_root_id != resolved_root_id:
+                raise ValueError("signal contribution root conflict")
+
         event_known = _event_id_in_lifecycle(snapshot, event.id)
         signal_identity_digest = self.validate_event_signal_identity(
             snapshot,
@@ -819,11 +1040,16 @@ class EvidenceMemoryManager:
         snapshot = self.remember_signal_identity(
             snapshot,
             signal,
-            canonical_correlation_group=decision.canonical_correlation_group,
         )
 
+        signal_contribution_roots = dict(snapshot.signal_contribution_roots)
+        if snapshot.memory_version == 3:
+            signal_contribution_roots[signal.id] = event.contribution_root_id
+
         if event_known:
-            return snapshot
+            payload = snapshot.model_dump(mode="python")
+            payload["signal_contribution_roots"] = signal_contribution_roots
+            return EvidenceMemorySnapshot.model_validate(payload)
 
         accepted_ids = list(snapshot.accepted_evidence_ids)
         discard_history = list(snapshot.discard_and_schema_history)
@@ -838,12 +1064,6 @@ class EvidenceMemoryManager:
         )
         event_signal_identity_digests[event.id] = signal_identity_digest
 
-        correlation_credit = self._commit_correlation_credit(
-            snapshot,
-            event=event,
-            decision=decision,
-        )
-
         counterevidence = {
             hypothesis_id: list(evidence_ids)
             for hypothesis_id, evidence_ids in snapshot.counterevidence_ids_by_hypothesis.items()
@@ -853,18 +1073,17 @@ class EvidenceMemoryManager:
                 if _direction_for(band) == "disconfirming":
                     counterevidence.setdefault(hypothesis_id, []).append(event.id)
 
-        return EvidenceMemorySnapshot(
-            memory_version=snapshot.memory_version,
-            accepted_evidence_ids=accepted_ids,
-            content_fingerprints=dict(snapshot.content_fingerprints),
-            source_content_fingerprints=dict(snapshot.source_content_fingerprints),
-            derivation_roots=dict(snapshot.derivation_roots),
-            event_signal_identity_digests=event_signal_identity_digests,
-            correlation_credit=correlation_credit,
-            discovery_evidence_ids=list(snapshot.discovery_evidence_ids),
-            counterevidence_ids_by_hypothesis=counterevidence,
-            discard_and_schema_history=discard_history,
+        payload = snapshot.model_dump(mode="python")
+        payload.update(
+            {
+                "accepted_evidence_ids": accepted_ids,
+                "signal_contribution_roots": signal_contribution_roots,
+                "event_signal_identity_digests": event_signal_identity_digests,
+                "counterevidence_ids_by_hypothesis": counterevidence,
+                "discard_and_schema_history": discard_history,
+            }
         )
+        return EvidenceMemorySnapshot.model_validate(payload)
 
     def _commit_correlation_credit(
         self,
@@ -873,6 +1092,10 @@ class EvidenceMemoryManager:
         event: EvidenceEvent,
         decision: EvidenceMemoryDecision,
     ) -> dict[str, float]:
+        if snapshot.memory_version == 3:
+            raise ValueError(
+                "legacy correlation credit commit requires memory version 1 or 2"
+            )
         correlation_credit = dict(snapshot.correlation_credit)
         if (
             event.discard_reason is not None
@@ -1275,9 +1498,11 @@ __all__ = [
     "SignalQuality",
     "SignalQualityAssessor",
     "SignalProvenanceNormalizer",
+    "SignalContributionRootResolution",
     "cycle_signal_source_content_signature",
     "derive_deterministic_computation_root",
     "derive_model_gateway_signal_source",
     "derive_model_provenance_keys",
     "observe_cycle_signal_duplicate",
+    "resolve_signal_contribution_roots",
 ]
