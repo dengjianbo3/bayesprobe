@@ -528,7 +528,7 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
     assert result.ledger_path == ledger_path
     assert result.suite_result.sample_count == 3
     assert report["dataset_name"] == "toy_belief_revision"
-    assert report["final_accuracy"] == 0.333333
+    assert report["final_accuracy"] == 1.0
 
 
 @pytest.mark.parametrize(

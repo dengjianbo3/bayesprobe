@@ -51,6 +51,7 @@ from bayesprobe.schemas import (
     ChangeMyMindCondition,
     CycleSignalShape,
     EvidenceContributionMode,
+    EpistemicProgress,
     EvolutionOperation,
     FramingMethod,
     HypothesisEvolution,
@@ -266,6 +267,8 @@ class ProgressExceptionCore(BayesProbeCore):
             belief_state=current,
             frame_adequacy_decision=decision,
             hypothesis_evolutions=hypothesis_evolutions,
+            contribution_deltas=[],
+            epistemic_progress=EpistemicProgress(),
         )
 
 
@@ -822,9 +825,11 @@ def test_question_runner_executes_one_end_to_end_cycle():
     assert cycle_result.probe_set.probes
     assert cycle_result.signals
     assert cycle_result.evidence_events
-    assert cycle_result.belief_updates == []
-    assert cycle_result.contribution_deltas == []
-    assert cycle_result.epistemic_progress.max_absolute_contribution_delta == 0.0
+    assert cycle_result.belief_updates
+    assert [delta.mode for delta in cycle_result.contribution_deltas] == [
+        EvidenceContributionMode.NEW_ROOT
+    ]
+    assert cycle_result.epistemic_progress.new_root_count == 1
     assert cycle_result.answer_projection.current_best_hypothesis
     assert cycle_result.signals[0].generated_by_probe == cycle_result.probe_set.probes[0].id
 
@@ -906,7 +911,7 @@ def test_question_runner_runs_multiple_cycles_with_candidate_pool_from_projectio
         first_cycle.answer_projection.change_my_mind_condition.structured_probe_candidates[0]
     )
 
-    assert result.stop_reason == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
     assert len(result.cycle_results) == 2
     assert first_cycle.cycle.cycle_id == "run_question_multi_cycle_1"
     assert second_cycle.cycle.cycle_id == "run_question_multi_cycle_2"
@@ -932,10 +937,7 @@ def test_question_runner_projects_with_prospective_stop_reason_and_reuses_candid
         )
     )
 
-    assert [input.stop_reason for input in projector.inputs] == [
-        None,
-        "epistemic_stagnation",
-    ]
+    assert [input.stop_reason for input in projector.inputs] == [None, "max_cycles"]
     first_candidate = (
         result.cycle_results[0]
         .answer_projection.change_my_mind_condition.structured_probe_candidates[0]
@@ -1124,7 +1126,7 @@ def test_question_runner_does_not_apply_winner_threshold_to_independent_credence
         )
     )
 
-    assert result.stop_reason == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
     assert len(result.cycle_results) == 2
 
 
@@ -1492,13 +1494,13 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
         "cycle_result",
         "result",
     }
-    assert result.stop_reason == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION
-    assert result.run.metadata["stop_reason"] == "epistemic_stagnation"
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert result.run.metadata["stop_reason"] == "max_cycles"
     assert len(result.cycle_results) == 2
     assert all(cycle.probe_set.probes for cycle in result.cycle_results)
     assert all(cycle.signals for cycle in result.cycle_results)
     assert all(cycle.evidence_events for cycle in result.cycle_results)
-    assert all(cycle.belief_updates == [] for cycle in result.cycle_results)
+    assert all(cycle.belief_updates for cycle in result.cycle_results)
     assert all(
         signal.raw_content != "observer mutation"
         for cycle in result.cycle_results

@@ -94,13 +94,13 @@ def test_benchmark_harness_runs_active_only_sample():
     assert result.signal_shape == BenchmarkSignalShape.ACTIVE_ONLY
     assert result.final_best_hypothesis == "H1"
     assert result.final_correct is True
-    assert result.update_direction_accuracy == 0.0
+    assert result.update_direction_accuracy == 1.0
     assert result.projection_kind == "answer_projection"
     assert result.cycle_count == 1
     assert result.active_signal_count == 1
     assert result.passive_signal_count == 0
     assert result.evidence_event_count == 1
-    assert result.belief_update_count == 0
+    assert result.belief_update_count == 2
 
 
 def test_benchmark_harness_runs_passive_only_sample():
@@ -117,15 +117,15 @@ def test_benchmark_harness_runs_passive_only_sample():
     result = BenchmarkHarness().run_sample(sample)
 
     assert result.signal_shape == BenchmarkSignalShape.PASSIVE_ONLY
-    assert result.final_best_hypothesis == "H1"
-    assert result.final_correct is False
-    assert result.update_direction_accuracy == 0.0
+    assert result.final_best_hypothesis == "H2"
+    assert result.final_correct is True
+    assert result.update_direction_accuracy == 1.0
     assert result.projection_kind == "belief_state_projection"
     assert result.cycle_count == 1
     assert result.active_signal_count == 0
     assert result.passive_signal_count == 1
     assert result.evidence_event_count == 1
-    assert result.belief_update_count == 0
+    assert result.belief_update_count == 2
 
 
 def test_benchmark_harness_runs_active_plus_passive_sample(monkeypatch):
@@ -154,15 +154,15 @@ def test_benchmark_harness_runs_active_plus_passive_sample(monkeypatch):
     result = BenchmarkHarness().run_sample(sample)
 
     assert result.signal_shape == BenchmarkSignalShape.ACTIVE_PLUS_PASSIVE
-    assert result.final_best_hypothesis == "H1"
-    assert result.final_correct is False
-    assert result.update_direction_accuracy == 0.0
+    assert result.final_best_hypothesis == "H2"
+    assert result.final_correct is True
+    assert result.update_direction_accuracy == 1.0
     assert result.projection_kind == "answer_projection"
     assert result.cycle_count == 1
     assert result.active_signal_count == 1
     assert result.passive_signal_count == 1
     assert result.evidence_event_count == 2
-    assert result.belief_update_count == 0
+    assert result.belief_update_count == 4
     assert len(builder_calls) == 1
     builder_call = builder_calls[0]
     assert builder_call["run_id"] == result.run_id
@@ -200,8 +200,8 @@ def test_benchmark_harness_aggregates_suite_metrics():
         "suite_active",
         "suite_passive",
     ]
-    assert result.final_accuracy == 0.5
-    assert result.update_direction_accuracy == 0.0
+    assert result.final_accuracy == 1.0
+    assert result.update_direction_accuracy == 1.0
 
 
 @pytest.mark.parametrize(
@@ -249,7 +249,7 @@ def test_benchmark_harness_preserves_ledger_records(tmp_path: Path):
     assert "cycle" in record_types
     assert "external_signal" in record_types
     assert "evidence_event" in record_types
-    assert "belief_update" not in record_types
+    assert "belief_update" in record_types
     assert "epistemic_progress" in record_types
     assert "belief_state_projection" in record_types
     assert "benchmark_sample_result" in record_types
@@ -467,8 +467,10 @@ def test_benchmark_harness_reports_belief_quality_metrics():
 
     assert result.discarded_evidence_count == 0
     assert result.schema_violation_count == 0
-    assert result.dominant_hypothesis_margin == 0.0
-    assert result.belief_revision_efficiency == 0.0
+    assert result.dominant_hypothesis_margin > 0
+    assert result.belief_revision_efficiency == pytest.approx(
+        result.dominant_hypothesis_margin / 2
+    )
 
 
 def test_benchmark_harness_counts_schema_violations_as_discarded_evidence():

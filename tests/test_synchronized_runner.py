@@ -115,11 +115,13 @@ def test_synchronized_runner_processes_new_run_passive_only_round():
     assert round_result.passive_signal_count == 1
     assert round_result.signals[0].signal_kind == SignalKind.PASSIVE
     assert round_result.probe_set.probes == []
-    assert round_result.belief_state_projection.current_best_hypothesis == "H1"
+    assert round_result.belief_state_projection.current_best_hypothesis == "H2"
     assert round_result.evidence_events
-    assert round_result.belief_updates == []
-    assert round_result.contribution_deltas == []
-    assert round_result.epistemic_progress.max_absolute_contribution_delta == 0.0
+    assert round_result.belief_updates
+    assert [delta.mode for delta in round_result.contribution_deltas] == [
+        EvidenceContributionMode.NEW_ROOT
+    ]
+    assert round_result.epistemic_progress.new_root_count == 1
 
 
 def test_synchronized_runner_processes_active_only_round():
@@ -185,10 +187,13 @@ def test_synchronized_runner_processes_active_plus_passive_round():
         SignalKind.ACTIVE,
         SignalKind.PASSIVE,
     ]
-    assert round_result.belief_state_projection.current_best_hypothesis == "H1"
+    assert round_result.belief_state_projection.current_best_hypothesis == "H2"
     assert len(round_result.evidence_events) == 2
-    assert round_result.belief_updates == []
-    assert round_result.contribution_deltas == []
+    assert len(round_result.belief_updates) == 4
+    assert [delta.mode for delta in round_result.contribution_deltas] == [
+        EvidenceContributionMode.NEW_ROOT,
+        EvidenceContributionMode.NEW_ROOT,
+    ]
 
 
 def test_synchronized_runner_carries_projection_candidates_across_rounds():
@@ -387,4 +392,5 @@ def test_synchronized_runner_writes_projection_ledger_records_without_duplicate_
     assert "probe_execution" in record_types
     assert "external_signal" in record_types
     assert "evidence_event" in record_types
+    assert "belief_update" in record_types
     assert "epistemic_progress" in record_types
