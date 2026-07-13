@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from bayesprobe.evidence_memory import (
@@ -14,7 +14,9 @@ from bayesprobe.evidence_memory import (
     SignalProvenanceNormalizer,
     canonical_signal_identity_digest,
     observe_cycle_signal_duplicate,
+    resolve_signal_contribution_roots,
 )
+from bayesprobe.evidence_roots import EvidenceRootReconciler
 from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
     DeterministicModelGateway,
@@ -30,6 +32,8 @@ from bayesprobe.model_gateway import (
 from bayesprobe.schemas import (
     BeliefState,
     CycleRecord,
+    EpistemicProgress,
+    EvidenceContributionDelta,
     EvidenceEvent,
     EvidenceMemorySnapshot,
     EvidenceType,
@@ -41,7 +45,10 @@ from bayesprobe.schemas import (
     HypothesisCoverage,
     ProbeCandidate,
     ProbeDesign,
+    ProbePurpose,
     ProbeSet,
+    SignalInboxStatus,
+    SignalKind,
     redact_secret_material,
     validate_canonical_event_binding_id,
 )
@@ -53,6 +60,12 @@ class EvidenceIntegrationResult:
     probe_candidates: list[ProbeCandidate]
     evidence_memory: EvidenceMemorySnapshot | None = None
     normalized_signals: list[ExternalSignal] | None = None
+    contribution_deltas: list[EvidenceContributionDelta] = field(
+        default_factory=list
+    )
+    epistemic_progress: EpistemicProgress = field(
+        default_factory=EpistemicProgress
+    )
 
 
 @dataclass(frozen=True)
@@ -120,10 +133,6 @@ class EvidenceIntegrationGate:
         self._ensure_helpers()
         lifecycle = resolve_belief_lifecycle(belief_state)
         native_v02 = lifecycle == BeliefLifecycle.NATIVE_V02
-        evidence_events: list[EvidenceEvent] = []
-        probe_candidates: list[ProbeCandidate] = []
-        closed_signals: list[ExternalSignal] = []
-        seen_signatures: set[tuple[str, str]] = set()
         working_memory = belief_state.evidence_memory or EvidenceMemorySnapshot()
         self._memory_manager.validate_policy_snapshot(working_memory)
         prior_evidence_ids = set(
@@ -137,9 +146,23 @@ class EvidenceIntegrationGate:
             )
             for raw_signal in signals
         ]
+        root_resolution = None
+        processing_signals = normalized_signals
+        if native_v02:
+            root_resolution = resolve_signal_contribution_roots(
+                working_memory,
+                normalized_signals,
+            )
+            signals_by_id = {
+                signal.id: signal for signal in normalized_signals
+            }
+            processing_signals = [
+                signals_by_id[signal_id]
+                for signal_id in root_resolution.ordered_signal_ids
+            ]
         planned_signals = self._plan_signal_events(
             cycle=cycle,
-            signals=normalized_signals,
+            signals=processing_signals,
             native_v02=native_v02,
         )
         _preflight_migrated_event_set(
@@ -173,6 +196,47 @@ class EvidenceIntegrationGate:
                 signal,
             )
 
+        if native_v02:
+            if root_resolution is None:
+                raise ValueError("native evidence root resolution is unavailable")
+            return self._integrate_native_v3(
+                cycle=cycle,
+                belief_state=belief_state,
+                probe_set=probe_set,
+                planned_signals=planned_signals,
+                prior_evidence_ids=prior_evidence_ids,
+                working_memory=working_memory,
+                signal_contribution_roots=(
+                    root_resolution.signal_contribution_roots
+                ),
+                canonical_correlation_groups=(
+                    root_resolution.canonical_correlation_groups
+                ),
+                boundary_signals=normalized_signals,
+            )
+        return self._integrate_legacy(
+            cycle=cycle,
+            belief_state=belief_state,
+            probe_set=probe_set,
+            planned_signals=planned_signals,
+            prior_evidence_ids=prior_evidence_ids,
+            working_memory=working_memory,
+        )
+
+    def _integrate_legacy(
+        self,
+        *,
+        cycle: CycleRecord,
+        belief_state: BeliefState,
+        probe_set: ProbeSet,
+        planned_signals: list[_PlannedSignalEvents],
+        prior_evidence_ids: set[str],
+        working_memory: EvidenceMemorySnapshot,
+    ) -> EvidenceIntegrationResult:
+        evidence_events: list[EvidenceEvent] = []
+        probe_candidates: list[ProbeCandidate] = []
+        closed_signals: list[ExternalSignal] = []
+        seen_signatures: set[tuple[str, str]] = set()
         for planned in planned_signals:
             signal = planned.signal
             self._memory_manager.validate_signal_lineage(working_memory, signal)
@@ -225,7 +289,6 @@ class EvidenceIntegrationGate:
                     probe_set=probe_set,
                     cycle=cycle,
                     is_duplicate=is_cycle_duplicate,
-                    prior_memory_decision=prior_decision,
                 )
             memory_events: list[EvidenceEvent] = []
             classification_snapshot = working_memory
@@ -252,6 +315,126 @@ class EvidenceIntegrationGate:
             probe_candidates=probe_candidates,
             evidence_memory=working_memory,
             normalized_signals=closed_signals,
+        )
+
+    def _integrate_native_v3(
+        self,
+        *,
+        cycle: CycleRecord,
+        belief_state: BeliefState,
+        probe_set: ProbeSet,
+        planned_signals: list[_PlannedSignalEvents],
+        prior_evidence_ids: set[str],
+        working_memory: EvidenceMemorySnapshot,
+        signal_contribution_roots: dict[str, str],
+        canonical_correlation_groups: dict[str, str],
+        boundary_signals: list[ExternalSignal],
+    ) -> EvidenceIntegrationResult:
+        evidence_events: list[EvidenceEvent] = []
+        probe_candidates: list[ProbeCandidate] = []
+        closed_signals: list[ExternalSignal] = []
+        seen_signatures: set[tuple[str, str]] = set()
+
+        for planned in planned_signals:
+            signal = planned.signal
+            self._memory_manager.validate_signal_lineage(working_memory, signal)
+            is_cycle_duplicate = observe_cycle_signal_duplicate(
+                signal,
+                seen_signatures,
+            )
+            closed_signals.append(signal)
+            event_id = planned.event_ids[0]
+            prior_decision = self._memory_manager.classify(
+                working_memory,
+                signal,
+                frame_version=(
+                    belief_state.frame_state.frame_version
+                    if belief_state.frame_state is not None
+                    else 1
+                ),
+            )
+            if event_id in prior_evidence_ids:
+                event_result = EvidenceIntegrationResult(
+                    evidence_events=[
+                        self._replayed_event(
+                            event_id=event_id,
+                            signal=signal,
+                            belief_state=belief_state,
+                            probe_set=probe_set,
+                        )
+                    ],
+                    probe_candidates=[],
+                )
+            elif prior_decision.correlation_status == "duplicate_exact":
+                event_result = EvidenceIntegrationResult(
+                    evidence_events=[
+                        self._duplicate_exact_event(
+                            event_id=event_id,
+                            signal=signal,
+                            belief_state=belief_state,
+                            probe_set=probe_set,
+                        )
+                    ],
+                    probe_candidates=[],
+                )
+            else:
+                event_result = self._build_signal_events(
+                    event_ids=planned.event_ids,
+                    signal=signal,
+                    belief_state=belief_state,
+                    probe_set=probe_set,
+                    cycle=cycle,
+                    is_duplicate=is_cycle_duplicate,
+                )
+
+            for event in event_result.evidence_events:
+                event = self._apply_native_memory_decision(
+                    event=event,
+                    signal=signal,
+                    decision=prior_decision,
+                    contribution_root_id=signal_contribution_roots[signal.id],
+                    canonical_correlation_group=(
+                        canonical_correlation_groups[signal.id]
+                    ),
+                )
+                working_memory = self._memory_manager.commit_identity(
+                    working_memory,
+                    signal=signal,
+                    event=event,
+                )
+                evidence_events.append(event)
+            probe_candidates.extend(event_result.probe_candidates)
+
+        reconciled = EvidenceRootReconciler().reconcile_cycle(
+            working_memory,
+            evidence_events,
+            falsification_probe_executed=_falsification_probe_executed(
+                signals=closed_signals,
+                probe_set=probe_set,
+            ),
+        )
+        events_by_signal_id: dict[str, list[EvidenceEvent]] = {
+            signal.id: [] for signal in boundary_signals
+        }
+        for event in evidence_events:
+            try:
+                events_by_signal_id[event.derived_from_signal].append(event)
+            except KeyError:
+                raise ValueError(
+                    "native evidence event is outside the closed signal boundary"
+                ) from None
+        boundary_events = [
+            event
+            for signal in boundary_signals
+            for event in events_by_signal_id[signal.id]
+        ]
+        return EvidenceIntegrationResult(
+            evidence_events=boundary_events,
+            probe_candidates=probe_candidates,
+            evidence_memory=reconciled.evidence_memory,
+            normalized_signals=boundary_signals,
+            contribution_deltas=reconciled.contribution_deltas,
+            epistemic_progress=reconciled.epistemic_progress,
         )
 
     def _plan_signal_events(
@@ -444,6 +627,46 @@ class EvidenceIntegrationGate:
         )
         return EvidenceEvent.model_validate(payload), decision
 
+    def _apply_native_memory_decision(
+        self,
+        *,
+        event: EvidenceEvent,
+        signal: ExternalSignal,
+        decision: EvidenceMemoryDecision,
+        contribution_root_id: str,
+        canonical_correlation_group: str,
+    ) -> EvidenceEvent:
+        if (
+            decision.canonical_correlation_group
+            != canonical_correlation_group
+        ):
+            raise ValueError("signal canonical correlation group conflict")
+        independence = event.independence
+        novelty = event.novelty
+        if decision.correlation_status == "correlated_restatement":
+            independence = 0.0
+            novelty = min(novelty, 0.25)
+        provenance = signal.provenance
+        if provenance is None:
+            raise ValueError("native evidence requires normalized provenance")
+        payload = event.model_dump(mode="python")
+        payload.update(
+            {
+                "schema_version": "v0.2",
+                "epistemic_origin": provenance.epistemic_origin,
+                "derivation_root_id": provenance.derivation_root_id,
+                "contribution_root_id": contribution_root_id,
+                "correlation_status": decision.correlation_status,
+                "effective_update_weight": None,
+                "independence": independence,
+                "novelty": novelty,
+                "discard_reason": (
+                    decision.discard_reason or event.discard_reason
+                ),
+            }
+        )
+        return EvidenceEvent.model_validate(payload)
+
     def _model_trace_for_request(self, request: StructuredModelRequest) -> ModelInvocationTrace:
         return ModelInvocationTrace.from_request(
             request,
@@ -459,7 +682,6 @@ class EvidenceIntegrationGate:
         probe_set: ProbeSet,
         cycle: CycleRecord,
         is_duplicate: bool,
-        prior_memory_decision: EvidenceMemoryDecision,
     ) -> EvidenceIntegrationResult:
         event_id = event_ids[0]
         if signal.source_type == "external_agent_projection":
@@ -496,7 +718,6 @@ class EvidenceIntegrationGate:
                     probe_set=probe_set,
                     cycle=cycle,
                     is_duplicate=is_duplicate,
-                    prior_memory_decision=prior_memory_decision,
                 )
             ],
             probe_candidates=[],
@@ -511,7 +732,6 @@ class EvidenceIntegrationGate:
         probe_set: ProbeSet,
         cycle: CycleRecord,
         is_duplicate: bool,
-        prior_memory_decision: EvidenceMemoryDecision,
     ) -> EvidenceEvent:
         hypothesis_ids = self._resolve_target_hypotheses(
             signal=signal,
@@ -524,7 +744,6 @@ class EvidenceIntegrationGate:
             cycle=cycle,
             probe_set=probe_set,
             belief_state=belief_state,
-            memory_decision=prior_memory_decision,
         )
         try:
             judgment, model_trace = self._evidence_judgment_with_repair(request=request)
@@ -562,90 +781,9 @@ class EvidenceIntegrationGate:
         cycle: CycleRecord,
         probe_set: ProbeSet,
         belief_state: BeliefState,
-        memory_decision: EvidenceMemoryDecision,
     ) -> StructuredModelRequest:
         judgment_route = _judgment_route_for_state(belief_state)
         native_v02 = judgment_route == "native_v0.2"
-        if native_v02:
-            hypotheses_by_id = belief_state.hypotheses_by_id()
-            hypotheses = [
-                {
-                    "id": hypotheses_by_id[hypothesis_id].id,
-                    "statement": hypotheses_by_id[hypothesis_id].statement,
-                    "type": hypotheses_by_id[hypothesis_id].type,
-                    "scope": hypotheses_by_id[hypothesis_id].scope,
-                    "posterior": hypotheses_by_id[hypothesis_id].posterior,
-                    "predictions": list(
-                        hypotheses_by_id[hypothesis_id].predictions
-                    ),
-                    "falsifiers": list(
-                        hypotheses_by_id[hypothesis_id].falsifiers
-                    ),
-                    "rivals": list(hypotheses_by_id[hypothesis_id].rivals),
-                }
-                for hypothesis_id in hypothesis_ids
-            ]
-            frame = {
-                "competition": belief_state.frame_state.competition.value,
-                "coverage": belief_state.frame_state.coverage.value,
-                "frame_version": belief_state.frame_state.frame_version,
-            }
-            probes = [
-                {
-                    "id": probe.id,
-                    "purpose": probe.probe_type,
-                    "target_hypotheses": list(probe.target_hypotheses),
-                    "inquiry_goal": probe.inquiry_goal,
-                    "support_condition": dict(probe.support_condition),
-                    "weaken_condition": dict(probe.weaken_condition),
-                    "reframe_condition": (
-                        None
-                        if probe.reframe_condition is None
-                        else dict(probe.reframe_condition)
-                    ),
-                }
-                for probe in probe_set.probes
-            ]
-            provenance = signal.provenance.model_dump(mode="json")
-            memory = {
-                "correlation_status": memory_decision.correlation_status,
-                "remaining_credit": dict(memory_decision.remaining_credit),
-                "accepted_evidence_count": len(
-                    belief_state.evidence_memory.accepted_evidence_ids
-                ),
-            }
-        else:
-            hypotheses = []
-            frame = None
-            probes = []
-            provenance = None
-            memory = None
-        request_input = {
-            "signal_id": signal.id,
-            "source_type": signal.source_type,
-            "source": signal.source,
-            "raw_content": signal.raw_content,
-            "target_hypotheses": hypothesis_ids,
-            "cycle_id": cycle.cycle_id,
-            "probe_ids": [probe.id for probe in probe_set.probes],
-        }
-        if native_v02:
-            request_input.update(
-                {
-                    "hypotheses": hypotheses,
-                    "frame": frame,
-                    "probes": probes,
-                    "provenance": provenance,
-                    "memory": memory,
-                    "allowed_evidence_types": [
-                        evidence_type.value for evidence_type in EvidenceType
-                    ],
-                    "allowed_likelihood_bands": [
-                        band.value for band in LikelihoodBand
-                    ],
-                    "allowed_frame_fits": [frame_fit.value for frame_fit in FrameFit],
-                }
-            )
         route_metadata = {
             "judgment_route": judgment_route,
             "lifecycle_schema_version": belief_state.schema_version,
@@ -665,13 +803,116 @@ class EvidenceIntegrationGate:
                 belief_state.task_frame.framing_method.value
             )
         if native_v02:
+            if (
+                belief_state.task_frame is None
+                or belief_state.frame_state is None
+                or signal.provenance is None
+            ):
+                raise ValueError(
+                    "native evidence judgment requires closed task and signal context"
+                )
+            hypotheses_by_id = belief_state.hypotheses_by_id()
+            matched_probes = [
+                probe
+                for probe in probe_set.probes
+                if probe.id == signal.generated_by_probe
+            ]
+            if len(matched_probes) > 1:
+                raise ValueError("signal matches multiple frozen probes")
+            matched_probe = matched_probes[0] if matched_probes else None
+            provenance = signal.provenance
+            request_input = {
+                "task_context": {
+                    "problem": belief_state.task_frame.normalized_question,
+                    "task_context": belief_state.task_frame.task_context,
+                },
+                "hypotheses": [
+                    {
+                        "id": hypotheses_by_id[hypothesis_id].id,
+                        "statement": hypotheses_by_id[hypothesis_id].statement,
+                        "type": hypotheses_by_id[hypothesis_id].type,
+                        "scope": hypotheses_by_id[hypothesis_id].scope,
+                        "predictions": list(
+                            hypotheses_by_id[hypothesis_id].predictions
+                        ),
+                        "falsifiers": list(
+                            hypotheses_by_id[hypothesis_id].falsifiers
+                        ),
+                        "rivals": list(
+                            hypotheses_by_id[hypothesis_id].rivals
+                        ),
+                    }
+                    for hypothesis_id in hypothesis_ids
+                ],
+                "signal": {
+                    "id": signal.id,
+                    "cycle_id": signal.cycle_id,
+                    "signal_kind": signal.signal_kind.value,
+                    "source_type": signal.source_type,
+                    "source": signal.source,
+                    "raw_content": signal.raw_content,
+                    "generated_by_probe": signal.generated_by_probe,
+                    "inbox_status": signal.inbox_status.value,
+                    "initial_target_hypotheses": list(
+                        signal.initial_target_hypotheses
+                    ),
+                },
+                "provenance": {
+                    "epistemic_origin": provenance.epistemic_origin.value,
+                    "source_identity": provenance.source_identity,
+                    "provider_model_or_tool_identity": (
+                        provenance.provider_model_or_tool_identity
+                    ),
+                    "session_id": provenance.session_id,
+                    "parent_signal_ids": list(provenance.parent_signal_ids),
+                    "derivation_root_id": provenance.derivation_root_id,
+                    "correlation_group": provenance.correlation_group,
+                    "supplied_correlation_group": (
+                        provenance.supplied_correlation_group
+                    ),
+                    "canonical_content_fingerprint": (
+                        provenance.canonical_content_fingerprint
+                    ),
+                    "citations": list(provenance.citations),
+                    "artifact_refs": list(provenance.artifact_refs),
+                    "environment_state_id": provenance.environment_state_id,
+                },
+                "matched_probe": (
+                    None
+                    if matched_probe is None
+                    else {
+                        "id": matched_probe.id,
+                        "purpose": matched_probe.purpose.value,
+                        "target_hypotheses": list(
+                            matched_probe.target_hypotheses
+                        ),
+                        "inquiry_goal": matched_probe.inquiry_goal,
+                        "method": matched_probe.method,
+                        "expected_observation": (
+                            matched_probe.expected_observation
+                        ),
+                    }
+                ),
+                "target_hypotheses": list(hypothesis_ids),
+            }
             route_metadata.update(
                 {
                     "run_id": cycle.run_id,
                     "cycle_id": cycle.cycle_id,
                     "signal_id": signal.id,
+                    "belief_context_policy": "blind_no_scores_v1",
                 }
             )
+        else:
+            request_input = {
+                "signal_id": signal.id,
+                "source_type": signal.source_type,
+                "source": signal.source,
+                "raw_content": signal.raw_content,
+                "target_hypotheses": hypothesis_ids,
+                "cycle_id": cycle.cycle_id,
+                "probe_ids": [probe.id for probe in probe_set.probes],
+            }
         return StructuredModelRequest(
             task="judge_evidence",
             input=request_input,
@@ -790,7 +1031,6 @@ class EvidenceIntegrationGate:
         payload: dict[str, Any],
         original_request: StructuredModelRequest,
     ) -> EvidenceJudgment:
-        frame = original_request.input.get("frame")
         if original_request.schema_version == "v0.2":
             if original_request.metadata.get("judgment_route") != "native_v0.2":
                 raise ModelGatewayValidationError(
@@ -798,8 +1038,12 @@ class EvidenceIntegrationGate:
                 )
             judgment = evidence_judgment_from_mapping(
                 payload,
-                competition=HypothesisCompetition(frame["competition"]),
-                coverage=HypothesisCoverage(frame["coverage"]),
+                competition=HypothesisCompetition(
+                    original_request.metadata["frame_competition"]
+                ),
+                coverage=HypothesisCoverage(
+                    original_request.metadata["frame_coverage"]
+                ),
             )
         else:
             if (
@@ -1006,6 +1250,24 @@ class EvidenceIntegrationGate:
                     return probe_targets or all_hypotheses
 
         return all_hypotheses
+
+
+def _falsification_probe_executed(
+    *,
+    signals: list[ExternalSignal],
+    probe_set: ProbeSet,
+) -> bool:
+    falsification_probe_ids = {
+        probe.id
+        for probe in probe_set.probes
+        if probe.purpose is ProbePurpose.HYPOTHESIS_FALSIFICATION
+    }
+    return any(
+        signal.signal_kind is SignalKind.ACTIVE
+        and signal.inbox_status is SignalInboxStatus.ACCEPTED
+        and signal.generated_by_probe in falsification_probe_ids
+        for signal in signals
+    )
 
 
 def _verification_probe_candidate(

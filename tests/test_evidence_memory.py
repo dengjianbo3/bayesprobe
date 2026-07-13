@@ -92,6 +92,20 @@ class CountingGateway:
         }
 
 
+class LegacyCountingGateway(CountingGateway):
+    def complete_structured(self, request):
+        self.requests.append(request)
+        return {
+            "evidence_type": "supporting",
+            "likelihoods": {
+                "A": "moderately_confirming",
+                "B": "moderately_disconfirming",
+            },
+            "interpretation": "The source favors A over B.",
+            "quality_overrides": {},
+        }
+
+
 class RecordingProvenanceNormalizer(SignalProvenanceNormalizer):
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -834,7 +848,7 @@ def test_exact_cross_cycle_repeat_produces_no_update_or_provider_call():
 
     event = repeated.evidence_events[0]
     assert event.discard_reason == "duplicate_exact"
-    assert event.effective_update_weight == 0.0
+    assert event.effective_update_weight is None
     assert len(gateway.requests) == 1
 
 
@@ -960,9 +974,11 @@ def test_memory_transition_validator_accepts_production_and_identity_only_replay
     assert validated_replay.correlation_credit == validated_first.correlation_credit
 
 
-def test_memory_transition_validator_rejects_replay_only_credit_replacement():
-    state = _state()
-    first = EvidenceIntegrationGate(model_gateway=CountingGateway()).integrate(
+def test_legacy_memory_transition_rejects_replay_only_credit_replacement():
+    state = _migrated_state("belief_state_v0.1_to_v0.2")
+    first = EvidenceIntegrationGate(
+        model_gateway=LegacyCountingGateway()
+    ).integrate(
         cycle=_cycle(1),
         belief_state=state,
         probe_set=_probe_set(1),
@@ -1029,7 +1045,7 @@ def test_existing_binding_preflight_precedes_identity_or_classification(
                 "B": LikelihoodBand.NEUTRAL,
             },
             "correlation_status": "duplicate_exact",
-            "effective_update_weight": 0.0,
+            "effective_update_weight": None,
             "discard_reason": "duplicate evidence event id",
         }
     )
@@ -1289,11 +1305,11 @@ def test_same_batch_source_content_duplicate_uses_shared_quality_cap():
     assert first_event.correlation_status == "novel"
     assert first_event.independence == 0.8
     assert first_event.novelty == 0.8
-    assert first_event.effective_update_weight == pytest.approx(0.4608)
+    assert first_event.effective_update_weight is None
     assert second_event.correlation_status == "correlated_novel"
     assert second_event.independence == 0.25
     assert second_event.novelty == 0.25
-    assert second_event.effective_update_weight == pytest.approx(0.045)
+    assert second_event.effective_update_weight is None
     assert EvidenceMemoryManager().validate_transition(
         state.evidence_memory,
         result.evidence_memory,
@@ -1325,10 +1341,10 @@ def test_distinct_cycle_signatures_keep_standard_quality():
 
     assert [event.independence for event in result.evidence_events] == [0.8, 0.8]
     assert [event.novelty for event in result.evidence_events] == [0.8, 0.8]
-    assert [event.effective_update_weight for event in result.evidence_events] == [
-        pytest.approx(0.4608),
-        pytest.approx(0.4608),
-    ]
+    assert all(
+        event.effective_update_weight is None
+        for event in result.evidence_events
+    )
 
 
 def test_native_event_identity_is_unique_for_duplicate_signals_in_one_batch():
@@ -1532,7 +1548,7 @@ def test_same_root_restatement_has_zero_independence():
     event = restated.evidence_events[0]
     assert event.correlation_status == "correlated_restatement"
     assert event.independence == 0.0
-    assert event.effective_update_weight == 0.0
+    assert event.effective_update_weight is None
     assert len(gateway.requests) == 2
 
 
@@ -1959,113 +1975,6 @@ def test_transition_rejects_one_ulp_native_event_weight_mismatch():
             existing_evidence_ids=[],
             frame_version=1,
         )
-
-
-def test_gate_rejects_overcap_prior_before_normalizing_or_calling_provider():
-    manager = EvidenceMemoryManager(
-        CorrelationCreditPolicy(
-            max_cumulative_effective_weight_per_direction=0.2
-        )
-    )
-    gateway = CountingGateway()
-    normalizer = RecordingProvenanceNormalizer()
-    state = _state()
-    invalid_memory = state.evidence_memory.model_copy(
-        update={
-            "correlation_credit": {
-                "unrelated-policy-group|A|confirming": 0.3
-            }
-        }
-    )
-    state = BeliefState.model_validate(
-        state.model_copy(
-            update={"evidence_memory": invalid_memory}
-        ).model_dump(mode="python")
-    )
-    prior_state = state.model_dump(mode="json")
-    signal = _signal(
-        "S_policy_provider_preflight",
-        "A fresh source observation supports option A.",
-        root="root-policy-provider-preflight",
-    )
-
-    with pytest.raises(ValueError, match="correlation credit policy"):
-        EvidenceIntegrationGate(
-            model_gateway=gateway,
-            memory_manager=manager,
-            provenance_normalizer=normalizer,
-        ).integrate(
-            cycle=_cycle(1),
-            belief_state=state,
-            probe_set=_probe_set(1),
-            signals=[signal],
-        )
-
-    assert gateway.requests == []
-    assert normalizer.calls == []
-    assert state.model_dump(mode="json") == prior_state
-
-
-def test_gate_replay_rejects_overcap_prior_before_normalization():
-    policy = CorrelationCreditPolicy(
-        max_cumulative_effective_weight_per_direction=0.2
-    )
-    manager = EvidenceMemoryManager(policy)
-    state = _state()
-    cycle = _cycle(1)
-    probe_set = _probe_set(1)
-    signal = _signal(
-        "S_policy_replay_preflight",
-        "A replayed source observation supports option A.",
-        root="root-policy-replay-preflight",
-    )
-    first = EvidenceIntegrationGate(
-        model_gateway=CountingGateway(),
-        memory_manager=manager,
-    ).integrate(
-        cycle=cycle,
-        belief_state=state,
-        probe_set=probe_set,
-        signals=[signal],
-    )
-    event = first.evidence_events[0]
-    overcap_credit = dict(first.evidence_memory.correlation_credit)
-    overcap_credit["unrelated-policy-group|A|confirming"] = 0.3
-    invalid_memory = first.evidence_memory.model_copy(
-        update={"correlation_credit": overcap_credit}
-    )
-    ledger_refs = {
-        record_type: list(record_ids)
-        for record_type, record_ids in state.ledger_refs.items()
-    }
-    ledger_refs["evidence_events"] = [event.id]
-    replay_state = BeliefState.model_validate(
-        state.model_copy(
-            update={
-                "evidence_memory": invalid_memory,
-                "ledger_refs": ledger_refs,
-            }
-        ).model_dump(mode="python")
-    )
-    gateway = CountingGateway()
-    normalizer = RecordingProvenanceNormalizer()
-    prior_state = replay_state.model_dump(mode="json")
-
-    with pytest.raises(ValueError, match="correlation credit policy"):
-        EvidenceIntegrationGate(
-            model_gateway=gateway,
-            memory_manager=manager,
-            provenance_normalizer=normalizer,
-        ).integrate(
-            cycle=cycle,
-            belief_state=replay_state,
-            probe_set=probe_set,
-            signals=[signal],
-        )
-
-    assert gateway.requests == []
-    assert normalizer.calls == []
-    assert replay_state.model_dump(mode="json") == prior_state
 
 
 @pytest.mark.parametrize("marker", _MIGRATION_MARKERS)
@@ -3039,7 +2948,7 @@ def test_canonical_group_is_map_order_independent_and_stays_saturated():
     ]
 
 
-def test_unknown_external_parent_remains_correlated_and_nonindependent():
+def test_native_unknown_external_parent_fails_closed_before_judgment():
     gateway = CountingGateway()
     signal = _derived_signal(
         "S_unknown_external_parent",
@@ -3048,18 +2957,15 @@ def test_unknown_external_parent_remains_correlated_and_nonindependent():
         root="root-declared-by-summary",
     )
 
-    result = EvidenceIntegrationGate(model_gateway=gateway).integrate(
-        cycle=_cycle(1),
-        belief_state=_state(),
-        probe_set=_probe_set(1),
-        signals=[signal],
-    )
+    with pytest.raises(ValueError, match="missing a parent signal"):
+        EvidenceIntegrationGate(model_gateway=gateway).integrate(
+            cycle=_cycle(1),
+            belief_state=_state(),
+            probe_set=_probe_set(1),
+            signals=[signal],
+        )
 
-    event = result.evidence_events[0]
-    assert event.correlation_status == "correlated_restatement"
-    assert event.independence == 0.0
-    assert event.effective_update_weight == 0.0
-    assert len(gateway.requests) == 1
+    assert gateway.requests == []
 
 
 def test_unknown_parent_is_ledger_visible_but_receives_zero_independent_credit():
@@ -3282,7 +3188,7 @@ def test_model_origin_caps_provider_labeled_source_claim_and_overrides():
     assert event.verifiability == 0.3
 
 
-def test_native_judgment_request_contains_full_semantics_provenance_and_memory():
+def test_native_judgment_request_contains_blind_semantics_and_provenance():
     gateway = CountingGateway()
     gate = EvidenceIntegrationGate(model_gateway=gateway)
     state = _state()
@@ -3301,25 +3207,25 @@ def test_native_judgment_request_contains_full_semantics_provenance_and_memory()
     hypothesis = request.input["hypotheses"][0]
     assert request.prompt_version == "v0.2"
     assert request.schema_version == "v0.2"
-    assert hypothesis.keys() >= {
+    assert set(hypothesis) == {
         "id",
         "statement",
         "type",
         "scope",
-        "posterior",
         "predictions",
         "falsifiers",
         "rivals",
     }
-    assert request.input["frame"] == {
-        "competition": "exclusive",
-        "coverage": "exhaustive",
-        "frame_version": 1,
+    assert request.input["task_context"] == {
+        "problem": "Which option is supported?",
+        "task_context": "",
     }
     assert request.input["provenance"]["derivation_root_id"] == "root-source-1"
-    assert request.input["memory"]["correlation_status"] == "novel"
-    assert request.input["probes"] == []
+    assert request.input["matched_probe"] is None
+    assert "memory" not in request.input
+    assert request.metadata["belief_context_policy"] == "blind_no_scores_v1"
     assert result.evidence_events[0].schema_version == "v0.2"
+    assert result.evidence_events[0].effective_update_weight is None
     assert result.evidence_events[0].frame_fit.value == "explained_by_named"
 
 
