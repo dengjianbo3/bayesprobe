@@ -90,6 +90,38 @@ def test_deterministic_gateway_supports_explicit_non_hypothesis_id():
     } == {LikelihoodBand.MODERATELY_DISCONFIRMING}
 
 
+def test_deterministic_gateway_reads_native_blind_evidence_request_shape():
+    request = StructuredModelRequest(
+        task="judge_evidence",
+        input={
+            "signal": {
+                "raw_content": (
+                    "SUPPORTS D: The parity argument selects answer choice D."
+                ),
+                "source_type": "initial_context",
+            },
+            "target_hypotheses": ["A", "B", "C", "D", "E"],
+        },
+        schema_version="v0.2",
+        metadata={
+            "frame_competition": "exclusive",
+            "frame_coverage": "open",
+        },
+    )
+
+    response = DeterministicModelGateway().complete_structured(request)
+    judgment = evidence_judgment_from_mapping(
+        response,
+        competition=HypothesisCompetition.EXCLUSIVE,
+        coverage=HypothesisCoverage.OPEN,
+    )
+
+    assert judgment.evidence_type == EvidenceType.SUPPORTING
+    assert judgment.likelihoods["D"] == LikelihoodBand.MODERATELY_CONFIRMING
+    assert judgment.unresolved_likelihood == LikelihoodBand.NEUTRAL
+    assert "initial_context" in judgment.interpretation
+
+
 def test_deterministic_gateway_judges_anomaly_for_all_targets():
     response = DeterministicModelGateway().complete_structured(
         make_request("ANOMALY: current hypotheses explain this badly.", target_hypotheses=("H1", "H2", "H3"))

@@ -480,8 +480,15 @@ class DeterministicModelGateway:
         if request.task != "judge_evidence":
             raise ValueError(f"unsupported deterministic model task: {request.task}")
 
-        content_upper = str(request.input.get("raw_content", "")).upper()
-        source_type = str(request.input.get("source_type", "unknown"))
+        signal_input = request.input.get("signal")
+        if isinstance(signal_input, Mapping):
+            raw_content = signal_input.get("raw_content", "")
+            source_type_value = signal_input.get("source_type", "unknown")
+        else:
+            raw_content = request.input.get("raw_content", "")
+            source_type_value = request.input.get("source_type", "unknown")
+        content_upper = str(raw_content).upper()
+        source_type = str(source_type_value)
         hypothesis_ids = [
             str(hypothesis_id)
             for hypothesis_id in request.input.get("target_hypotheses", [])
@@ -496,9 +503,19 @@ class DeterministicModelGateway:
             hypothesis_ids=hypothesis_ids,
         )
         frame = request.input.get("frame", {})
+        if not isinstance(frame, Mapping):
+            frame = {}
+        frame_competition = frame.get(
+            "competition",
+            request.metadata.get("frame_competition"),
+        )
+        frame_coverage = frame.get(
+            "coverage",
+            request.metadata.get("frame_coverage"),
+        )
         exclusive_open = (
-            frame.get("competition") == HypothesisCompetition.EXCLUSIVE.value
-            and frame.get("coverage") == HypothesisCoverage.OPEN.value
+            frame_competition == HypothesisCompetition.EXCLUSIVE.value
+            and frame_coverage == HypothesisCoverage.OPEN.value
         )
         unresolved_likelihood = (
             LikelihoodBand.NEUTRAL.value if exclusive_open else None
