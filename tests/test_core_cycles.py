@@ -6919,6 +6919,110 @@ def test_native_progress_and_event_binding_forgery_is_atomic(
     assert ledger_path.read_bytes() == b""
 
 
+def test_native_falsification_progress_false_to_true_forgery_is_atomic(
+    tmp_path: Path,
+):
+    cycle = make_cycle("cycle_native_false_falsification_progress")
+    probe_set = make_empty_probe_set(cycle.cycle_id)
+    signal = _model_memory_signal(
+        "S_native_false_falsification_progress",
+        "The unprobed native assessment favors H1.",
+        root="native-false-falsification-progress",
+        supplied_group="native-false-falsification-progress",
+    )
+    ledger_path = tmp_path / "native-false-falsification-progress.jsonl"
+    ledger_path.touch()
+    core = BayesProbeCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        ),
+    )
+    mutation_gate = _NativeEnvelopeMutationGate(
+        core._evidence_gate,
+        "progress_falsification_flag",
+    )
+    core._evidence_gate = mutation_gate
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    prior_cycle = cycle.model_dump(mode="json")
+    prior_probe_set = probe_set.model_dump(mode="json")
+    prior_signal = signal.model_dump(mode="json")
+
+    with pytest.raises(
+        ValueError,
+        match="native evidence integration envelope is invalid",
+    ) as exc_info:
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=probe_set,
+            signals=[signal],
+        )
+
+    assert mutation_gate.original_progress.falsification_probe_executed is False
+    assert mutation_gate.returned_progress.falsification_probe_executed is True
+    assert mutation_gate.returned_deltas == mutation_gate.original_deltas
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert cycle.model_dump(mode="json") == prior_cycle
+    assert probe_set.model_dump(mode="json") == prior_probe_set
+    assert signal.model_dump(mode="json") == prior_signal
+    assert ledger_path.read_bytes() == b""
+
+
+def test_native_legitimate_falsification_progress_reaches_result_and_ledger(
+    tmp_path: Path,
+):
+    cycle = make_cycle("cycle_native_legitimate_falsification_progress")
+    probe = ProbeDesign(
+        id="P_native_legitimate_falsification",
+        cycle_id=cycle.cycle_id,
+        target_hypotheses=["H1", "H2"],
+        inquiry_goal="Try to falsify the current hypotheses.",
+        method="adversarial_model_check",
+        purpose=ProbePurpose.HYPOTHESIS_FALSIFICATION,
+    )
+    probe_set = ProbeSet(
+        probe_set_id="ps_native_legitimate_falsification",
+        cycle_id=cycle.cycle_id,
+        probes=[probe],
+        selection_reason="Legitimate falsification progress regression.",
+    )
+    signal = _model_memory_signal(
+        "S_native_legitimate_falsification",
+        "The falsification probe result favors H1.",
+        root="native-legitimate-falsification",
+        supplied_group="native-legitimate-falsification",
+    ).model_copy(update={"generated_by_probe": probe.id})
+    ledger = JsonlLedgerStore(
+        tmp_path / "native-legitimate-falsification-progress.jsonl"
+    )
+    core = BayesProbeCore(
+        ledger=ledger,
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        ),
+    )
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=probe_set,
+        signals=[signal],
+    )
+
+    assert result.evidence_events[0].discard_reason is None
+    assert result.epistemic_progress.falsification_probe_executed is True
+    progress_records = ledger.read_all("epistemic_progress")
+    assert len(progress_records) == 1
+    assert progress_records[0]["payload"]["falsification_probe_executed"] is True
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
