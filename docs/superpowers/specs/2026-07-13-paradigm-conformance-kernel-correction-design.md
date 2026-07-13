@@ -258,7 +258,7 @@ Each Evidence Root owns one current contribution:
 RootContribution
   contribution_root_id
   revision
-  assessment_event_id
+  assessment_event_ids
   epistemic_origin
   per_hypothesis_log_likelihood
   unresolved_log_likelihood | null
@@ -283,7 +283,7 @@ EvidenceContributionDelta
   current_contribution
   per_hypothesis_delta
   unresolved_delta | null
-  caused_by_event_id
+  caused_by_event_ids
 ```
 
 Only this delta enters the Belief Solver.
@@ -560,9 +560,10 @@ version explicitly.
 
 Before another expensive HLE run, select exactly 30 sample ids by deterministic
 hash order from the previously completed frozen 77-case paired set. Gold labels
-remain hidden from runtime components. Replay those ids through cycle 1 and
-cycle 4. The primary acceptance criteria are process invariants, not an
-accuracy claim:
+remain hidden from runtime components. Compare cycle 1 with the actual cycle 4
+state when reached, or with the terminal stopped state when epistemic
+stagnation ends the run earlier. The primary acceptance criteria are process
+invariants, not an accuracy claim:
 
 - stable-wrong cases without a new root do not gain confidence;
 - same-root repetition produces zero net contribution;
