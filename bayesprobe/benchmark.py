@@ -11,8 +11,8 @@ from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ModelGateway
 from bayesprobe.task_framing import HypothesisSeed
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
-    ProbeExecutionContext,
     ProbeExecutor,
+    build_probe_execution_brief,
 )
 from bayesprobe.probe_planner import ProbePlanner, ProbePlanningConfig
 from bayesprobe.projections import build_answer_projection
@@ -240,10 +240,12 @@ class BenchmarkHarness:
             ledger=self.ledger,
         ).execute_probe_set(
             probe_set=planning.probe_set,
-            context=ProbeExecutionContext(
+            context=build_probe_execution_brief(
                 run_id=initialization.run.run_id,
                 cycle_id=cycle_id,
                 belief_state=initialization.belief_state,
+                problem=sample.question_or_claim,
+                task_context=sample.initial_context,
             ),
         )
         passive_signals = [

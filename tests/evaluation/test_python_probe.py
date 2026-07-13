@@ -1,8 +1,9 @@
 import copy
 import json
 import unicodedata
+from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, fields, is_dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +24,11 @@ from bayesprobe.evaluation.python_probe import (
 )
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.evidence import SignalQualityAssessor
-from bayesprobe.probe_executor import ProbeExecutionContext
+from bayesprobe.model_gateway import ModelInvocationTrace
+from bayesprobe.probe_executor import (
+    ProbeExecutionBrief,
+    build_probe_execution_brief,
+)
 from bayesprobe.schemas import (
     BeliefState,
     CycleRecord,
@@ -80,6 +85,29 @@ _OPAQUE_CODE_PAIRS = (
     ),
     pytest.param("print('\u212a')", "print('K')", id="nfkc-compatible"),
 )
+_FORBIDDEN_PYTHON_BELIEF_KEYS = {
+    "ad_hoc_penalty",
+    "applied_ad_hoc_penalty",
+    "applied_complexity_penalty",
+    "belief_state",
+    "complexity_penalty",
+    "correlation_credit",
+    "current_best_hypothesis",
+    "effective_update_weight",
+    "evidence_credit",
+    "gap",
+    "initial_prior",
+    "posterior",
+    "posterior_summary",
+    "prior",
+    "rank",
+    "ranking",
+    "score",
+    "scores",
+    "top_hypothesis",
+    "uncertainty_summary",
+    "unresolved_alternative_mass",
+}
 POLICY_SNAPSHOT = {
     "runtime": "docker",
     "image_digest": IMAGE_DIGEST,
@@ -479,33 +507,97 @@ def legacy_execution_record():
     )
 
 
-def probe_context():
-    initialized = BayesProbeInitializer().initialize(
+def native_python_belief_state() -> BeliefState:
+    return BayesProbeInitializer().initialize(
         InitializeRunInput(
             run_id="run_1",
             problem="What is 2 + 2? Answer Choices: A. 3 B. 4 C. 5",
         )
-    )
+    ).belief_state
+
+
+def probe_context(
+    *,
+    belief_state: BeliefState | None = None,
+    run_id: str = "run_1",
+    cycle_id: str = "cycle_1",
+) -> tuple[ProbeDesign, ProbeExecutionBrief]:
+    state = belief_state or native_python_belief_state()
     probe = ProbeDesign(
         id="probe_1",
-        cycle_id="cycle_1",
+        cycle_id=cycle_id,
         target_hypotheses=["A", "B", "C"],
         inquiry_goal="Compute the exact sum.",
         method="calculation",
     )
-    context = ProbeExecutionContext(
-        run_id="run_1",
-        cycle_id="cycle_1",
-        belief_state=initialized.belief_state,
+    context = build_probe_execution_brief(
+        run_id=run_id,
+        cycle_id=cycle_id,
+        belief_state=state,
+        problem="What is 2 + 2? Answer Choices: A. 3 B. 4 C. 5",
+        task_context="Use exact arithmetic.",
         metadata={
-            "problem": initialized.run.problem,
-            "initial_context": "Use exact arithmetic.",
             "experiment_id": "experiment_1",
             "arm": "bayesprobe_python",
             "sample_id": "sample_pseudonym",
         },
     )
     return probe, context
+
+
+def recursive_keys(value) -> set[str]:
+    if is_dataclass(value):
+        return recursive_keys(
+            {field.name: getattr(value, field.name) for field in fields(value)}
+        )
+    if hasattr(value, "model_dump"):
+        return recursive_keys(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        return {
+            *(str(key).casefold() for key in value),
+            *(
+                nested_key
+                for item in value.values()
+                for nested_key in recursive_keys(item)
+            ),
+        }
+    if isinstance(value, list | tuple):
+        return {
+            nested_key
+            for item in value
+            for nested_key in recursive_keys(item)
+        }
+    return set()
+
+
+def assert_blind_python_requests(requests, *, provider_version: str) -> None:
+    assert {request.task for request in requests} == {
+        "plan_python_probe",
+        "repair_python_probe_plan",
+        "repair_python_probe_code",
+        "execute_probe",
+    }
+    for request in requests:
+        assert request.prompt_version == provider_version
+        assert request.schema_version == provider_version
+        assert request.metadata["belief_context_policy"] == "blind_no_scores_v1"
+        assert request.metadata["experiment_id"] == "experiment_1"
+        assert request.metadata["arm"] == "bayesprobe_python"
+        assert request.metadata["sample_id"] == "sample_pseudonym"
+        assert _FORBIDDEN_PYTHON_BELIEF_KEYS.isdisjoint(
+            recursive_keys(request.input)
+        )
+        assert _FORBIDDEN_PYTHON_BELIEF_KEYS.isdisjoint(
+            recursive_keys(request.metadata)
+        )
+        trace = ModelInvocationTrace.from_request(
+            request,
+            adapter_kind="sequence",
+        )
+        assert trace.metadata["belief_context_policy"] == "blind_no_scores_v1"
+        assert _FORBIDDEN_PYTHON_BELIEF_KEYS.isdisjoint(
+            recursive_keys(trace.to_dict())
+        )
 
 
 def migrated_python_belief_state(native: BeliefState, marker: str) -> BeliefState:
@@ -632,6 +724,77 @@ def python_plan(code="print(2 + 2)"):
     }
 
 
+def requests_for_all_python_model_routes(
+    *,
+    probe: ProbeDesign,
+    context: ProbeExecutionBrief,
+):
+    python_model = SequenceModelGateway(
+        [
+            python_plan(code=""),
+            python_plan(code="bad()"),
+            {"code": "print(4)"},
+        ]
+    )
+    PythonAugmentedProbeToolGateway(
+        python_model,
+        FakeSandbox(
+            [
+                execution_record(exit_code=1, stderr="NameError: bad", stdout=""),
+                execution_record(repair_attempt_index=1),
+            ]
+        ),
+    ).execute_probe(probe=probe, context=context)
+    reasoning_model = SequenceModelGateway(
+        [
+            {
+                "mode": "reasoning",
+                "purpose": "Use a conceptual argument.",
+                "target_hypotheses": ["A", "B", "C"],
+                "expected_observation": "One option follows logically.",
+                "code": None,
+            },
+            {"raw_content": "A conceptual argument supports B."},
+        ]
+    )
+    PythonAugmentedProbeToolGateway(
+        reasoning_model,
+        FakeSandbox([]),
+    ).execute_probe(probe=probe, context=context)
+    return [*python_model.requests, *reasoning_model.requests]
+
+
+def test_python_request_input_is_built_only_from_blind_execution_brief():
+    probe, context = probe_context()
+
+    request_input = python_probe_module._probe_request_input(
+        probe=probe,
+        context=context,
+    )
+
+    assert request_input["problem"] == context.problem
+    assert request_input["initial_context"] == context.task_context
+    assert {hypothesis["id"] for hypothesis in request_input["hypotheses"]} == {
+        "A",
+        "B",
+        "C",
+    }
+    assert _FORBIDDEN_PYTHON_BELIEF_KEYS.isdisjoint(
+        recursive_keys(request_input)
+    )
+
+
+def test_native_python_model_routes_are_recursively_blind_to_belief_scores():
+    probe, context = probe_context()
+
+    requests = requests_for_all_python_model_routes(
+        probe=probe,
+        context=context,
+    )
+
+    assert_blind_python_requests(requests, provider_version="v0.2")
+
+
 def _execute_opaque_code(code: str, *, repaired: bool) -> tuple[str, str]:
     probe, context = probe_context()
     model = SequenceModelGateway(
@@ -714,8 +877,9 @@ def test_python_gateway_rejects_secret_identity_before_every_route(
     model.model_identity = model_identity
     sandbox = FakeSandbox(records)
     gateway = PythonAugmentedProbeToolGateway(model, sandbox)
-    probe, context = probe_context()
-    prior_state = context.belief_state.model_dump(mode="json")
+    state = native_python_belief_state()
+    probe, context = probe_context(belief_state=state)
+    prior_state = state.model_dump(mode="json")
 
     with pytest.raises(ValueError, match="model gateway identity") as exc_info:
         gateway.execute_probe(probe=probe, context=context)
@@ -727,7 +891,7 @@ def test_python_gateway_rejects_secret_identity_before_every_route(
     assert sandbox.preflight_calls == 0
     assert sandbox.requests == []
     assert set(gateway.process_metrics.values()) == {0}
-    assert context.belief_state.model_dump(mode="json") == prior_state
+    assert state.model_dump(mode="json") == prior_state
 
 
 @pytest.mark.parametrize(
@@ -764,14 +928,12 @@ def test_python_gateway_rejects_sensitive_session_before_first_provider_call(
     model = SequenceModelGateway(outcomes)
     sandbox = FakeSandbox(records)
     gateway = PythonAugmentedProbeToolGateway(model, sandbox)
-    probe, context = probe_context()
-    context = ProbeExecutionContext(
+    state = native_python_belief_state()
+    probe, context = probe_context(
+        belief_state=state,
         run_id=_NFKC_SENSITIVE_NAME,
-        cycle_id=context.cycle_id,
-        belief_state=context.belief_state,
-        metadata=dict(context.metadata),
     )
-    prior_state = context.belief_state.model_dump(mode="json")
+    prior_state = state.model_dump(mode="json")
 
     with pytest.raises(ValueError, match="model provenance") as exc_info:
         gateway.execute_probe(probe=probe, context=context)
@@ -783,7 +945,7 @@ def test_python_gateway_rejects_sensitive_session_before_first_provider_call(
     assert sandbox.preflight_calls == 0
     assert sandbox.requests == []
     assert set(gateway.process_metrics.values()) == {0}
-    assert context.belief_state.model_dump(mode="json") == prior_state
+    assert state.model_dump(mode="json") == prior_state
 
 
 def test_python_gateway_rejects_sensitive_adapter_before_first_provider_call():
@@ -792,8 +954,9 @@ def test_python_gateway_rejects_sensitive_adapter_before_first_provider_call():
     model.adapter_kind = _NFKC_SENSITIVE_NAME
     sandbox = FakeSandbox([execution_record()])
     gateway = PythonAugmentedProbeToolGateway(model, sandbox)
-    probe, context = probe_context()
-    prior_state = context.belief_state.model_dump(mode="json")
+    state = native_python_belief_state()
+    probe, context = probe_context(belief_state=state)
+    prior_state = state.model_dump(mode="json")
 
     with pytest.raises(ValueError, match="model signal source") as exc_info:
         gateway.execute_probe(probe=probe, context=context)
@@ -805,7 +968,7 @@ def test_python_gateway_rejects_sensitive_adapter_before_first_provider_call():
     assert sandbox.preflight_calls == 0
     assert sandbox.requests == []
     assert set(gateway.process_metrics.values()) == {0}
-    assert context.belief_state.model_dump(mode="json") == prior_state
+    assert state.model_dump(mode="json") == prior_state
 
 
 def test_python_augmented_gateway_converts_successful_execution_to_active_signal():
@@ -1020,15 +1183,14 @@ def test_copied_legacy_execution_record_remains_unverified(copy_record):
 
 
 def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():
-    first_probe, first_context = probe_context()
+    initial_state = native_python_belief_state()
+    first_probe, first_context = probe_context(belief_state=initial_state)
     second_probe = first_probe.model_copy(
         update={"id": "probe_2", "cycle_id": "cycle_2"}
     )
-    second_context = ProbeExecutionContext(
-        run_id=first_context.run_id,
+    _, second_context = probe_context(
+        belief_state=initial_state,
         cycle_id="cycle_2",
-        belief_state=first_context.belief_state,
-        metadata=dict(first_context.metadata),
     )
 
     def execute(
@@ -1114,15 +1276,15 @@ def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():
             cycle_index=1,
             signal_shape=CycleSignalShape.ACTIVE_ONLY,
         ),
-        belief_state=first_context.belief_state,
+        belief_state=initial_state,
         probe_set=probe_set(first_probe, "cycle_1"),
         signals=[first_signal],
     )
-    state = first_context.belief_state.model_copy(
+    state = initial_state.model_copy(
         update={
             "evidence_memory": first.evidence_memory,
             "ledger_refs": {
-                **first_context.belief_state.ledger_refs,
+                **initial_state.ledger_refs,
                 "evidence_events": [event.id for event in first.evidence_events],
             },
         }
@@ -1142,7 +1304,7 @@ def test_repeated_python_computation_reuses_root_and_spends_no_fresh_credit():
     event = repeated.evidence_events[0]
     assert event.correlation_status == "correlated_restatement"
     assert event.independence == 0.0
-    assert event.effective_update_weight == 0.0
+    assert event.effective_update_weight is None
     assert repeated.evidence_memory.correlation_credit == (
         first.evidence_memory.correlation_credit
     )
@@ -1393,69 +1555,31 @@ def test_invalid_plan_gets_one_plan_repair():
 def test_explicit_migration_uses_v01_for_every_python_model_route(
     migration_marker,
 ):
-    probe, context = probe_context()
+    native_state = native_python_belief_state()
+    probe, _ = probe_context(belief_state=native_state)
     migrated_state = migrated_python_belief_state(
-        context.belief_state,
+        native_state,
         migration_marker,
     )
-    migrated_context = ProbeExecutionContext(
-        run_id=context.run_id,
-        cycle_id=context.cycle_id,
+    _, migrated_context = probe_context(
         belief_state=migrated_state,
-        metadata=dict(context.metadata),
     )
-    python_model = SequenceModelGateway(
-        [
-            python_plan(code=""),
-            python_plan(code="bad()"),
-            {"code": "print(4)"},
-        ]
+    requests = requests_for_all_python_model_routes(
+        probe=probe,
+        context=migrated_context,
     )
-    PythonAugmentedProbeToolGateway(
-        python_model,
-        FakeSandbox(
-            [
-                execution_record(exit_code=1, stderr="NameError: bad", stdout=""),
-                execution_record(repair_attempt_index=1),
-            ]
-        ),
-    ).execute_probe(probe=probe, context=migrated_context)
-    reasoning_model = SequenceModelGateway(
-        [
-            {
-                "mode": "reasoning",
-                "purpose": "Use a conceptual argument.",
-                "target_hypotheses": ["A", "B", "C"],
-                "expected_observation": "One option follows logically.",
-                "code": None,
-            },
-            {"raw_content": "A conceptual argument supports B."},
-        ]
-    )
-    PythonAugmentedProbeToolGateway(
-        reasoning_model,
-        FakeSandbox([]),
-    ).execute_probe(probe=probe, context=migrated_context)
-    requests = [*python_model.requests, *reasoning_model.requests]
 
-    assert {request.task for request in requests} == {
-        "plan_python_probe",
-        "repair_python_probe_plan",
-        "repair_python_probe_code",
-        "execute_probe",
-    }
     assert migrated_state.task_frame.framing_trace["migration"] == migration_marker
-    assert {request.prompt_version for request in requests} == {"v0.1"}
-    assert {request.schema_version for request in requests} == {"v0.1"}
+    assert_blind_python_requests(requests, provider_version="v0.1")
 
 
 @pytest.mark.parametrize("framing_method", _NONLEGACY_FRAMING_METHODS)
 def test_python_gateway_rejects_migrated_marker_with_nonlegacy_method(
     framing_method,
 ):
-    probe, context = probe_context()
+    native_state = native_python_belief_state()
     state = migrated_python_belief_state(
-        context.belief_state,
+        native_state,
         "belief_state_v0.1_to_v0.2",
     )
     state = state.model_copy(
@@ -1465,19 +1589,13 @@ def test_python_gateway_rejects_migrated_marker_with_nonlegacy_method(
             )
         }
     )
-    invalid_context = ProbeExecutionContext(
-        run_id=context.run_id,
-        cycle_id=context.cycle_id,
-        belief_state=state,
-        metadata=dict(context.metadata),
-    )
     model = SequenceModelGateway([python_plan()])
     sandbox = FakeSandbox([execution_record()])
     gateway = PythonAugmentedProbeToolGateway(model, sandbox)
     prior_state = state.model_dump(mode="json")
 
     with pytest.raises(ValueError, match="invalid belief lifecycle"):
-        gateway.execute_probe(probe=probe, context=invalid_context)
+        probe_context(belief_state=state)
 
     assert model.requests == []
     assert sandbox.preflight_calls == 0
@@ -1490,16 +1608,10 @@ def test_python_gateway_rejects_migrated_marker_with_nonlegacy_method(
 def test_invalid_python_migration_envelope_rejects_without_side_effects(
     invalid_envelope,
 ):
-    probe, context = probe_context()
+    native_state = native_python_belief_state()
     state = invalid_python_migration_envelope(
-        context.belief_state,
+        native_state,
         invalid_envelope,
-    )
-    invalid_context = ProbeExecutionContext(
-        run_id=context.run_id,
-        cycle_id=context.cycle_id,
-        belief_state=state,
-        metadata=dict(context.metadata),
     )
     model = SequenceModelGateway([python_plan()])
     sandbox = FakeSandbox([execution_record()])
@@ -1507,7 +1619,7 @@ def test_invalid_python_migration_envelope_rejects_without_side_effects(
     prior_state = state.model_dump(mode="json")
 
     with pytest.raises(ValueError, match="invalid belief lifecycle"):
-        gateway.execute_probe(probe=probe, context=invalid_context)
+        probe_context(belief_state=state)
 
     assert model.requests == []
     assert sandbox.preflight_calls == 0
@@ -1517,21 +1629,15 @@ def test_invalid_python_migration_envelope_rejects_without_side_effects(
 
 
 def test_unmigrated_v01_python_gateway_rejects_before_model_or_sandbox():
-    probe, context = probe_context()
-    invalid_context = ProbeExecutionContext(
-        run_id=context.run_id,
-        cycle_id=context.cycle_id,
-        belief_state=context.belief_state.model_copy(
-            update={"schema_version": "v0.1"}
-        ),
-        metadata=dict(context.metadata),
+    invalid_state = native_python_belief_state().model_copy(
+        update={"schema_version": "v0.1"}
     )
     model = SequenceModelGateway([python_plan()])
     sandbox = FakeSandbox([execution_record()])
     gateway = PythonAugmentedProbeToolGateway(model, sandbox)
 
     with pytest.raises(ValueError, match="invalid belief lifecycle"):
-        gateway.execute_probe(probe=probe, context=invalid_context)
+        probe_context(belief_state=invalid_state)
 
     assert model.requests == []
     assert sandbox.preflight_calls == 0

@@ -10,14 +10,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Callable, Protocol
 
 from bayesprobe.evidence_memory import (
     derive_deterministic_computation_root,
     derive_model_gateway_signal_source,
     derive_model_provenance_keys,
 )
-from bayesprobe.lifecycle import resolve_belief_lifecycle
 from bayesprobe.model_gateway import (
     ModelGateway,
     ModelGatewayValidationError,
@@ -25,7 +24,7 @@ from bayesprobe.model_gateway import (
     model_gateway_adapter_kind,
     model_gateway_identity,
 )
-from bayesprobe.probe_executor import ProbeExecutionContext
+from bayesprobe.probe_executor import ProbeExecutionBrief
 from bayesprobe.schemas import (
     EpistemicOrigin,
     ExternalSignal,
@@ -517,11 +516,8 @@ class PythonAugmentedProbeToolGateway:
         self,
         *,
         probe: ProbeDesign,
-        context: ProbeExecutionContext,
+        context: ProbeExecutionBrief,
     ) -> list[ExternalSignal]:
-        provider_version = resolve_belief_lifecycle(
-            context.belief_state
-        ).provider_version
         model_identity = model_gateway_identity(self._model_gateway)
         model_keys = derive_model_provenance_keys(
             provider_identity=model_identity,
@@ -544,7 +540,6 @@ class PythonAugmentedProbeToolGateway:
             plan = self._plan_probe(
                 probe=probe,
                 context=context,
-                provider_version=provider_version,
             )
         except Exception:
             return [
@@ -563,7 +558,6 @@ class PythonAugmentedProbeToolGateway:
                         plan=plan,
                         probe=probe,
                         context=context,
-                        provider_version=provider_version,
                         signal_source=reasoning_signal_source,
                         provenance=reasoning_provenance,
                     )
@@ -594,7 +588,6 @@ class PythonAugmentedProbeToolGateway:
                     record=first_record,
                     probe=probe,
                     context=context,
-                    provider_version=provider_version,
                 )
             except Exception:
                 return [
@@ -645,8 +638,7 @@ class PythonAugmentedProbeToolGateway:
         self,
         *,
         probe: ProbeDesign,
-        context: ProbeExecutionContext,
-        provider_version: Literal["v0.1", "v0.2"],
+        context: ProbeExecutionBrief,
     ) -> PythonProbePlan:
         request_input = _probe_request_input(probe=probe, context=context)
         metadata = _probe_request_metadata(probe=probe, context=context)
@@ -657,17 +649,17 @@ class PythonAugmentedProbeToolGateway:
                     task="plan_python_probe",
                     input=request_input,
                     prompt_id="python_probe_plan",
-                    prompt_version=provider_version,
+                    prompt_version=context.provider_schema_version,
                     schema_name="PythonProbePlan",
-                    schema_version=provider_version,
+                    schema_version=context.provider_schema_version,
                     metadata=metadata,
                 )
             )
             return python_probe_plan_from_mapping(
                 invalid_payload,
-                allowed_hypothesis_ids=set(
-                    context.belief_state.hypotheses_by_id()
-                ),
+                allowed_hypothesis_ids={
+                    hypothesis.id for hypothesis in context.hypotheses
+                },
             )
         except (ModelGatewayValidationError, TypeError, ValueError) as error:
             validation_error = str(error)
@@ -681,15 +673,17 @@ class PythonAugmentedProbeToolGateway:
                     "validation_error": validation_error,
                 },
                 prompt_id="python_probe_plan_repair",
-                prompt_version=provider_version,
+                prompt_version=context.provider_schema_version,
                 schema_name="PythonProbePlan",
-                schema_version=provider_version,
+                schema_version=context.provider_schema_version,
                 metadata={**metadata, "repair_attempt_index": 1},
             )
         )
         return python_probe_plan_from_mapping(
             repaired_payload,
-            allowed_hypothesis_ids=set(context.belief_state.hypotheses_by_id()),
+            allowed_hypothesis_ids={
+                hypothesis.id for hypothesis in context.hypotheses
+            },
         )
 
     def _reasoning_signal(
@@ -697,8 +691,7 @@ class PythonAugmentedProbeToolGateway:
         *,
         plan: PythonProbePlan,
         probe: ProbeDesign,
-        context: ProbeExecutionContext,
-        provider_version: Literal["v0.1", "v0.2"],
+        context: ProbeExecutionBrief,
         signal_source: str,
         provenance: SignalProvenance,
     ) -> ExternalSignal:
@@ -707,9 +700,9 @@ class PythonAugmentedProbeToolGateway:
                 task="execute_probe",
                 input=_probe_request_input(probe=probe, context=context),
                 prompt_id="probe_execution",
-                prompt_version=provider_version,
+                prompt_version=context.provider_schema_version,
                 schema_name="ProbeSignal",
-                schema_version=provider_version,
+                schema_version=context.provider_schema_version,
                 metadata=_probe_request_metadata(probe=probe, context=context),
             )
         )
@@ -737,7 +730,7 @@ class PythonAugmentedProbeToolGateway:
         *,
         code: str,
         probe: ProbeDesign,
-        context: ProbeExecutionContext,
+        context: ProbeExecutionBrief,
         image: ResolvedSandboxImage,
         repair_attempt_index: int,
     ) -> PythonExecutionRecord:
@@ -773,8 +766,7 @@ class PythonAugmentedProbeToolGateway:
         plan: PythonProbePlan,
         record: PythonExecutionRecord,
         probe: ProbeDesign,
-        context: ProbeExecutionContext,
-        provider_version: Literal["v0.1", "v0.2"],
+        context: ProbeExecutionBrief,
     ) -> str | None:
         if record.timed_out or record.policy_violation:
             return None
@@ -793,9 +785,9 @@ class PythonAugmentedProbeToolGateway:
                     },
                 },
                 prompt_id="python_probe_code_repair",
-                prompt_version=provider_version,
+                prompt_version=context.provider_schema_version,
                 schema_name="PythonCodeRepair",
-                schema_version=provider_version,
+                schema_version=context.provider_schema_version,
                 metadata={
                     **_probe_request_metadata(probe=probe, context=context),
                     "repair_attempt_index": 1,
@@ -826,7 +818,7 @@ class PythonAugmentedProbeToolGateway:
         plan: PythonProbePlan,
         record: PythonExecutionRecord,
         probe: ProbeDesign,
-        context: ProbeExecutionContext,
+        context: ProbeExecutionBrief,
     ) -> ExternalSignal:
         policy_snapshot = _validated_execution_policy(record)
         environment_state_id = derive_deterministic_computation_root(
@@ -884,7 +876,7 @@ class PythonAugmentedProbeToolGateway:
         self,
         *,
         probe: ProbeDesign,
-        context: ProbeExecutionContext,
+        context: ProbeExecutionBrief,
         reason: str,
         source: str = "python_sandbox_unavailable",
     ) -> ExternalSignal:
@@ -936,13 +928,11 @@ class _BoundedOutputCapture:
 def _probe_request_input(
     *,
     probe: ProbeDesign,
-    context: ProbeExecutionContext,
+    context: ProbeExecutionBrief,
 ) -> dict[str, Any]:
-    problem = context.metadata.get("problem", "")
-    initial_context = context.metadata.get("initial_context", "")
     return {
-        "problem": problem if isinstance(problem, str) else "",
-        "initial_context": initial_context if isinstance(initial_context, str) else "",
+        "problem": context.problem,
+        "initial_context": context.task_context,
         "probe": {
             "id": probe.id,
             "inquiry_goal": probe.inquiry_goal,
@@ -956,11 +946,10 @@ def _probe_request_input(
                 "id": hypothesis.id,
                 "statement": hypothesis.statement,
                 "scope": hypothesis.scope,
-                "posterior": hypothesis.posterior,
                 "predictions": list(hypothesis.predictions),
                 "falsifiers": list(hypothesis.falsifiers),
             }
-            for hypothesis in context.belief_state.hypotheses
+            for hypothesis in context.hypotheses
         ],
     }
 
@@ -968,12 +957,13 @@ def _probe_request_input(
 def _probe_request_metadata(
     *,
     probe: ProbeDesign,
-    context: ProbeExecutionContext,
+    context: ProbeExecutionBrief,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "run_id": context.run_id,
         "cycle_id": context.cycle_id,
         "probe_id": probe.id,
+        "belief_context_policy": "blind_no_scores_v1",
     }
     for key in ("experiment_id", "arm", "sample_id"):
         value = context.metadata.get(key)

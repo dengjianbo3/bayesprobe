@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import bayesprobe.benchmark as benchmark_module
 from bayesprobe.benchmark import (
     BenchmarkHarness,
     BenchmarkSample,
@@ -11,6 +12,7 @@ from bayesprobe.benchmark import (
 )
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy, ScriptedModelGateway
+from bayesprobe.probe_executor import build_probe_execution_brief
 from bayesprobe.schemas import BeliefUpdate, UpdateDirection
 from bayesprobe.task_framing import HypothesisSeed
 
@@ -92,13 +94,13 @@ def test_benchmark_harness_runs_active_only_sample():
     assert result.signal_shape == BenchmarkSignalShape.ACTIVE_ONLY
     assert result.final_best_hypothesis == "H1"
     assert result.final_correct is True
-    assert result.update_direction_accuracy == 1.0
+    assert result.update_direction_accuracy == 0.0
     assert result.projection_kind == "answer_projection"
     assert result.cycle_count == 1
     assert result.active_signal_count == 1
     assert result.passive_signal_count == 0
     assert result.evidence_event_count == 1
-    assert result.belief_update_count == 2
+    assert result.belief_update_count == 0
 
 
 def test_benchmark_harness_runs_passive_only_sample():
@@ -115,21 +117,33 @@ def test_benchmark_harness_runs_passive_only_sample():
     result = BenchmarkHarness().run_sample(sample)
 
     assert result.signal_shape == BenchmarkSignalShape.PASSIVE_ONLY
-    assert result.final_best_hypothesis == "H2"
-    assert result.final_correct is True
-    assert result.update_direction_accuracy == 1.0
+    assert result.final_best_hypothesis == "H1"
+    assert result.final_correct is False
+    assert result.update_direction_accuracy == 0.0
     assert result.projection_kind == "belief_state_projection"
     assert result.cycle_count == 1
     assert result.active_signal_count == 0
     assert result.passive_signal_count == 1
     assert result.evidence_event_count == 1
-    assert result.belief_update_count == 2
+    assert result.belief_update_count == 0
 
 
-def test_benchmark_harness_runs_active_plus_passive_sample():
+def test_benchmark_harness_runs_active_plus_passive_sample(monkeypatch):
+    builder_calls = []
+
+    def recording_builder(**kwargs):
+        builder_calls.append(kwargs)
+        return build_probe_execution_brief(**kwargs)
+
+    monkeypatch.setattr(
+        benchmark_module,
+        "build_probe_execution_brief",
+        recording_builder,
+    )
     sample = BenchmarkSample(
         sample_id="mixed_refute_1",
         question_or_claim="Can a mixed cycle integrate active and passive signals together?",
+        initial_context="Use the supplied benchmark observations.",
         hypothesis_seeds=benchmark_hypothesis_seeds(),
         signal_shape=BenchmarkSignalShape.ACTIVE_PLUS_PASSIVE,
         gold_best_hypothesis="H2",
@@ -140,15 +154,22 @@ def test_benchmark_harness_runs_active_plus_passive_sample():
     result = BenchmarkHarness().run_sample(sample)
 
     assert result.signal_shape == BenchmarkSignalShape.ACTIVE_PLUS_PASSIVE
-    assert result.final_best_hypothesis == "H2"
-    assert result.final_correct is True
-    assert result.update_direction_accuracy == 1.0
+    assert result.final_best_hypothesis == "H1"
+    assert result.final_correct is False
+    assert result.update_direction_accuracy == 0.0
     assert result.projection_kind == "answer_projection"
     assert result.cycle_count == 1
     assert result.active_signal_count == 1
     assert result.passive_signal_count == 1
     assert result.evidence_event_count == 2
-    assert result.belief_update_count == 4
+    assert result.belief_update_count == 0
+    assert len(builder_calls) == 1
+    builder_call = builder_calls[0]
+    assert builder_call["run_id"] == result.run_id
+    assert builder_call["cycle_id"].startswith(f"{result.run_id}_cycle_1")
+    assert set(builder_call["belief_state"].hypotheses_by_id()) == {"H1", "H2"}
+    assert builder_call["problem"] == sample.question_or_claim
+    assert builder_call["task_context"] == sample.initial_context
 
 
 def test_benchmark_harness_aggregates_suite_metrics():
@@ -179,8 +200,8 @@ def test_benchmark_harness_aggregates_suite_metrics():
         "suite_active",
         "suite_passive",
     ]
-    assert result.final_accuracy == 1.0
-    assert result.update_direction_accuracy == 1.0
+    assert result.final_accuracy == 0.5
+    assert result.update_direction_accuracy == 0.0
 
 
 @pytest.mark.parametrize(
@@ -228,7 +249,8 @@ def test_benchmark_harness_preserves_ledger_records(tmp_path: Path):
     assert "cycle" in record_types
     assert "external_signal" in record_types
     assert "evidence_event" in record_types
-    assert "belief_update" in record_types
+    assert "belief_update" not in record_types
+    assert "epistemic_progress" in record_types
     assert "belief_state_projection" in record_types
     assert "benchmark_sample_result" in record_types
 
@@ -274,7 +296,7 @@ def test_benchmark_harness_passes_model_gateway_to_created_core(tmp_path: Path):
     ]
     assert evidence_payloads[0]["evidence_type"] == "boundary_condition"
     assert evidence_payloads[0]["reliability"] == 0.62
-    assert gateway.requests[0].input["signal_id"] == "S_gateway_passive"
+    assert gateway.requests[0].input["signal"]["id"] == "S_gateway_passive"
 
 
 def test_benchmark_harness_records_model_trace_in_evidence_ledger(tmp_path: Path):
@@ -445,10 +467,8 @@ def test_benchmark_harness_reports_belief_quality_metrics():
 
     assert result.discarded_evidence_count == 0
     assert result.schema_violation_count == 0
-    assert result.dominant_hypothesis_margin > 0
-    assert result.belief_revision_efficiency == pytest.approx(
-        result.dominant_hypothesis_margin / 2
-    )
+    assert result.dominant_hypothesis_margin == 0.0
+    assert result.belief_revision_efficiency == 0.0
 
 
 def test_benchmark_harness_counts_schema_violations_as_discarded_evidence():

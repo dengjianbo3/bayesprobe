@@ -598,11 +598,6 @@ def _probe_raw_content(payload: dict[str, Any]) -> str:
     return raw_content.strip()
 
 
-# Import-only alias for prohibited legacy modules. It exposes the blind brief and
-# cannot be constructed with or reveal a BeliefState.
-ProbeExecutionContext = ProbeExecutionBrief
-
-
 __all__ = [
     "DeterministicProbeToolGateway",
     "ModelBackedProbeToolGateway",

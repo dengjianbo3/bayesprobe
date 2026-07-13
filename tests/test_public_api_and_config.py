@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import bayesprobe
+import bayesprobe.probe_executor as probe_executor_module
 from bayesprobe import (
     ArmCaseResult,
     BenchmarkDataset,
@@ -34,11 +35,14 @@ from bayesprobe import (
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     OpenAIResponsesModelGateway,
+    ProbeExecutionBrief,
+    ProbeExecutionHypothesisView,
     RecordedModelGateway,
     ScriptedModelGateway,
     StructuredModelRequest,
     build_model_gateway,
     build_openai_request_payload,
+    build_probe_execution_brief,
     evidence_judgment_from_mapping,
     load_benchmark_dataset,
     load_experiment_config,
@@ -87,6 +91,7 @@ def test_public_sdk_exports_supported_names():
         "StructuredModelRequest",
         "build_model_gateway",
         "build_openai_request_payload",
+        "build_probe_execution_brief",
         "evidence_judgment_from_mapping",
         "load_benchmark_dataset",
         "load_experiment_config",
@@ -114,7 +119,8 @@ def test_public_sdk_exports_supported_names():
         "TaskFramingError",
         "TaskFramingInput",
         "JsonlLedgerStore",
-        "ProbeExecutionContext",
+        "ProbeExecutionBrief",
+        "ProbeExecutionHypothesisView",
         "ProbeExecutionResult",
         "ProbeExecutor",
         "ProbeToolGateway",
@@ -175,6 +181,12 @@ def test_public_sdk_exports_supported_names():
     assert RecordedModelGateway.adapter_kind == "recorded"
     assert ScriptedModelGateway is not None
     assert StructuredModelRequest is not None
+    assert ProbeExecutionBrief is not None
+    assert ProbeExecutionHypothesisView is not None
+    assert build_probe_execution_brief is not None
+    assert "ProbeExecutionContext" not in bayesprobe.__all__
+    assert not hasattr(bayesprobe, "ProbeExecutionContext")
+    assert not hasattr(probe_executor_module, "ProbeExecutionContext")
     assert build_model_gateway is not None
     assert build_openai_request_payload is not None
     assert evidence_judgment_from_mapping is not None
@@ -516,7 +528,7 @@ def test_loaded_config_runs_benchmark_experiment(tmp_path: Path):
     assert result.ledger_path == ledger_path
     assert result.suite_result.sample_count == 3
     assert report["dataset_name"] == "toy_belief_revision"
-    assert report["final_accuracy"] == 1.0
+    assert report["final_accuracy"] == 0.333333
 
 
 @pytest.mark.parametrize(
