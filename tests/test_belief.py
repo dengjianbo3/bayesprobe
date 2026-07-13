@@ -617,6 +617,35 @@ def test_solver_rejects_raw_events_duplicate_roots_and_unknown_coordinates():
         )
 
 
+def test_solver_sanitizes_invalid_native_delta_validation_errors():
+    state = _native_state([_hypothesis("H1", 0.5), _hypothesis("H2", 0.5)])
+    secret = "sk-" + "q" * 32
+    invalid_delta = _new_delta(
+        "eroot:invalid-native-delta",
+        {"H1": 0.1},
+    ).model_copy(update={"caused_by_event_ids": [secret]})
+
+    with pytest.raises(ValueError) as exc_info:
+        CoverageAwareBeliefSolver().solve(
+            state,
+            [invalid_delta],
+            run_id=state.run_id,
+            cycle_id="cycle_1",
+        )
+
+    error = exc_info.value
+    rendered_errors = [str(error), repr(error)]
+    errors = getattr(error, "errors", None)
+    if callable(errors):
+        rendered_errors.append(json.dumps(errors(), default=str, sort_keys=True))
+    json_error = getattr(error, "json", None)
+    if callable(json_error):
+        rendered_errors.append(json_error())
+
+    assert all(secret not in rendered for rendered in rendered_errors)
+    assert type(error) is ValueError
+
+
 def test_independent_solver_rejects_unresolved_coordinate():
     state = _native_state(
         [_hypothesis("H1", 0.5), _hypothesis("H2", 0.5)],

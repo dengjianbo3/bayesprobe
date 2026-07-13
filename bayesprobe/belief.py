@@ -409,11 +409,16 @@ def _validate_contribution_deltas(
                 "coverage-aware solving requires validated "
                 "EvidenceContributionDelta objects"
             )
-        validated.append(
-            EvidenceContributionDelta.model_validate(
-                delta.model_dump(mode="python")
+        try:
+            validated.append(
+                EvidenceContributionDelta.model_validate(
+                    delta.model_dump(mode="python")
+                )
             )
-        )
+        except (TypeError, ValueError):
+            raise ValueError(
+                "native evidence contribution delta contract is invalid"
+            ) from None
     validated.sort(key=lambda item: item.contribution_root_id)
     root_ids = [item.contribution_root_id for item in validated]
     if len(root_ids) != len(set(root_ids)):
