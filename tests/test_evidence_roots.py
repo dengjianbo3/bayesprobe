@@ -78,6 +78,7 @@ def signal_with_provenance(
     correlation_group: str,
     derivation_root_id: str,
     cycle_id: str = "cycle_1",
+    parent_signal_ids: list[str] | None = None,
 ) -> ExternalSignal:
     return ExternalSignal(
         id=signal_id,
@@ -89,6 +90,7 @@ def signal_with_provenance(
         provenance=SignalProvenance(
             epistemic_origin=origin,
             source_identity=f"source:{signal_id}",
+            parent_signal_ids=parent_signal_ids or [],
             derivation_root_id=derivation_root_id,
             correlation_group=correlation_group,
             canonical_content_fingerprint=f"sha256:{'a' * 64}",
@@ -394,21 +396,140 @@ def test_model_signals_from_same_provider_session_share_root_across_cycles():
     assert resolve_contribution_root_id(first) == resolve_contribution_root_id(second)
 
 
-def test_derived_summaries_inherit_their_source_correlation_root():
+@pytest.mark.parametrize(
+    ("parent_origin", "child_origin"),
+    [
+        pytest.param(
+            EpistemicOrigin.MODEL_REASONING,
+            EpistemicOrigin.DERIVED_SUMMARY,
+            id="model-to-derived-summary",
+        ),
+        pytest.param(
+            EpistemicOrigin.RETRIEVED_SOURCE,
+            EpistemicOrigin.TOOL_RESULT,
+            id="retrieved-source-to-tool",
+        ),
+        pytest.param(
+            EpistemicOrigin.TOOL_RESULT,
+            EpistemicOrigin.EXTERNAL_OBSERVATION,
+            id="tool-to-external-observation",
+        ),
+        pytest.param(
+            EpistemicOrigin.EXTERNAL_OBSERVATION,
+            EpistemicOrigin.MODEL_REASONING,
+            id="external-observation-to-model",
+        ),
+    ],
+)
+def test_child_inherits_parent_root_unchanged_across_origin_changes(
+    parent_origin: EpistemicOrigin,
+    child_origin: EpistemicOrigin,
+):
+    parent = signal_with_provenance(
+        "S_parent",
+        origin=parent_origin,
+        correlation_group="group:parent",
+        derivation_root_id="derivation:parent",
+    )
+    parent_root = resolve_contribution_root_id(parent)
+    child = signal_with_provenance(
+        "S_child",
+        origin=child_origin,
+        correlation_group="group:child-must-not-be-used",
+        derivation_root_id="derivation:child-must-not-be-used",
+        parent_signal_ids=[parent.id],
+    )
+
+    assert resolve_contribution_root_id(
+        child,
+        parent_contribution_roots={parent.id: parent_root},
+    ) == parent_root
+
+
+@pytest.mark.parametrize(
+    ("first_origin", "second_origin", "correlation_group", "derivation_root"),
+    [
+        pytest.param(
+            EpistemicOrigin.MODEL_REASONING,
+            EpistemicOrigin.RETRIEVED_SOURCE,
+            "group:shared-canonical-basis",
+            "unused:correlation-rooted",
+            id="correlation-basis",
+        ),
+        pytest.param(
+            EpistemicOrigin.TOOL_RESULT,
+            EpistemicOrigin.EXTERNAL_OBSERVATION,
+            "unused:derivation-rooted",
+            "derivation:shared-canonical-basis",
+            id="derivation-basis",
+        ),
+    ],
+)
+def test_root_signal_basis_is_not_split_by_origin_label(
+    first_origin: EpistemicOrigin,
+    second_origin: EpistemicOrigin,
+    correlation_group: str,
+    derivation_root: str,
+):
     first = signal_with_provenance(
-        "S_summary_1",
-        origin=EpistemicOrigin.DERIVED_SUMMARY,
-        correlation_group="source:shared-document",
-        derivation_root_id="root:parent",
+        "S_root_1",
+        origin=first_origin,
+        correlation_group=correlation_group,
+        derivation_root_id=derivation_root,
     )
     second = signal_with_provenance(
-        "S_summary_2",
-        origin=EpistemicOrigin.DERIVED_SUMMARY,
-        correlation_group="source:shared-document",
-        derivation_root_id="root:different-copy",
+        "S_root_2",
+        origin=second_origin,
+        correlation_group=correlation_group,
+        derivation_root_id=derivation_root,
     )
 
     assert resolve_contribution_root_id(first) == resolve_contribution_root_id(second)
+
+
+def test_child_without_parent_root_mapping_fails_closed():
+    child = signal_with_provenance(
+        "S_child",
+        origin=EpistemicOrigin.DERIVED_SUMMARY,
+        correlation_group="group:child",
+        derivation_root_id="derivation:child",
+        parent_signal_ids=["S_parent"],
+    )
+
+    with pytest.raises(ValueError, match="requires parent contribution roots"):
+        resolve_contribution_root_id(child)
+
+
+def test_child_with_missing_parent_root_fails_closed():
+    child = signal_with_provenance(
+        "S_child",
+        origin=EpistemicOrigin.DERIVED_SUMMARY,
+        correlation_group="group:child",
+        derivation_root_id="derivation:child",
+        parent_signal_ids=["S_parent"],
+    )
+
+    with pytest.raises(ValueError, match="missing a parent contribution root"):
+        resolve_contribution_root_id(child, parent_contribution_roots={})
+
+
+def test_child_with_multiple_distinct_parent_roots_fails_closed():
+    child = signal_with_provenance(
+        "S_child",
+        origin=EpistemicOrigin.TOOL_RESULT,
+        correlation_group="group:child",
+        derivation_root_id="derivation:child",
+        parent_signal_ids=["S_parent_1", "S_parent_2"],
+    )
+
+    with pytest.raises(ValueError, match="exactly one parent contribution root"):
+        resolve_contribution_root_id(
+            child,
+            parent_contribution_roots={
+                "S_parent_1": "evidence-root:parent-1",
+                "S_parent_2": "evidence-root:parent-2",
+            },
+        )
 
 
 def test_deterministic_tool_inputs_resolve_to_independent_roots():

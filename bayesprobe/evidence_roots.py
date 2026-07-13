@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
@@ -49,19 +50,50 @@ class RootReconciliationResult:
     epistemic_progress: EpistemicProgress
 
 
-def resolve_contribution_root_id(signal: ExternalSignal) -> str:
+def resolve_contribution_root_id(
+    signal: ExternalSignal,
+    parent_contribution_roots: Mapping[str, str] | None = None,
+) -> str:
     provenance = signal.provenance
     if provenance is None:
         raise ValueError(
             "contribution root resolution requires normalized provenance"
         )
+    if provenance.parent_signal_ids:
+        if parent_contribution_roots is None:
+            raise ValueError(
+                "child contribution root resolution requires parent contribution roots"
+            )
+        resolved_parent_roots: list[str] = []
+        for parent_id in provenance.parent_signal_ids:
+            if parent_id not in parent_contribution_roots:
+                raise ValueError(
+                    "child contribution root resolution is missing a parent "
+                    "contribution root"
+                )
+            parent_root = parent_contribution_roots[parent_id]
+            if (
+                not isinstance(parent_root, str)
+                or not parent_root
+                or parent_root.strip() != parent_root
+            ):
+                raise ValueError("parent contribution roots must be canonical text")
+            resolved_parent_roots.append(parent_root)
+        unique_parent_roots = set(resolved_parent_roots)
+        if len(unique_parent_roots) != 1:
+            raise ValueError(
+                "child contribution root resolution requires exactly one parent "
+                "contribution root"
+            )
+        return unique_parent_roots.pop()
+
     basis = (
         provenance.correlation_group
         if provenance.epistemic_origin in _CORRELATION_ROOTED_ORIGINS
         else provenance.derivation_root_id
     )
     encoded = json.dumps(
-        {"basis": basis, "origin": provenance.epistemic_origin.value},
+        {"basis": basis},
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
