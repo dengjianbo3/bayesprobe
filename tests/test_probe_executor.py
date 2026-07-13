@@ -470,6 +470,7 @@ def make_direct_execution_brief(
     *,
     task_frame,
     metadata=None,
+    hypotheses=None,
 ) -> ProbeExecutionBrief:
     template = make_execution_brief()
     return ProbeExecutionBrief(
@@ -479,8 +480,32 @@ def make_direct_execution_brief(
         task_context=template.task_context,
         task_frame=task_frame,
         provider_schema_version=template.provider_schema_version,
-        hypotheses=template.hypotheses,
+        hypotheses=(
+            template.hypotheses
+            if hypotheses is None
+            else tuple(hypotheses)
+        ),
         metadata={} if metadata is None else metadata,
+    )
+
+
+def assert_fixed_sanitized_error(error, expected_message, forbidden_values=()):
+    rendered_surfaces = (
+        str(error),
+        repr(error),
+        repr(error.args),
+        repr(vars(error)),
+        repr(error.__cause__),
+        repr(error.__context__),
+    )
+    assert str(error) == expected_message
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert vars(error) == {}
+    assert all(
+        forbidden not in rendered
+        for forbidden in forbidden_values
+        for rendered in rendered_surfaces
     )
 
 
@@ -829,6 +854,103 @@ def test_direct_brief_rejects_extra_fields_in_closed_task_frame_schema(
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     assert unsupported_key not in repr(exc_info.value.args)
+
+
+def test_direct_brief_rejects_injected_rival_set_payload_atomically():
+    injected_key = "posterior"
+    injected_value = "H1=0.99"
+    task_frame = plain_json(make_execution_brief().task_frame)
+    task_frame["hypothesis_frame"]["rival_sets"] = {
+        injected_key: [injected_value]
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        make_direct_execution_brief(task_frame=task_frame)
+
+    assert_fixed_sanitized_error(
+        exc_info.value,
+        "probe execution task frame is invalid",
+        (injected_key, injected_value),
+    )
+
+
+@pytest.mark.parametrize(
+    "rival_sets",
+    [
+        {"H1": ["H2"]},
+        {"H1": ["H3"], "H2": ["H1"]},
+    ],
+)
+def test_direct_brief_rejects_rival_set_id_universe_mismatch(rival_sets):
+    task_frame = plain_json(make_execution_brief().task_frame)
+    task_frame["hypothesis_frame"]["rival_sets"] = rival_sets
+
+    with pytest.raises(ValueError) as exc_info:
+        make_direct_execution_brief(task_frame=task_frame)
+
+    assert_fixed_sanitized_error(
+        exc_info.value,
+        "probe execution task frame is invalid",
+    )
+
+
+def test_direct_brief_rejects_self_rivals():
+    task_frame = plain_json(make_execution_brief().task_frame)
+    task_frame["hypothesis_frame"]["rival_sets"] = {
+        "H1": ["H1", "H2"],
+        "H2": ["H1"],
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        make_direct_execution_brief(task_frame=task_frame)
+
+    assert_fixed_sanitized_error(
+        exc_info.value,
+        "probe execution task frame is invalid",
+    )
+
+
+def test_direct_brief_preserves_exclusive_frame_rival_invariant():
+    task_frame = plain_json(make_execution_brief().task_frame)
+    assert task_frame["hypothesis_frame"]["competition"] == "exclusive"
+    task_frame["hypothesis_frame"]["rival_sets"] = {
+        "H1": [],
+        "H2": ["H1"],
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        make_direct_execution_brief(task_frame=task_frame)
+
+    assert_fixed_sanitized_error(
+        exc_info.value,
+        "probe execution task frame is invalid",
+    )
+
+
+def test_direct_brief_rejects_duplicate_hypothesis_ids_in_every_input_order():
+    template = make_execution_brief()
+    first = template.hypotheses[0]
+    injected_statement = "duplicate payload winner=H2"
+    duplicate = ProbeExecutionHypothesisView(
+        id=first.id,
+        statement=injected_statement,
+        scope=first.scope,
+        predictions=first.predictions,
+        falsifiers=first.falsifiers,
+    )
+
+    for hypotheses in ((first, duplicate), (duplicate, first)):
+        with pytest.raises(ValueError) as exc_info:
+            make_direct_execution_brief(
+                task_frame=plain_json(template.task_frame),
+                hypotheses=hypotheses,
+            )
+
+        assert_fixed_sanitized_error(
+            exc_info.value,
+            "probe execution hypothesis ids must be unique",
+            (first.id, injected_statement),
+        )
 
 
 def test_brief_hypotheses_use_canonical_id_order_across_belief_rankings():

@@ -76,6 +76,9 @@ _UNSUPPORTED_METADATA_ERROR = "probe execution metadata is unsupported"
 _METADATA_SNAPSHOT_ERROR = "probe execution metadata snapshot failed"
 _TASK_FRAME_SNAPSHOT_ERROR = "probe execution task frame snapshot failed"
 _INVALID_TASK_FRAME_ERROR = "probe execution task frame is invalid"
+_DUPLICATE_HYPOTHESIS_IDS_ERROR = (
+    "probe execution hypothesis ids must be unique"
+)
 
 
 @dataclass(frozen=True)
@@ -152,10 +155,16 @@ class ProbeExecutionBrief:
             for hypothesis in hypotheses
         ):
             raise ValueError("probe execution brief hypotheses must use blind views")
+        hypothesis_ids = tuple(hypothesis.id for hypothesis in hypotheses)
+        if len(hypothesis_ids) != len(set(hypothesis_ids)):
+            _raise_fixed_error(_DUPLICATE_HYPOTHESIS_IDS_ERROR)
         hypotheses = tuple(sorted(hypotheses, key=lambda hypothesis: hypothesis.id))
         if not _is_supported_execution_metadata(metadata):
             _raise_fixed_error(_UNSUPPORTED_METADATA_ERROR)
-        if not _is_closed_task_frame(task_frame):
+        if not _is_closed_task_frame(
+            task_frame,
+            hypothesis_ids=frozenset(hypothesis_ids),
+        ):
             _raise_fixed_error(_INVALID_TASK_FRAME_ERROR)
         if contains_secret_material(metadata):
             raise ValueError(
@@ -549,7 +558,11 @@ def _is_supported_execution_metadata(metadata: dict[str, Any]) -> bool:
     )
 
 
-def _is_closed_task_frame(task_frame: dict[str, Any]) -> bool:
+def _is_closed_task_frame(
+    task_frame: dict[str, Any],
+    *,
+    hypothesis_ids: frozenset[str],
+) -> bool:
     if set(task_frame) != _TASK_FRAME_KEYS:
         return False
     if not all(
@@ -611,10 +624,22 @@ def _is_closed_task_frame(task_frame: dict[str, Any]) -> bool:
     ) is not str:
         return False
     rival_sets = hypothesis_frame["rival_sets"]
-    return isinstance(rival_sets, dict) and all(
-        type(key) is str and _is_string_list(value)
-        for key, value in rival_sets.items()
-    )
+    if not isinstance(rival_sets, dict) or set(rival_sets) != hypothesis_ids:
+        return False
+    for hypothesis_id, rivals in rival_sets.items():
+        if not _is_string_list(rivals):
+            return False
+        rival_ids = set(rivals)
+        if not rival_ids.issubset(hypothesis_ids):
+            return False
+        if hypothesis_id in rival_ids:
+            return False
+    if hypothesis_frame["competition"] == "exclusive":
+        return all(
+            set(rivals) == hypothesis_ids.difference({hypothesis_id})
+            for hypothesis_id, rivals in rival_sets.items()
+        )
+    return True
 
 
 def _is_string_list(value: Any) -> bool:
