@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import math
 
 from bayesprobe.belief import (
     CoverageAwareBeliefSolver,
@@ -44,8 +43,10 @@ from bayesprobe.schemas import (
     HypothesisCompetition,
     HypothesisCoverage,
     HypothesisStatus,
+    ProbePurpose,
     ProbeCandidate,
     ProbeSet,
+    SignalInboxStatus,
     SignalKind,
     contains_secret_material,
     utc_now,
@@ -174,6 +175,8 @@ class BayesProbeCore:
                     integration=integration,
                     belief_state=authoritative_belief_state,
                     evidence_memory=next_evidence_memory,
+                    closed_signals=ledger_signals,
+                    probe_set=authoritative_probe_set,
                 )
             )
         else:
@@ -720,6 +723,8 @@ def _validate_native_integration_envelope(
     integration: EvidenceIntegrationResult,
     belief_state: BeliefState,
     evidence_memory: EvidenceMemorySnapshot,
+    closed_signals: list[ExternalSignal],
+    probe_set: ProbeSet,
 ) -> tuple[list[EvidenceContributionDelta], EpistemicProgress]:
     validation_failed = False
     deltas: list[EvidenceContributionDelta] = []
@@ -818,6 +823,22 @@ def _validate_native_integration_envelope(
             for mode, expected_count in expected_counts.items()
         ):
             raise ValueError
+        falsification_probe_ids = {
+            probe.id
+            for probe in probe_set.probes
+            if probe.purpose is ProbePurpose.HYPOTHESIS_FALSIFICATION
+        }
+        expected_falsification_probe_executed = any(
+            signal.signal_kind is SignalKind.ACTIVE
+            and signal.inbox_status is SignalInboxStatus.ACCEPTED
+            and signal.generated_by_probe in falsification_probe_ids
+            for signal in closed_signals
+        )
+        if (
+            epistemic_progress.falsification_probe_executed
+            is not expected_falsification_probe_executed
+        ):
+            raise ValueError
         maximum_delta = max(
             [
                 0.0,
@@ -829,12 +850,7 @@ def _validate_native_integration_envelope(
                 *(abs(delta.unresolved_delta or 0.0) for delta in deltas),
             ]
         )
-        if not math.isclose(
-            epistemic_progress.max_absolute_contribution_delta,
-            maximum_delta,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ):
+        if epistemic_progress.max_absolute_contribution_delta != maximum_delta:
             raise ValueError
     except (AttributeError, KeyError, TypeError, ValueError):
         validation_failed = True

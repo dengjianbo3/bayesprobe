@@ -6696,6 +6696,10 @@ class _NativeEnvelopeMutationGate:
         self._delegate = delegate
         self._mutation = mutation
         self._secret = secret
+        self.original_deltas = None
+        self.returned_deltas = None
+        self.original_progress = None
+        self.returned_progress = None
 
     def integrate(self, **kwargs) -> EvidenceIntegrationResult:
         integration = self._delegate.integrate(**kwargs)
@@ -6703,6 +6707,8 @@ class _NativeEnvelopeMutationGate:
         events = list(integration.evidence_events)
         deltas = list(integration.contribution_deltas)
         progress = integration.epistemic_progress
+        self.original_deltas = list(deltas)
+        self.original_progress = progress
         if self._mutation == "missing":
             deltas = []
             progress = EpistemicProgress(
@@ -6737,8 +6743,40 @@ class _NativeEnvelopeMutationGate:
             deltas[0] = deltas[0].model_copy(
                 update={"caused_by_event_ids": [self._secret]}
             )
+        elif self._mutation == "progress_count":
+            progress = progress.model_copy(
+                update={"new_root_count": progress.new_root_count + 1}
+            )
+        elif self._mutation == "progress_sub_tolerance_maximum":
+            progress = progress.model_copy(
+                update={
+                    "max_absolute_contribution_delta": (
+                        progress.max_absolute_contribution_delta + 5e-13
+                    )
+                }
+            )
+        elif self._mutation == "progress_falsification_flag":
+            progress = progress.model_copy(
+                update={
+                    "falsification_probe_executed": (
+                        not progress.falsification_probe_executed
+                    )
+                }
+            )
+        elif self._mutation == "stale_caused_by_event_id":
+            payload = deltas[0].model_dump(mode="python")
+            payload["caused_by_event_ids"] = ["E_stale_caused_by"]
+            deltas[0] = EvidenceContributionDelta.model_validate(payload)
+        elif self._mutation == "stale_assessment_event_id":
+            payload = deltas[0].model_dump(mode="python")
+            payload["current_contribution"]["assessment_event_ids"] = [
+                "E_stale_assessment"
+            ]
+            deltas[0] = EvidenceContributionDelta.model_validate(payload)
         else:
             raise AssertionError(f"unknown native envelope mutation: {self._mutation}")
+        self.returned_deltas = list(deltas)
+        self.returned_progress = progress
         return EvidenceIntegrationResult(
             evidence_events=events,
             probe_candidates=list(integration.probe_candidates),
@@ -6793,6 +6831,91 @@ def test_native_delta_envelope_failure_is_atomic(
 
     assert solver.calls == 0
     assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "progress_count",
+        "progress_sub_tolerance_maximum",
+        "progress_falsification_flag",
+        "stale_caused_by_event_id",
+        "stale_assessment_event_id",
+    ],
+)
+def test_native_progress_and_event_binding_forgery_is_atomic(
+    tmp_path: Path,
+    mutation: str,
+):
+    cycle = make_cycle(f"cycle_native_{mutation}")
+    probe = ProbeDesign(
+        id="P_native_progress_falsification",
+        cycle_id=cycle.cycle_id,
+        target_hypotheses=["H1", "H2"],
+        inquiry_goal="Try to falsify the current hypotheses.",
+        method="adversarial_model_check",
+        purpose=ProbePurpose.HYPOTHESIS_FALSIFICATION,
+    )
+    probe_set = ProbeSet(
+        probe_set_id=f"ps_native_{mutation}",
+        cycle_id=cycle.cycle_id,
+        probes=[probe] if mutation == "progress_falsification_flag" else [],
+        selection_reason="Native envelope review regression.",
+        may_be_empty=mutation != "progress_falsification_flag",
+    )
+    signal = _model_memory_signal(
+        f"S_native_{mutation}",
+        "The native assessment favors H1.",
+        root=f"native-{mutation}",
+        supplied_group=f"native-{mutation}",
+    )
+    if mutation == "progress_falsification_flag":
+        signal = signal.model_copy(update={"generated_by_probe": probe.id})
+    ledger_path = tmp_path / f"native-{mutation}.jsonl"
+    ledger_path.touch()
+    core = BayesProbeCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        ),
+    )
+    mutation_gate = _NativeEnvelopeMutationGate(
+        core._evidence_gate,
+        mutation,
+    )
+    core._evidence_gate = mutation_gate
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    prior_cycle = cycle.model_dump(mode="json")
+    prior_probe_set = probe_set.model_dump(mode="json")
+    prior_signal = signal.model_dump(mode="json")
+
+    with pytest.raises(
+        ValueError,
+        match="native evidence integration envelope is invalid",
+    ) as exc_info:
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=probe_set,
+            signals=[signal],
+        )
+
+    if mutation.startswith("progress_"):
+        assert mutation_gate.returned_deltas == mutation_gate.original_deltas
+    if mutation == "progress_falsification_flag":
+        assert mutation_gate.original_progress.falsification_probe_executed is True
+        assert mutation_gate.returned_progress.falsification_probe_executed is False
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert cycle.model_dump(mode="json") == prior_cycle
+    assert probe_set.model_dump(mode="json") == prior_probe_set
+    assert signal.model_dump(mode="json") == prior_signal
     assert ledger_path.read_bytes() == b""
 
 
