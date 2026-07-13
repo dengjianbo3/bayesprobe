@@ -675,6 +675,139 @@ def _valid_correlation_credit_key(value: str) -> bool:
     return subject.strip() == subject
 
 
+def _validate_finite_log_likelihood_map(
+    value: Any,
+    field_name: str,
+) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be a mapping")
+    result: dict[str, float] = {}
+    for hypothesis_id, log_likelihood in value.items():
+        clean_hypothesis_id = validate_credit_subject_hypothesis_id(
+            hypothesis_id,
+            f"{field_name} hypothesis id",
+        )
+        if clean_hypothesis_id != hypothesis_id:
+            raise ValueError(f"{field_name} hypothesis ids must be canonical")
+        if (
+            type(log_likelihood) not in (int, float)
+            or not math.isfinite(log_likelihood)
+        ):
+            raise ValueError(f"{field_name} values must be finite")
+        result[clean_hypothesis_id] = float(log_likelihood)
+    return result
+
+
+class EvidenceContributionMode(StrEnum):
+    NEW_ROOT = "new_root"
+    REVISE_ROOT = "revise_root"
+    RETRACT_ROOT = "retract_root"
+    NO_CHANGE = "no_change"
+
+
+class EvidenceRootContribution(StrictTaskModel):
+    contribution_root_id: str
+    revision: int = Field(ge=1)
+    assessment_event_ids: list[str]
+    epistemic_origin: EpistemicOrigin
+    per_hypothesis_log_likelihood: dict[str, float] = Field(default_factory=dict)
+    unresolved_log_likelihood: float | None = None
+    active: bool = True
+
+    @field_validator("contribution_root_id")
+    @classmethod
+    def clean_contribution_root_id(cls, value: str) -> str:
+        return _required_text(value, "contribution_root_id")
+
+    @field_validator("assessment_event_ids")
+    @classmethod
+    def clean_assessment_event_ids(cls, value: list[str]) -> list[str]:
+        return _unique_optional_semantic_texts(value, "assessment_event_ids")
+
+    @field_validator("per_hypothesis_log_likelihood", mode="before")
+    @classmethod
+    def validate_per_hypothesis_log_likelihood(
+        cls,
+        value: Any,
+    ) -> dict[str, float]:
+        return _validate_finite_log_likelihood_map(
+            value,
+            "per_hypothesis_log_likelihood",
+        )
+
+    @field_validator("unresolved_log_likelihood", mode="before")
+    @classmethod
+    def validate_unresolved_log_likelihood(
+        cls,
+        value: Any,
+    ) -> float | None:
+        if value is None:
+            return None
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("unresolved_log_likelihood must be finite")
+        return float(value)
+
+    @model_validator(mode="after")
+    def reject_secret_material(self) -> "EvidenceRootContribution":
+        if _contains_secret_material(self.model_dump(mode="python")):
+            raise ValueError("evidence root contribution must not contain secret material")
+        return self
+
+
+class EvidenceContributionDelta(StrictTaskModel):
+    contribution_root_id: str
+    mode: EvidenceContributionMode
+    previous_contribution: EvidenceRootContribution | None = None
+    current_contribution: EvidenceRootContribution
+    per_hypothesis_delta: dict[str, float] = Field(default_factory=dict)
+    unresolved_delta: float | None = None
+    caused_by_event_ids: list[str]
+
+    @field_validator("contribution_root_id")
+    @classmethod
+    def clean_contribution_root_id(cls, value: str) -> str:
+        return _required_text(value, "contribution_root_id")
+
+    @field_validator("per_hypothesis_delta", mode="before")
+    @classmethod
+    def validate_per_hypothesis_delta(cls, value: Any) -> dict[str, float]:
+        return _validate_finite_log_likelihood_map(value, "per_hypothesis_delta")
+
+    @field_validator("unresolved_delta", mode="before")
+    @classmethod
+    def validate_unresolved_delta(cls, value: Any) -> float | None:
+        if value is None:
+            return None
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("unresolved_delta must be finite")
+        return float(value)
+
+    @field_validator("caused_by_event_ids")
+    @classmethod
+    def clean_caused_by_event_ids(cls, value: list[str]) -> list[str]:
+        return _unique_optional_semantic_texts(value, "caused_by_event_ids")
+
+    @model_validator(mode="after")
+    def validate_contribution_roots(self) -> "EvidenceContributionDelta":
+        contribution_roots = {self.current_contribution.contribution_root_id}
+        if self.previous_contribution is not None:
+            contribution_roots.add(self.previous_contribution.contribution_root_id)
+        if contribution_roots != {self.contribution_root_id}:
+            raise ValueError("contribution roots must match contribution_root_id")
+        if _contains_secret_material(self.model_dump(mode="python")):
+            raise ValueError("evidence contribution delta must not contain secret material")
+        return self
+
+
+class EpistemicProgress(StrictTaskModel):
+    new_root_count: int = Field(default=0, ge=0)
+    revised_root_count: int = Field(default=0, ge=0)
+    retracted_root_count: int = Field(default=0, ge=0)
+    no_change_count: int = Field(default=0, ge=0)
+    max_absolute_contribution_delta: float = Field(default=0.0, ge=0.0)
+    falsification_probe_executed: bool = False
+
+
 class EvidenceMemorySnapshot(StrictTaskModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
@@ -685,6 +818,9 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     derivation_roots: dict[str, str] = Field(default_factory=dict)
     event_signal_identity_digests: dict[str, str] = Field(default_factory=dict)
     correlation_credit: dict[str, float] = Field(default_factory=dict)
+    root_contributions: dict[str, EvidenceRootContribution] = Field(
+        default_factory=dict
+    )
     discovery_evidence_ids: list[str] = Field(default_factory=list)
     counterevidence_ids_by_hypothesis: dict[str, list[str]] = Field(default_factory=dict)
     discard_and_schema_history: list[str] = Field(default_factory=list)
@@ -692,8 +828,8 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     @field_validator("memory_version", mode="before")
     @classmethod
     def validate_memory_version(cls, value: Any) -> int:
-        if type(value) is not int or value not in {1, 2}:
-            raise ValueError("memory_version must be one of 1 or 2")
+        if type(value) is not int or value not in {1, 2, 3}:
+            raise ValueError("memory_version must be one of 1, 2, or 3")
         return value
 
     @field_validator(
@@ -803,13 +939,35 @@ class EvidenceMemorySnapshot(StrictTaskModel):
             result[clean_key] = float(credit)
         return result
 
+    @field_validator("root_contributions")
+    @classmethod
+    def validate_root_contributions(
+        cls,
+        value: dict[str, EvidenceRootContribution],
+    ) -> dict[str, EvidenceRootContribution]:
+        result: dict[str, EvidenceRootContribution] = {}
+        for root_id, contribution in value.items():
+            clean_root_id = _required_text(root_id, "root contribution key")
+            if clean_root_id != root_id:
+                raise ValueError("root contribution key must use exact canonical text")
+            if clean_root_id != contribution.contribution_root_id:
+                raise ValueError(
+                    "root contribution key must match contribution_root_id"
+                )
+            result[clean_root_id] = contribution
+        return result
+
     @model_validator(mode="after")
     def validate_snapshot_coherence(self) -> "EvidenceMemorySnapshot":
         if _contains_secret_material(self.model_dump(mode="python")):
             raise ValueError("evidence memory must not contain secret material")
-        if self.memory_version != 2 and self.event_signal_identity_digests:
+        if self.memory_version == 3 and self.correlation_credit:
+            raise ValueError("memory v3 does not use correlation credit")
+        if self.memory_version in {1, 2} and self.root_contributions:
+            raise ValueError("root contributions require memory version 3")
+        if self.memory_version not in {2, 3} and self.event_signal_identity_digests:
             raise ValueError(
-                "event signal identity bindings require memory version 2"
+                "event signal identity bindings require memory version 2 or 3"
             )
         identity_key_sets = {
             frozenset(self.content_fingerprints),
@@ -1487,6 +1645,7 @@ class EvidenceEvent(BaseModel):
     derived_from_signal: str
     epistemic_origin: EpistemicOrigin | None = None
     derivation_root_id: str | None = None
+    contribution_root_id: str | None = None
     target_hypotheses: list[str]
     evidence_type: EvidenceType
     content: str
@@ -1506,10 +1665,10 @@ class EvidenceEvent(BaseModel):
     discard_reason: str | None = None
     model_trace: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("derivation_root_id")
+    @field_validator("derivation_root_id", "contribution_root_id")
     @classmethod
-    def clean_derivation_root_id(cls, value: str | None) -> str | None:
-        return None if value is None else _required_text(value, "derivation_root_id")
+    def clean_root_id(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return None if value is None else _required_text(value, info.field_name)
 
     @field_validator(
         "reliability",
@@ -1546,8 +1705,16 @@ class EvidenceEvent(BaseModel):
                 "correlated_restatement",
                 "correlated_novel",
             }
-            or self.effective_update_weight is None
         ):
+            raise ValueError(
+                "v0.2 evidence event requires provenance, correlation, and weight"
+            )
+        if self.contribution_root_id is not None:
+            if self.effective_update_weight is not None:
+                raise ValueError(
+                    "root-bound evidence uses contribution reconciliation"
+                )
+        elif self.effective_update_weight is None:
             raise ValueError(
                 "v0.2 evidence event requires provenance, correlation, and weight"
             )

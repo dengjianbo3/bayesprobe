@@ -19,7 +19,11 @@ from bayesprobe.schemas import (
     CycleRecord,
     CycleSignalShape,
     EpistemicOrigin,
+    EpistemicProgress,
+    EvidenceContributionDelta,
+    EvidenceContributionMode,
     EvidenceMemorySnapshot,
+    EvidenceRootContribution,
     EvidenceEvent,
     EvidenceType,
     ExternalSignal,
@@ -183,6 +187,24 @@ def make_v02_belief_state(
             else EvidenceMemorySnapshot(memory_version=2)
         ),
     )
+
+
+def make_native_evidence_event(**overrides) -> EvidenceEvent:
+    payload = {
+        "schema_version": "v0.2",
+        "id": "E1",
+        "derived_from_signal": "S1",
+        "epistemic_origin": EpistemicOrigin.MODEL_REASONING,
+        "derivation_root_id": "root:model-run",
+        "target_hypotheses": ["H1"],
+        "evidence_type": EvidenceType.SUPPORTING,
+        "content": "SUPPORTS: model-run evidence.",
+        "likelihoods": {"H1": LikelihoodBand.WEAKLY_CONFIRMING},
+        "correlation_status": "novel",
+        "effective_update_weight": 1.0,
+    }
+    payload.update(overrides)
+    return EvidenceEvent(**payload)
 
 
 def test_probe_design_carries_server_typed_semantics():
@@ -685,6 +707,116 @@ def test_v2_evidence_memory_defaults_missing_event_signal_bindings():
     assert snapshot.event_signal_identity_digests == {}
 
 
+def test_v3_memory_owns_root_contributions_without_correlation_credit():
+    contribution = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1", "E2"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood={"H1": 0.25, "H2": -0.25},
+        active=True,
+    )
+    memory = EvidenceMemorySnapshot(
+        memory_version=3,
+        root_contributions={contribution.contribution_root_id: contribution},
+    )
+
+    assert memory.root_contributions[contribution.contribution_root_id].revision == 1
+    assert memory.correlation_credit == {}
+
+
+def test_v3_memory_rejects_correlation_credit():
+    with pytest.raises(ValueError, match="memory v3 does not use correlation credit"):
+        EvidenceMemorySnapshot(
+            memory_version=3,
+            correlation_credit={"group|H1|confirming": 0.2},
+        )
+
+
+def test_v2_memory_rejects_root_contributions():
+    contribution = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        per_hypothesis_log_likelihood={"H1": 0.1},
+    )
+    with pytest.raises(ValueError, match="root contributions require memory version 3"):
+        EvidenceMemorySnapshot(
+            memory_version=2,
+            root_contributions={contribution.contribution_root_id: contribution},
+        )
+
+
+def test_root_contribution_requires_canonical_ids_and_finite_likelihoods():
+    with pytest.raises(ValueError, match="contribution_root_id"):
+        EvidenceRootContribution(
+            contribution_root_id=" ",
+            revision=1,
+            assessment_event_ids=["E1"],
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        )
+    with pytest.raises(ValueError, match="assessment_event_ids"):
+        EvidenceRootContribution(
+            contribution_root_id="eroot:model-run",
+            revision=1,
+            assessment_event_ids=["E1", " e1 "],
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        )
+    with pytest.raises(ValueError, match="per_hypothesis_log_likelihood"):
+        EvidenceRootContribution(
+            contribution_root_id="eroot:model-run",
+            revision=1,
+            assessment_event_ids=["E1"],
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+            per_hypothesis_log_likelihood={"H1": float("nan")},
+        )
+
+
+def test_memory_root_contribution_keys_match_contribution_root_ids():
+    contribution = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+    )
+
+    with pytest.raises(ValueError, match="root contribution key"):
+        EvidenceMemorySnapshot(
+            memory_version=3,
+            root_contributions={"eroot:other": contribution},
+        )
+
+
+def test_contribution_delta_roots_match_its_root_id():
+    contribution = EvidenceRootContribution(
+        contribution_root_id="eroot:model-run",
+        revision=1,
+        assessment_event_ids=["E1"],
+        epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+    )
+
+    with pytest.raises(ValueError, match="contribution roots must match"):
+        EvidenceContributionDelta(
+            contribution_root_id="eroot:other",
+            mode=EvidenceContributionMode.REVISE_ROOT,
+            previous_contribution=contribution,
+            current_contribution=contribution,
+            caused_by_event_ids=["E2"],
+        )
+
+
+def test_epistemic_progress_defaults_to_zero_reconciliation_progress():
+    assert EpistemicProgress().model_dump() == {
+        "new_root_count": 0,
+        "revised_root_count": 0,
+        "retracted_root_count": 0,
+        "no_change_count": 0,
+        "max_absolute_contribution_delta": 0.0,
+        "falsification_probe_executed": False,
+    }
+
+
 def test_v1_evidence_memory_rejects_event_signal_bindings():
     with pytest.raises(ValueError, match="version 2"):
         EvidenceMemorySnapshot(
@@ -1181,7 +1313,7 @@ def test_belief_state_restore_recursively_rejects_coercive_memory_scalars(
             BeliefState.model_validate_json(json.dumps(payload))
 
 
-@pytest.mark.parametrize("memory_version", [0, 3, 999])
+@pytest.mark.parametrize("memory_version", [0, 4, 999])
 def test_evidence_memory_rejects_unsupported_versions(memory_version):
     with pytest.raises(ValueError, match="memory_version"):
         EvidenceMemorySnapshot(memory_version=memory_version)
@@ -1291,6 +1423,9 @@ def test_v02_domain_contracts_are_publicly_exported():
         "FrameAdequacyStatus",
         "FrameFit",
         "EpistemicOrigin",
+        "EpistemicProgress",
+        "EvidenceContributionDelta",
+        "EvidenceContributionMode",
         "ProbePurpose",
         "CapabilityKind",
         "ProjectionMode",
@@ -1299,6 +1434,7 @@ def test_v02_domain_contracts_are_publicly_exported():
         "FrameState",
         "SignalProvenance",
         "EvidenceMemorySnapshot",
+        "EvidenceRootContribution",
         "FrameMassUpdate",
         "CapabilityDescriptor",
         "CapabilityDecision",
@@ -1772,6 +1908,17 @@ def test_evidence_event_model_trace_defaults_to_empty_dict():
     )
 
     assert event.model_trace == {}
+
+
+def test_root_bound_native_event_cannot_carry_legacy_effective_weight():
+    with pytest.raises(
+        ValueError,
+        match="root-bound evidence uses contribution reconciliation",
+    ):
+        make_native_evidence_event(
+            contribution_root_id="eroot:model-run",
+            effective_update_weight=0.5,
+        )
 
 
 def test_evidence_event_model_trace_round_trips_through_json():
