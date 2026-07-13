@@ -2,6 +2,24 @@
 
 BayesProbe is the project context for a new agent paradigm centered on signal-grounded belief revision over evolving hypotheses. This glossary fixes the vocabulary used by the documents, implementation, and experiments.
 
+## Implementation Checkpoint (2026-07-13)
+
+- Native v0.2 runs use Evidence Memory version 3. `EvidenceEvent` is an audit
+  interpretation; `EvidenceRootContribution` is the unit of update ownership,
+  and the Belief Solver receives contribution deltas rather than raw Events.
+- Same-root repetitions cannot accumulate independent support. A root may be
+  revised, retracted, or left unchanged; an unchanged autonomous cycle stops
+  with `epistemic_stagnation` unless hypotheses or the frame evolved.
+- Probe execution receives a one-shot, score-free brief. After the first
+  integrated cycle, the planner reserves a genuine falsification probe when a
+  valid top-hypothesis falsifier is available.
+- Synchronized BayesProbe reports the same root progress while remaining under
+  external round control. WebUI and evaluation artifacts expose root deltas,
+  falsification, and stagnation without reimplementing Evidence rules.
+- Offline conformance tests prove same-model-root no-self-reinforcement,
+  independent-tool counterevidence, and same-root reversal. They do not prove
+  higher HLE accuracy. The frozen 30-case process checkpoint remains pending.
+
 ## Language
 
 **BayesProbe Agent Paradigm**:

@@ -607,6 +607,7 @@ def _change_my_mind_condition(cycle_id: str, hypothesis: Hypothesis) -> ChangeMy
             target_hypotheses=[hypothesis.id],
             inquiry_goal=f"Check whether {hypothesis.id} still holds up.",
             method="source_tracing",
+            purpose=ProbePurpose.HYPOTHESIS_FALSIFICATION,
             support_condition={hypothesis.id: support_text},
             weaken_condition={hypothesis.id: weaken_text},
             expected_information_gain=0.8,

@@ -29,7 +29,7 @@ The agent maintains a revisable belief state under uncertainty.
 External information changes the belief state only after becoming evidence.
 ```
 
-This gives the architecture four hard commitments:
+This gives the architecture five hard commitments:
 
 1. **Signal before evidence**: raw external information enters as
    `ExternalSignal`.
@@ -39,6 +39,10 @@ This gives the architecture four hard commitments:
    output is projected from that state.
 4. **Hypotheses evolve**: anomaly and pressure can spawn, reframe, weaken, or
    retire hypotheses rather than forcing all signals into the old frame.
+5. **One contribution per evidence root**: `EvidenceEvent`s remain audit
+   interpretations, while each independent `EvidenceRootContribution` owns one
+   current likelihood contribution. Reassessment revises that contribution
+   instead of adding another copy.
 
 ## 2. Target Architecture
 
@@ -54,6 +58,8 @@ Question + Task Context / Existing BeliefState
   -> Signal Collection Boundary
   -> Evidence Integration Gate
   -> Evidence Events
+  -> Evidence Root Reconciliation
+  -> Evidence Contribution Deltas
   -> Belief Solver
   -> Hypothesis Evolution
   -> BeliefState t+1
@@ -200,7 +206,8 @@ Responsibilities:
 - create and close a cycle-local `SignalInbox`;
 - validate legal cycle signal shape;
 - delegate signal interpretation to `EvidenceIntegrationGate`;
-- call `solve_updates(...)`;
+- validate and consume root-owned contribution deltas returned by the gate;
+- call `CoverageAwareBeliefSolver` with contribution deltas, never raw Events;
 - call `HypothesisEvolutionEngine.evolve(...)`;
 - merge ledger references into the next `BeliefState`;
 - append cycle, signal, probe, evidence, update, evolution, candidate, and state
@@ -233,6 +240,10 @@ Current file: `bayesprobe/evidence.py`
 Responsibilities:
 
 - convert closed-cycle signals into evidence events;
+- normalize signal provenance and bind accepted Events to Evidence Roots;
+- reconcile each root's current contribution against Evidence Memory;
+- emit `EvidenceContributionDelta` and `EpistemicProgress` alongside audit
+  Events;
 - handle active and passive signals through the same path;
 - assign target hypotheses;
 - use `ModelGateway` for direct evidence judgment;
@@ -253,8 +264,12 @@ Current file: `bayesprobe/belief.py`
 
 Responsibilities:
 
-- map `EvidenceEvent`s into relation-aware belief changes;
-- skip discarded evidence events;
+- consume validated `EvidenceContributionDelta`s rather than raw
+  `EvidenceEvent`s;
+- apply only the difference between a root's current and previous
+  contribution;
+- make `NO_CHANGE` an exact belief no-op and allow `REVISE_ROOT` or
+  `RETRACT_ROOT` without double counting;
 - preserve belief-neutral handling for schema violations;
 - preserve normalized categorical mass across active hypotheses for
   `exclusive_exhaustive` frames;
@@ -338,7 +353,7 @@ class ProbeToolGateway(Protocol):
         self,
         *,
         probe: ProbeDesign,
-        context: ProbeExecutionContext,
+        context: ProbeExecutionBrief,
     ) -> list[ExternalSignal]:
         ...
 ```
@@ -346,6 +361,8 @@ class ProbeToolGateway(Protocol):
 Responsibilities:
 
 - execute active probes through a swappable gateway;
+- expose only a one-shot, score-free hypothesis brief: no priors, posteriors,
+  ranks, accumulated evidence, or current winner enter probe execution;
 - normalize returned signals as active external signals;
 - enforce that probe execution cannot return passive signals;
 - append execution and signal records to the ledger when present.
@@ -568,7 +585,8 @@ Responsibilities:
   `POST /api/runs/autonomous/stream` while retaining
   `/api/runs/autonomous` for the synchronous JSON contract;
 - serialize the terminal run record, final answer, relation-aware belief state,
-  integrated cycle, signal, evidence, update, and evolution traces;
+  integrated cycle, signal, evidence, root-contribution delta, epistemic
+  progress, update, and evolution traces;
 - expose run regime/status/stop reason, exclusive posterior mass or independent
   credence, relation-aware top-gap uncertainty, and cycle lifecycle timestamps.
 
@@ -617,6 +635,9 @@ Implemented responsibilities:
   bounded process, memory, CPU, time, and output resources;
 - preserve Python/reasoning results as `ExternalSignal`s that still pass
   through the Evidence Integration Gate;
+- report new, revised, retracted, and unchanged Evidence Roots, falsification
+  cycles, maximum contribution delta, and epistemic-stagnation termination
+  without changing answer scoring;
 - run a deterministic 200-task paired schedule with HMAC case paths, atomic
   status transitions, and correctness-blind resume;
 - score exact labels once after all tasks are terminal and report Wilson,
@@ -644,16 +665,17 @@ snapshot, and completes the four-phase protocol.
 | Active/passive/mixed cycle shapes | Strong | Implemented in core validation, synchronized runner, and benchmark harness. |
 | Signal Inbox and boundary | Strong MVP | Cycle-local closure and terminal `open -> closed -> integrated` timestamps exist; real-time late-signal queueing remains future work. |
 | Evidence Integration Gate | Strong MVP | Direct evidence, real projection decomposition, exact target validation, bounded quality overrides, schema violation, and repair paths exist. |
-| Belief update | Strong MVP | Exclusive mass remains normalized; independent credences update without cross-normalization; penalties, discarded-evidence neutrality, and relation-aware summaries are implemented. |
+| Evidence Memory / root ownership | Strong MVP | Native memory v3 stores provenance, root bindings, and one current contribution per Evidence Root. Same-root repeats revise or no-op instead of accumulating. |
+| Belief update | Strong MVP | Solver consumes contribution deltas only. Exclusive mass remains normalized; independent credences update without cross-normalization; penalties, discarded-evidence neutrality, and relation-aware summaries are implemented. |
 | Hypothesis evolution | Good MVP | Anomaly spawn, weakening/reframing/retirement style evolution preserves explicit independent conflicts and reciprocal exclusive rivals; semantic evolution remains deferred. |
-| Probe planning | Strong MVP | Task-specific probe design and bounded probe-set ranking exist for the autonomous open-question vertical slice. |
-| Probe execution/tool seam | Good MVP | Deterministic and model-backed adapters exist; search/retrieval/tool adapters remain future work. |
-| Autonomous question loop | Strong MVP | End-to-end runner returns a terminal run, final integrated cycle, task-aware selection, synthesis, or abstention, answer projection, and explicit stop reason. |
-| Synchronized round loop | Strong MVP | Fixed-round runner enforces synchronized regime and supports passive-only, active-only, and mixed rounds. |
+| Probe planning | Strong MVP | Task-specific probe design, bounded probe-set ranking, and post-cycle reservation of a genuine top-hypothesis falsifier are implemented. |
+| Probe execution/tool seam | Good MVP | Execution receives an immutable score-free brief. Deterministic and model-backed adapters exist; search/retrieval/tool adapters remain future work. |
+| Autonomous question loop | Strong MVP | End-to-end runner returns a terminal run, final integrated cycle, task-aware selection, synthesis, or abstention, answer projection, explicit stop reason, and epistemic-stagnation termination. |
+| Synchronized round loop | Strong MVP | Fixed-round runner supports passive-only, active-only, and mixed rounds, reports epistemic progress, and remains externally controlled rather than self-stopping. |
 | Ledger/audit | Strong MVP | JSONL audit path has explicit canonical ownership and exactly-once probe-set/signal records. |
 | Benchmark harness | Good MVP | Toy and real methodology-path fixtures, suite/report flow, net-direction scoring, and belief-quality metrics exist. |
 | Config/CLI/SDK | Strong MVP | JSON experiment config, CLI, public core/runners/tool/framing seams, package-root imports, and external execution regression coverage exist. |
-| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; synchronous JSON and autonomous NDJSON progress streams expose dynamic framing, probe-design, signal, evidence, belief, expansion, and terminal progress, relation-aware belief, integrated cycles, provider errors, and full traces. Credentials remain request-scoped and page-memory-only. |
+| Autonomous WebUI | Strong MVP | Deterministic/Responses/OpenAI-compatible Chat Completions requests use the shared core; synchronous JSON and autonomous NDJSON streams expose framing, probes, signals, Evidence Events, root deltas, epistemic progress, belief, expansion, and terminal traces. Credentials remain request-scoped and page-memory-only. |
 | Model gateway | Strong MVP | Structured seam plus deterministic, scripted, recorded, OpenAI Responses, and OpenAI-compatible Chat Completions adapters exist. Explicit request controls, bounded transport retries, and per-attempt token/latency/error observation are implemented. |
 | Structured output robustness | Good MVP | Validation, neutral schema violation, and opt-in repair/retry policy exist. |
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
@@ -675,11 +697,15 @@ and relation-aware exclusive categorical mass and independent-credence solver
 semantics. Models propose task semantics, while `BayesProbeCore` alone admits
 Evidence, changes belief, and authorizes hypothesis expansion.
 
-Not implemented: external search, retrieval, or tools; synchronized parity;
+Not implemented: external search, retrieval, or production tool adapters;
 coding interventions; public benchmark execution; or probability calibration
 claims.
 
-Cross-cycle Evidence Memory also remains future work.
+Cross-cycle Evidence Memory v3 is implemented for native runs. It owns
+provenance identity, Evidence Root bindings, current root contributions, and
+discovery/falsification history. The remaining limitation is empirical: the
+frozen 30-case process checkpoint has not yet been run, so no corrected HLE
+accuracy claim follows from the conformance work.
 
 ## 7. External Seams and Configuration
 
