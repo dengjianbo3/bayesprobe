@@ -20,6 +20,7 @@ from bayesprobe.evidence_roots import (
 )
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.kernel_config import CorrelationCreditPolicy
+from bayesprobe.migrations import _carry_v01_migration_receipt
 from bayesprobe.schemas import (
     AnswerChoice,
     BeliefState,
@@ -1975,6 +1976,115 @@ def test_transition_rejects_one_ulp_native_event_weight_mismatch():
             existing_evidence_ids=[],
             frame_version=1,
         )
+
+
+def test_gate_rejects_overcap_prior_before_normalizing_or_calling_provider():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    gateway = LegacyCountingGateway()
+    normalizer = RecordingProvenanceNormalizer()
+    authorized = _migrated_state("belief_state_v0.1_to_v0.2")
+    invalid_memory = authorized.evidence_memory.model_copy(
+        update={
+            "correlation_credit": {
+                "unrelated-policy-group|A|confirming": 0.3
+            }
+        }
+    )
+    state = authorized.model_copy(
+        update={"evidence_memory": invalid_memory}
+    )
+    state = _carry_v01_migration_receipt(authorized, state)
+    prior_state = state.model_dump(mode="json")
+    signal = _signal(
+        "S_policy_provider_preflight",
+        "A fresh source observation supports option A.",
+        root="root-policy-provider-preflight",
+    )
+
+    with pytest.raises(ValueError, match="correlation credit policy"):
+        EvidenceIntegrationGate(
+            model_gateway=gateway,
+            memory_manager=manager,
+            provenance_normalizer=normalizer,
+        ).integrate(
+            cycle=_cycle(1),
+            belief_state=state,
+            probe_set=_probe_set(1),
+            signals=[signal],
+        )
+
+    assert gateway.requests == []
+    assert normalizer.calls == []
+    assert state.model_dump(mode="json") == prior_state
+
+
+def test_gate_replay_rejects_overcap_prior_before_normalization():
+    manager = EvidenceMemoryManager(
+        CorrelationCreditPolicy(
+            max_cumulative_effective_weight_per_direction=0.2
+        )
+    )
+    authorized = _migrated_state("belief_state_v0.1_to_v0.2")
+    cycle = _cycle(1)
+    probe_set = _probe_set(1)
+    signal = _signal(
+        "S_policy_replay_preflight",
+        "A replayed source observation supports option A.",
+        root="root-policy-replay-preflight",
+    )
+    first = EvidenceIntegrationGate(
+        model_gateway=LegacyCountingGateway(),
+        memory_manager=manager,
+    ).integrate(
+        cycle=cycle,
+        belief_state=authorized,
+        probe_set=probe_set,
+        signals=[signal],
+    )
+    event = first.evidence_events[0]
+    overcap_credit = dict(first.evidence_memory.correlation_credit)
+    overcap_credit["unrelated-policy-group|A|confirming"] = 0.3
+    invalid_memory = first.evidence_memory.model_copy(
+        update={"correlation_credit": overcap_credit}
+    )
+    ledger_refs = {
+        record_type: list(record_ids)
+        for record_type, record_ids in authorized.ledger_refs.items()
+    }
+    ledger_refs["evidence_events"] = [event.id]
+    replay_state = authorized.model_copy(
+        update={
+            "evidence_memory": invalid_memory,
+            "ledger_refs": ledger_refs,
+        }
+    )
+    replay_state = _carry_v01_migration_receipt(
+        authorized,
+        replay_state,
+    )
+    gateway = LegacyCountingGateway()
+    normalizer = RecordingProvenanceNormalizer()
+    prior_state = replay_state.model_dump(mode="json")
+
+    with pytest.raises(ValueError, match="correlation credit policy"):
+        EvidenceIntegrationGate(
+            model_gateway=gateway,
+            memory_manager=manager,
+            provenance_normalizer=normalizer,
+        ).integrate(
+            cycle=cycle,
+            belief_state=replay_state,
+            probe_set=probe_set,
+            signals=[signal],
+        )
+
+    assert gateway.requests == []
+    assert normalizer.calls == []
+    assert replay_state.model_dump(mode="json") == prior_state
 
 
 @pytest.mark.parametrize("marker", _MIGRATION_MARKERS)

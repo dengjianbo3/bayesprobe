@@ -4,6 +4,7 @@ from bayesprobe.evidence import EvidenceIntegrationGate, EvidenceIntegrationResu
 from bayesprobe.evidence_memory import EvidenceMemoryManager
 from bayesprobe.evidence_roots import EvidenceRootReconciler
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.model_gateway import EvidenceJudgmentRepairPolicy
 from bayesprobe.schemas import (
     AnswerChoice,
     BoundaryStatus,
@@ -226,6 +227,107 @@ def test_native_judge_request_uses_explicit_blind_allowlist():
         "method",
         "expected_observation",
     }
+
+
+def test_native_repair_request_projects_invalid_payload_to_blind_contract():
+    forbidden = {
+        "prior",
+        "posterior",
+        "current_best_hypothesis",
+        "correlation_credit",
+        "remaining_credit",
+        "support_condition",
+        "weaken_condition",
+        "reframe_condition",
+    }
+
+    class NativeRepairGateway:
+        adapter_kind = "native-repair-recording"
+
+        def __init__(self):
+            self.requests = []
+
+        def complete_structured(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return {
+                    "evidence_type": "supporting",
+                    "likelihoods": {
+                        "A": "moderately_confirming",
+                        "B": "moderately_disconfirming",
+                        "posterior": {
+                            "remaining_credit": 0.7,
+                            "support_condition": "Leaked condition.",
+                        },
+                    },
+                    "unresolved_likelihood": None,
+                    "frame_fit": "explained_by_named",
+                    "unexplained_observation": None,
+                    "interpretation": "The initial payload contains extras.",
+                    "quality_overrides": {
+                        "reliability": 0.5,
+                        "correlation_credit": {
+                            "weaken_condition": "Leaked condition.",
+                            "reframe_condition": "Leaked condition.",
+                        },
+                    },
+                    "prior": 0.5,
+                    "current_best_hypothesis": "A",
+                    "api_key": "Bearer provider-secret-value-123",
+                }
+            return {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    "A": "moderately_confirming",
+                    "B": "moderately_disconfirming",
+                },
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
+                "interpretation": "The repaired payload is valid.",
+                "quality_overrides": {"reliability": 0.5},
+            }
+
+    gateway = NativeRepairGateway()
+    result = EvidenceIntegrationGate(
+        model_gateway=gateway,
+        judgment_repair_policy=EvidenceJudgmentRepairPolicy(max_attempts=1),
+    ).integrate(
+        cycle=_cycle(1),
+        belief_state=_state(),
+        probe_set=_probe_set(1),
+        signals=[_model_signal("S_repair_blind", "A repairable observation.")],
+    )
+
+    assert len(gateway.requests) == 2
+    repair_request = gateway.requests[1]
+    assert repair_request.task == "repair_evidence_judgment"
+    assert forbidden.isdisjoint(_recursive_keys(repair_request.input))
+    assert repair_request.input["invalid_payload"] == {
+        "evidence_type": "supporting",
+        "likelihoods": {
+            "A": "moderately_confirming",
+            "B": "moderately_disconfirming",
+        },
+        "unresolved_likelihood": None,
+        "frame_fit": "explained_by_named",
+        "unexplained_observation": None,
+        "interpretation": "The initial payload contains extras.",
+        "quality_overrides": {"reliability": 0.5},
+    }
+    assert all(
+        key not in repair_request.input["validation_error"]
+        for key in forbidden
+    )
+    assert "provider-secret-value-123" not in repr(repair_request.input)
+    event = result.evidence_events[0]
+    assert event.discard_reason is None
+    assert event.model_trace["task"] == "repair_evidence_judgment"
+    assert event.model_trace["repair_attempt_index"] == 1
+    assert event.model_trace["metadata"]["belief_context_policy"] == (
+        "blind_no_scores_v1"
+    )
+    assert forbidden.isdisjoint(_recursive_keys(event.model_trace))
 
 
 def test_integration_result_has_independent_default_v3_outputs():

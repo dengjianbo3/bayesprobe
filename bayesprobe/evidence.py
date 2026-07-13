@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -939,12 +940,20 @@ class EvidenceIntegrationGate:
                 original_request=request,
             ), model_trace
         except ModelGatewayValidationError as error:
+            repair_error = _repair_validation_error_for_request(
+                error,
+                request=request,
+                payload=payload,
+            )
             if self._judgment_repair_policy.max_attempts == 0:
-                raise _EvidenceJudgmentFailure(error=error, model_trace=model_trace) from error
+                raise _EvidenceJudgmentFailure(
+                    error=repair_error,
+                    model_trace=model_trace,
+                ) from error
             return self._repair_evidence_judgment(
                 original_request=request,
                 invalid_payload=payload,
-                validation_error=error,
+                validation_error=repair_error,
             )
 
     def _repair_evidence_judgment(
@@ -954,8 +963,15 @@ class EvidenceIntegrationGate:
         invalid_payload: Any,
         validation_error: ModelGatewayValidationError,
     ) -> tuple[EvidenceJudgment, ModelInvocationTrace]:
-        latest_invalid_payload = _repair_payload_from(invalid_payload)
-        latest_error = validation_error
+        latest_invalid_payload = _repair_payload_for_request(
+            invalid_payload,
+            request=original_request,
+        )
+        latest_error = _repair_validation_error_for_request(
+            validation_error,
+            request=original_request,
+            payload=latest_invalid_payload,
+        )
         latest_trace = self._model_trace_for_request(original_request)
         max_attempts = self._judgment_repair_policy.max_attempts
 
@@ -1016,8 +1032,15 @@ class EvidenceIntegrationGate:
                     original_request=original_request,
                 ), repair_trace
             except ModelGatewayValidationError as error:
-                latest_invalid_payload = _repair_payload_from(repair_payload)
-                latest_error = error
+                latest_invalid_payload = _repair_payload_for_request(
+                    repair_payload,
+                    request=original_request,
+                )
+                latest_error = _repair_validation_error_for_request(
+                    error,
+                    request=original_request,
+                    payload=latest_invalid_payload,
+                )
                 latest_trace = repair_trace
 
         failure = ModelGatewayValidationError(
@@ -1347,6 +1370,170 @@ def _endorsed_hypothesis(content: str, hypotheses: list[Hypothesis]) -> str | No
         if any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns):
             return hypothesis.id
     return None
+
+
+_BLIND_REPAIR_FORBIDDEN_KEYS = frozenset(
+    {
+        "prior",
+        "posterior",
+        "current_best_hypothesis",
+        "correlation_credit",
+        "remaining_credit",
+        "support_condition",
+        "weaken_condition",
+        "reframe_condition",
+    }
+)
+_NATIVE_REPAIR_VALIDATION_ERROR = (
+    "native evidence judgment payload requires schema repair"
+)
+
+
+def _is_native_evidence_request(request: StructuredModelRequest) -> bool:
+    return (
+        request.schema_version == "v0.2"
+        and request.metadata.get("judgment_route") == "native_v0.2"
+    )
+
+
+def _repair_validation_error_for_request(
+    error: ModelGatewayValidationError,
+    *,
+    request: StructuredModelRequest,
+    payload: Any,
+) -> ModelGatewayValidationError:
+    if not _is_native_evidence_request(request):
+        return error
+    projected = _repair_payload_for_request(payload, request=request)
+    try:
+        judgment = evidence_judgment_from_mapping(
+            projected,
+            competition=HypothesisCompetition(
+                request.metadata["frame_competition"]
+            ),
+            coverage=HypothesisCoverage(
+                request.metadata["frame_coverage"]
+            ),
+        )
+    except ModelGatewayValidationError as projected_error:
+        if any(
+            key in str(projected_error)
+            for key in _BLIND_REPAIR_FORBIDDEN_KEYS
+        ):
+            return ModelGatewayValidationError(
+                _NATIVE_REPAIR_VALIDATION_ERROR
+            )
+        return projected_error
+    expected_targets = {
+        str(hypothesis_id)
+        for hypothesis_id in request.input.get("target_hypotheses", [])
+    }
+    if set(judgment.likelihoods) != expected_targets:
+        return ModelGatewayValidationError(
+            "evidence judgment likelihood targets require schema repair"
+        )
+    return ModelGatewayValidationError(_NATIVE_REPAIR_VALIDATION_ERROR)
+
+
+def _repair_payload_for_request(
+    payload: Any,
+    *,
+    request: StructuredModelRequest,
+) -> dict[str, Any]:
+    if not _is_native_evidence_request(request):
+        return _repair_payload_from(payload)
+    targets = request.input.get("target_hypotheses", [])
+    expected_targets = {
+        str(target)
+        for target in targets
+        if str(target) not in _BLIND_REPAIR_FORBIDDEN_KEYS
+    }
+    return _project_native_repair_payload(
+        payload,
+        expected_targets=expected_targets,
+    )
+
+
+def _project_native_repair_payload(
+    payload: Any,
+    *,
+    expected_targets: set[str],
+) -> dict[str, Any]:
+    sanitized = _repair_payload_from(payload)
+    projected: dict[str, Any] = {}
+
+    raw_evidence_type = sanitized.get("evidence_type")
+    if isinstance(raw_evidence_type, str):
+        try:
+            EvidenceType(raw_evidence_type)
+        except ValueError:
+            pass
+        else:
+            projected["evidence_type"] = raw_evidence_type
+
+    raw_likelihoods = sanitized.get("likelihoods")
+    if isinstance(raw_likelihoods, Mapping):
+        likelihoods: dict[str, str] = {}
+        for hypothesis_id, raw_band in raw_likelihoods.items():
+            if (
+                hypothesis_id not in expected_targets
+                or hypothesis_id in _BLIND_REPAIR_FORBIDDEN_KEYS
+                or not isinstance(raw_band, str)
+            ):
+                continue
+            try:
+                LikelihoodBand(raw_band)
+            except ValueError:
+                continue
+            likelihoods[hypothesis_id] = raw_band
+        projected["likelihoods"] = likelihoods
+
+    if "unresolved_likelihood" in sanitized:
+        raw_unresolved = sanitized["unresolved_likelihood"]
+        if raw_unresolved is None:
+            projected["unresolved_likelihood"] = None
+        elif isinstance(raw_unresolved, str):
+            try:
+                LikelihoodBand(raw_unresolved)
+            except ValueError:
+                pass
+            else:
+                projected["unresolved_likelihood"] = raw_unresolved
+
+    raw_frame_fit = sanitized.get("frame_fit")
+    if isinstance(raw_frame_fit, str):
+        try:
+            FrameFit(raw_frame_fit)
+        except ValueError:
+            pass
+        else:
+            projected["frame_fit"] = raw_frame_fit
+
+    if "unexplained_observation" in sanitized:
+        unexplained = sanitized["unexplained_observation"]
+        if unexplained is None or isinstance(unexplained, str):
+            projected["unexplained_observation"] = unexplained
+
+    interpretation = sanitized.get("interpretation")
+    if isinstance(interpretation, str) and interpretation.strip():
+        projected["interpretation"] = interpretation
+
+    raw_quality_overrides = sanitized.get("quality_overrides")
+    if isinstance(raw_quality_overrides, Mapping):
+        quality_overrides: dict[str, float | int] = {}
+        for metric, value in raw_quality_overrides.items():
+            if (
+                metric not in SIGNAL_QUALITY_METRICS
+                or metric in _BLIND_REPAIR_FORBIDDEN_KEYS
+                or type(value) not in (int, float)
+                or not math.isfinite(value)
+                or not 0 <= value <= 1
+            ):
+                continue
+            quality_overrides[metric] = value
+        projected["quality_overrides"] = quality_overrides
+
+    return projected
 
 
 def _repair_payload_from(payload: Any) -> dict[str, Any]:
