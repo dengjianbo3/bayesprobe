@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from bayesprobe.belief import (
     CoverageAwareBeliefSolver,
+    legacy_event_contribution_deltas,
     mark_replayed_evidence_events,
     summarize_hypotheses,
 )
@@ -30,6 +32,9 @@ from bayesprobe.schemas import (
     BoundaryStatus,
     CycleRecord,
     CycleSignalShape,
+    EpistemicProgress,
+    EvidenceContributionDelta,
+    EvidenceContributionMode,
     EvidenceEvent,
     EvidenceMemorySnapshot,
     ExternalSignal,
@@ -58,6 +63,12 @@ class CycleResult:
     frame_adequacy_decision: FrameAdequacyDecision
     hypothesis_evolutions: list[HypothesisEvolution]
     probe_candidates: list[ProbeCandidate] = field(default_factory=list)
+    contribution_deltas: list[EvidenceContributionDelta] = field(
+        default_factory=list
+    )
+    epistemic_progress: EpistemicProgress = field(
+        default_factory=EpistemicProgress
+    )
 
 
 class BayesProbeCore:
@@ -157,10 +168,25 @@ class BayesProbeCore:
             normalized_signals=ledger_signals,
             memory_manager=self._evidence_memory_manager,
         )
+        if lifecycle == BeliefLifecycle.NATIVE_V02:
+            contribution_deltas, epistemic_progress = (
+                _validate_native_integration_envelope(
+                    integration=integration,
+                    belief_state=authoritative_belief_state,
+                    evidence_memory=next_evidence_memory,
+                )
+            )
+        else:
+            contribution_deltas = []
+            epistemic_progress = EpistemicProgress()
         evidence_events = mark_replayed_evidence_events(
             authoritative_belief_state,
             integration.evidence_events,
         )
+        if lifecycle == BeliefLifecycle.LEGACY_V01_MIGRATION:
+            contribution_deltas = legacy_event_contribution_deltas(
+                evidence_events
+            )
         canonical_evidence_events = _canonical_new_evidence_events(
             authoritative_belief_state.ledger_refs.get("evidence_events", []),
             evidence_events,
@@ -168,7 +194,7 @@ class BayesProbeCore:
         probe_candidates = integration.probe_candidates
         solve_result = self._belief_solver.solve(
             authoritative_belief_state,
-            evidence_events,
+            contribution_deltas,
             run_id=authoritative_cycle.run_id,
             cycle_id=authoritative_cycle.cycle_id,
         )
@@ -341,6 +367,8 @@ class BayesProbeCore:
             signals=ledger_signals,
             probe_set=authoritative_probe_set,
             evidence_events=canonical_evidence_events,
+            contribution_deltas=contribution_deltas,
+            epistemic_progress=epistemic_progress,
             belief_updates=belief_updates,
             frame_mass_updates=frame_mass_updates,
             frame_adequacy_decision=frame_adequacy_decision,
@@ -358,6 +386,8 @@ class BayesProbeCore:
             frame_adequacy_decision=frame_adequacy_decision,
             hypothesis_evolutions=evolutions,
             probe_candidates=probe_candidates,
+            contribution_deltas=contribution_deltas,
+            epistemic_progress=epistemic_progress,
         )
 
     def _create_signal_inbox(self, cycle: CycleRecord) -> SignalInbox:
@@ -427,6 +457,8 @@ class BayesProbeCore:
         signals: list[ExternalSignal],
         probe_set: ProbeSet,
         evidence_events: list[EvidenceEvent],
+        contribution_deltas: list[EvidenceContributionDelta],
+        epistemic_progress: EpistemicProgress,
         belief_updates: list[BeliefUpdate],
         frame_mass_updates: list[FrameMassUpdate],
         frame_adequacy_decision: FrameAdequacyDecision,
@@ -443,6 +475,9 @@ class BayesProbeCore:
         self._ledger.append("probe_set", probe_set)
         for event in evidence_events:
             self._ledger.append("evidence_event", event)
+        for delta in contribution_deltas:
+            self._ledger.append("evidence_contribution_delta", delta)
+        self._ledger.append("epistemic_progress", epistemic_progress)
         for update in belief_updates:
             self._ledger.append("belief_update", update)
         for update in frame_mass_updates:
@@ -639,32 +674,173 @@ def _validate_native_evidence_events(
     events: list[EvidenceEvent],
     *,
     belief_state: BeliefState,
-) -> None:
+) -> list[EvidenceEvent]:
     frame_state = belief_state.frame_state
     requires_unresolved = (
         frame_state is not None
         and frame_state.competition == HypothesisCompetition.EXCLUSIVE
         and frame_state.coverage == HypothesisCoverage.OPEN
     )
-    for event in events:
-        if event.schema_version != "v0.2":
-            raise ValueError("native evidence event contract is invalid")
-        try:
+    validated_events: list[EvidenceEvent] = []
+    validation_failed = False
+    try:
+        if not isinstance(events, list):
+            raise ValueError
+        for event in events:
+            if not isinstance(event, EvidenceEvent):
+                raise ValueError
             validated = EvidenceEvent.model_validate(
                 event.model_dump(mode="python")
             )
-        except (AttributeError, TypeError, ValueError):
-            raise ValueError("native evidence event contract is invalid") from None
-        if (
-            validated.schema_version != "v0.2"
-            or validated.effective_update_weight is None
-            or (requires_unresolved and validated.unresolved_likelihood is None)
-            or (
-                not requires_unresolved
-                and validated.unresolved_likelihood is not None
+            if (
+                validated.schema_version != "v0.2"
+                or validated.contribution_root_id is None
+                or validated.epistemic_origin is None
+                or validated.effective_update_weight is not None
+                or (
+                    requires_unresolved
+                    and validated.unresolved_likelihood is None
+                )
+                or (
+                    not requires_unresolved
+                    and validated.unresolved_likelihood is not None
+                )
+            ):
+                raise ValueError
+            validated_events.append(validated)
+    except (AttributeError, TypeError, ValueError):
+        validation_failed = True
+    if validation_failed:
+        raise ValueError("native evidence event contract is invalid")
+    return validated_events
+
+
+def _validate_native_integration_envelope(
+    *,
+    integration: EvidenceIntegrationResult,
+    belief_state: BeliefState,
+    evidence_memory: EvidenceMemorySnapshot,
+) -> tuple[list[EvidenceContributionDelta], EpistemicProgress]:
+    validation_failed = False
+    deltas: list[EvidenceContributionDelta] = []
+    epistemic_progress = EpistemicProgress()
+    try:
+        events = _validate_native_evidence_events(
+            integration.evidence_events,
+            belief_state=belief_state,
+        )
+        if not isinstance(integration.contribution_deltas, list):
+            raise ValueError
+        deltas = [
+            EvidenceContributionDelta.model_validate(
+                delta.model_dump(mode="python")
             )
+            for delta in integration.contribution_deltas
+            if isinstance(delta, EvidenceContributionDelta)
+        ]
+        if len(deltas) != len(integration.contribution_deltas):
+            raise ValueError
+        if not isinstance(integration.epistemic_progress, EpistemicProgress):
+            raise ValueError
+        epistemic_progress = EpistemicProgress.model_validate(
+            integration.epistemic_progress.model_dump(mode="python")
+        )
+        current_memory = EvidenceMemorySnapshot.model_validate(
+            evidence_memory.model_dump(mode="python")
+        )
+        prior_memory = belief_state.evidence_memory
+        if prior_memory is None:
+            raise ValueError
+        prior_memory = EvidenceMemorySnapshot.model_validate(
+            prior_memory.model_dump(mode="python")
+        )
+
+        boundary_event_ids = [event.id for event in events]
+        if len(boundary_event_ids) != len(set(boundary_event_ids)):
+            raise ValueError
+        accepted_event_ids_by_root: dict[str, list[str]] = {}
+        for event in sorted(events, key=lambda item: item.id):
+            if event.discard_reason is not None:
+                continue
+            root_id = event.contribution_root_id
+            if root_id is None:
+                raise ValueError
+            accepted_event_ids_by_root.setdefault(root_id, []).append(event.id)
+
+        deltas_by_root: dict[str, EvidenceContributionDelta] = {}
+        for delta in deltas:
+            root_id = delta.contribution_root_id
+            if root_id in deltas_by_root:
+                raise ValueError
+            expected_event_ids = accepted_event_ids_by_root.get(root_id)
+            if (
+                expected_event_ids is None
+                or delta.caused_by_event_ids != expected_event_ids
+                or delta.current_contribution.assessment_event_ids
+                != expected_event_ids
+                or current_memory.root_contributions.get(root_id)
+                != delta.current_contribution
+                or prior_memory.root_contributions.get(root_id)
+                != delta.previous_contribution
+            ):
+                raise ValueError
+            deltas_by_root[root_id] = delta
+
+        for root_id in accepted_event_ids_by_root:
+            current = current_memory.root_contributions.get(root_id)
+            if current is None:
+                if (
+                    root_id in prior_memory.root_contributions
+                    or root_id in deltas_by_root
+                ):
+                    raise ValueError
+                continue
+            if root_id not in deltas_by_root:
+                raise ValueError
+
+        expected_counts = {
+            EvidenceContributionMode.NEW_ROOT: (
+                epistemic_progress.new_root_count
+            ),
+            EvidenceContributionMode.REVISE_ROOT: (
+                epistemic_progress.revised_root_count
+            ),
+            EvidenceContributionMode.RETRACT_ROOT: (
+                epistemic_progress.retracted_root_count
+            ),
+            EvidenceContributionMode.NO_CHANGE: (
+                epistemic_progress.no_change_count
+            ),
+        }
+        if any(
+            expected_count
+            != sum(delta.mode == mode for delta in deltas)
+            for mode, expected_count in expected_counts.items()
         ):
-            raise ValueError("native evidence event contract is invalid")
+            raise ValueError
+        maximum_delta = max(
+            [
+                0.0,
+                *(
+                    abs(value)
+                    for delta in deltas
+                    for value in delta.per_hypothesis_delta.values()
+                ),
+                *(abs(delta.unresolved_delta or 0.0) for delta in deltas),
+            ]
+        )
+        if not math.isclose(
+            epistemic_progress.max_absolute_contribution_delta,
+            maximum_delta,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError
+    except (AttributeError, KeyError, TypeError, ValueError):
+        validation_failed = True
+    if validation_failed:
+        raise ValueError("native evidence integration envelope is invalid")
+    return deltas, epistemic_progress
 
 
 def _canonical_new_evidence_events(

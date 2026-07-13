@@ -7,8 +7,10 @@ import pytest
 
 import bayesprobe.core as core_module
 import bayesprobe.evidence_memory as evidence_memory
-from bayesprobe.core import BayesProbeCore, EvidenceIntegrationGate
+from bayesprobe.core import BayesProbeCore, CycleResult, EvidenceIntegrationGate
 from bayesprobe.evidence import EvidenceIntegrationResult
+from bayesprobe.evidence_roots import EvidenceRootReconciler
+from bayesprobe.frame_policy import FrameAdequacyDecision
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
 from bayesprobe.inbox import SignalInbox
 from bayesprobe.hypothesis_evolution import HypothesisEvolutionEngine
@@ -20,6 +22,7 @@ from bayesprobe.hypothesis_expansion import (
 from bayesprobe.kernel_config import CorrelationCreditPolicy
 from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.lifecycle import BeliefLifecycle, resolve_belief_lifecycle
+from bayesprobe.migrations import _carry_v01_migration_receipt
 from bayesprobe.model_gateway import (
     EvidenceJudgmentRepairPolicy,
     ModelGatewayValidationError,
@@ -32,6 +35,9 @@ from bayesprobe.schemas import (
     BoundaryStatus,
     CycleRecord,
     CycleSignalShape,
+    EpistemicProgress,
+    EvidenceContributionDelta,
+    EvidenceContributionMode,
     EvidenceEvent,
     EvidenceMemorySnapshot,
     EvidenceType,
@@ -55,6 +61,7 @@ from bayesprobe.schemas import (
     TaskAdmissionDecision,
     TaskAdmissionStatus,
     TaskKind,
+    contains_secret_material,
     decode_discard_history_entry,
     encode_discard_history_entry,
 )
@@ -339,7 +346,12 @@ def test_active_only_signal_updates_belief_through_evidence_gate():
     assert result.evidence_events[0].id == "run_1_cycle_1_E1"
     assert h1.posterior < 0.5
     assert h2.posterior > 0.5
-    assert result.belief_updates[0].evidence_id == "run_1_cycle_1_E1"
+    assert result.belief_updates[0].evidence_id == (
+        result.contribution_deltas[0].contribution_root_id
+    )
+    assert result.belief_updates[0].sensitivity["caused_by_event_ids"] == [
+        "run_1_cycle_1_E1"
+    ]
     assert result.belief_updates[0].update_id.startswith("run_1_cycle_1_U1_")
     assert result.belief_state.ledger_refs["probe_sets"] == ["ps_1"]
 
@@ -1881,11 +1893,7 @@ def test_existing_ledger_refs_are_preserved_and_appended():
         "E_prior",
         "run_1_cycle_7_E1",
     ]
-    assert result.belief_state.ledger_refs["belief_updates"] == [
-        "U_prior",
-        "run_1_cycle_7_U1_H1",
-        "run_1_cycle_7_U1_H2",
-    ]
+    assert result.belief_state.ledger_refs["belief_updates"] == ["U_prior"]
     assert result.belief_state.ledger_refs["hypothesis_evolutions"] == ["HE_prior"]
     assert result.belief_state.ledger_refs["custom_audit"] == ["keep_me"]
 
@@ -1974,44 +1982,31 @@ class StaticEventGate(EvidenceIntegrationGate):
         normalizer = evidence_memory.SignalProvenanceNormalizer()
         manager = evidence_memory.EvidenceMemoryManager()
         working_memory = belief_state.evidence_memory
-        normalized_by_id = {}
-        processed_by_id = {}
-        processed_events = []
+        normalized_signals = [
+            normalizer.normalize(signal, run_id=cycle.run_id)
+            for signal in signals
+        ]
+        normalized_by_id = {
+            signal.id: signal for signal in normalized_signals
+        }
+        root_resolution = evidence_memory.resolve_signal_contribution_roots(
+            working_memory,
+            normalized_signals,
+        )
+        events_by_signal_id = {
+            signal.id: [] for signal in normalized_signals
+        }
+        for event in self.events:
+            events_by_signal_id[event.derived_from_signal].append(event)
+        processed_events: list[EvidenceEvent] = []
         seen_signatures: set[tuple[str, str]] = set()
         confirming = {
             LikelihoodBand.WEAKLY_CONFIRMING,
             LikelihoodBand.MODERATELY_CONFIRMING,
             LikelihoodBand.STRONGLY_CONFIRMING,
         }
-        for original in self.events:
-            if original.id in processed_by_id:
-                processed_events.append(processed_by_id[original.id])
-                continue
-            signal = normalized_by_id.get(original.derived_from_signal)
-            if signal is None:
-                signal = normalizer.normalize(
-                    signals[0].model_copy(
-                        update={
-                            "id": original.derived_from_signal,
-                            "raw_content": original.content,
-                            "provenance": _static_event_signal_provenance(original),
-                        }
-                    ),
-                    run_id=cycle.run_id,
-                )
-                normalized_by_id[signal.id] = signal
-            unresolved_likelihood = original.unresolved_likelihood
-            requires_unresolved = (
-                belief_state.frame_state.competition
-                == HypothesisCompetition.EXCLUSIVE
-                and belief_state.frame_state.coverage
-                == HypothesisCoverage.OPEN
-            )
-            if requires_unresolved and unresolved_likelihood is None:
-                unresolved_likelihood = LikelihoodBand.NEUTRAL
-            frame_fit = original.frame_fit
-            if unresolved_likelihood in confirming:
-                frame_fit = FrameFit.SUPPORTS_UNRESOLVED
+        for signal_id in root_resolution.ordered_signal_ids:
+            signal = normalized_by_id[signal_id]
             is_cycle_duplicate = (
                 evidence_memory.observe_cycle_signal_duplicate(
                     signal,
@@ -2023,64 +2018,84 @@ class StaticEventGate(EvidenceIntegrationGate):
                 signal,
                 frame_version=belief_state.frame_state.frame_version,
             )
-            quality_cap = evidence_memory.SignalQualityAssessor().assess(
-                signal=signal,
-                event_type=original.evidence_type,
-                is_duplicate=(
-                    is_cycle_duplicate
-                    or preliminary_decision.correlation_status == "duplicate_exact"
-                ),
-            )
-            quality = {
-                metric: min(
-                    getattr(original, metric),
-                    getattr(quality_cap, metric),
+            for original in events_by_signal_id[signal_id]:
+                quality_cap = evidence_memory.SignalQualityAssessor().assess(
+                    signal=signal,
+                    event_type=original.evidence_type,
+                    is_duplicate=(
+                        is_cycle_duplicate
+                        or preliminary_decision.correlation_status
+                        == "duplicate_exact"
+                    ),
                 )
-                for metric in evidence_memory.SIGNAL_QUALITY_METRICS
-            }
-            base_weight = (
-                quality["reliability"]
-                * quality["independence"]
-                * quality["relevance"]
-                * quality["novelty"]
-            )
-            decision = manager.classify(
-                working_memory,
-                signal,
-                likelihoods=original.likelihoods,
-                unresolved_likelihood=unresolved_likelihood,
-                frame_version=belief_state.frame_state.frame_version,
-                base_effective_weight=base_weight,
-            )
-            if decision.correlation_status == "correlated_restatement":
-                quality["independence"] = 0.0
-                quality["novelty"] = min(quality["novelty"], 0.25)
-            event = EvidenceEvent.model_validate(
-                {
-                    **original.model_dump(mode="python"),
-                    **quality,
-                    "schema_version": "v0.2",
-                    "epistemic_origin": signal.provenance.epistemic_origin,
-                    "derivation_root_id": signal.provenance.derivation_root_id,
-                    "unresolved_likelihood": unresolved_likelihood,
-                    "frame_fit": frame_fit,
-                    "correlation_status": decision.correlation_status,
-                    "effective_update_weight": decision.effective_update_weight,
+                unresolved_likelihood = original.unresolved_likelihood
+                requires_unresolved = (
+                    belief_state.frame_state.competition
+                    == HypothesisCompetition.EXCLUSIVE
+                    and belief_state.frame_state.coverage
+                    == HypothesisCoverage.OPEN
+                )
+                if requires_unresolved and unresolved_likelihood is None:
+                    unresolved_likelihood = LikelihoodBand.NEUTRAL
+                frame_fit = original.frame_fit
+                if unresolved_likelihood in confirming:
+                    frame_fit = FrameFit.SUPPORTS_UNRESOLVED
+                quality = {
+                    metric: min(
+                        getattr(original, metric),
+                        getattr(quality_cap, metric),
+                    )
+                    for metric in evidence_memory.SIGNAL_QUALITY_METRICS
                 }
-            )
-            working_memory = manager.commit(
-                working_memory,
-                signal=signal,
-                event=event,
-                decision=decision,
-            )
-            processed_by_id[event.id] = event
-            processed_events.append(event)
+                if preliminary_decision.correlation_status == (
+                    "correlated_restatement"
+                ):
+                    quality["independence"] = 0.0
+                    quality["novelty"] = min(quality["novelty"], 0.25)
+                event = EvidenceEvent.model_validate(
+                    {
+                        **original.model_dump(mode="python"),
+                        **quality,
+                        "schema_version": "v0.2",
+                        "epistemic_origin": signal.provenance.epistemic_origin,
+                        "derivation_root_id": signal.provenance.derivation_root_id,
+                        "contribution_root_id": (
+                            root_resolution.signal_contribution_roots[signal.id]
+                        ),
+                        "unresolved_likelihood": unresolved_likelihood,
+                        "frame_fit": frame_fit,
+                        "correlation_status": (
+                            preliminary_decision.correlation_status
+                        ),
+                        "effective_update_weight": None,
+                        "discard_reason": (
+                            original.discard_reason
+                            or preliminary_decision.discard_reason
+                        ),
+                    }
+                )
+                working_memory = manager.commit_identity(
+                    working_memory,
+                    signal=signal,
+                    event=event,
+                )
+                processed_events.append(event)
+        reconciled = EvidenceRootReconciler().reconcile_cycle(
+            working_memory,
+            processed_events,
+            falsification_probe_executed=False,
+        )
+        processed_by_id = {event.id: event for event in processed_events}
+        boundary_events = [
+            processed_by_id[event.id] for event in self.events
+        ]
         return EvidenceIntegrationResult(
-            evidence_events=processed_events,
+            evidence_events=boundary_events,
             probe_candidates=[],
-            evidence_memory=working_memory,
-            normalized_signals=list(normalized_by_id.values()),
+            evidence_memory=reconciled.evidence_memory,
+            normalized_signals=normalized_signals,
+            contribution_deltas=reconciled.contribution_deltas,
+            epistemic_progress=reconciled.epistemic_progress,
         )
 
 
@@ -2198,7 +2213,10 @@ def unresolved_support_event(*, event_id: str, discard_reason: str | None = None
         derived_from_signal=f"S_{event_id}",
         target_hypotheses=["H1", "H2", "H3"],
         evidence_type=EvidenceType.COUNTEREVIDENCE,
-        content="The observed constraint excludes every named integer.",
+        content=(
+            "The observed constraint excludes every named integer: "
+            f"{event_id}."
+        ),
         reliability=1.0,
         independence=1.0,
         relevance=1.0,
@@ -2338,6 +2356,8 @@ class SuppliedIntegrationGate(EvidenceIntegrationGate):
                 normalizer.normalize(signal, run_id=cycle.run_id)
                 for signal in signals
             ],
+            contribution_deltas=list(self.integration.contribution_deltas),
+            epistemic_progress=self.integration.epistemic_progress,
         )
 
 
@@ -2370,88 +2390,6 @@ class SuppliedIntegrationCore(BayesProbeCore):
             probe_set=probe_set,
             signals=signals,
         )
-
-
-def _policy_transition_event(
-    signal: ExternalSignal,
-    *,
-    event_id: str,
-    correlation_status: str,
-    effective_update_weight: float,
-    quality: dict[str, float] | None = None,
-    discard_reason: str | None = None,
-) -> EvidenceEvent:
-    quality = quality or {
-        "reliability": 0.8,
-        "independence": 0.8,
-        "relevance": 0.9,
-        "novelty": 0.8,
-        "specificity": 0.7,
-        "verifiability": 0.7,
-    }
-    return EvidenceEvent(
-        schema_version="v0.2",
-        id=event_id,
-        derived_from_signal=signal.id,
-        epistemic_origin=signal.provenance.epistemic_origin,
-        derivation_root_id=signal.provenance.derivation_root_id,
-        target_hypotheses=["H1", "H2"],
-        evidence_type=EvidenceType.SUPPORTING,
-        content=signal.raw_content,
-        likelihoods={
-            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
-            "H2": LikelihoodBand.NEUTRAL,
-        },
-        unresolved_likelihood=LikelihoodBand.NEUTRAL,
-        frame_fit=FrameFit.UNDERDETERMINED,
-        correlation_status=correlation_status,
-        effective_update_weight=effective_update_weight,
-        discard_reason=discard_reason,
-        **quality,
-    )
-
-
-def _commit_self_declared_transition(
-    prior_memory: EvidenceMemorySnapshot,
-    *,
-    signal: ExternalSignal,
-    event: EvidenceEvent,
-    resulting_used_credit: float,
-) -> EvidenceMemorySnapshot:
-    manager = evidence_memory.EvidenceMemoryManager()
-    canonical = manager.classify(prior_memory, signal)
-    credit_key = (
-        f"{canonical.canonical_correlation_group}|H1|confirming"
-    )
-    identity_memory = manager.remember_signal_identity(
-        prior_memory,
-        signal,
-        canonical_correlation_group=canonical.canonical_correlation_group,
-    )
-    accepted_ids = list(identity_memory.accepted_evidence_ids)
-    discard_history = list(identity_memory.discard_and_schema_history)
-    if event.discard_reason is None:
-        accepted_ids.append(event.id)
-    else:
-        discard_history.append(
-            encode_discard_history_entry(event.id, event.discard_reason)
-        )
-    bindings = dict(identity_memory.event_signal_identity_digests)
-    bindings[event.id] = evidence_memory.canonical_signal_identity_digest(
-        signal
-    )
-    correlation_credit = dict(identity_memory.correlation_credit)
-    correlation_credit[credit_key] = resulting_used_credit
-    return EvidenceMemorySnapshot.model_validate(
-        identity_memory.model_copy(
-            update={
-                "accepted_evidence_ids": accepted_ids,
-                "discard_and_schema_history": discard_history,
-                "event_signal_identity_digests": bindings,
-                "correlation_credit": correlation_credit,
-            }
-        ).model_dump(mode="python")
-    )
 
 
 def _assert_supplied_transition_rejected_atomically(
@@ -2501,62 +2439,28 @@ def _assert_supplied_transition_rejected_atomically(
 
 def _native_transition_fixture():
     state = make_exact_belief_state()
+    cycle = make_cycle("cycle_transition_fixture")
+    accepted_signal = _memory_signal(
+        "S_transition_accepted",
+        "A prior accepted observation supports H1.",
+        root="root-transition-accepted",
+    )
+    accepted_integration = EvidenceIntegrationGate(
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        )
+    ).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[accepted_signal],
+    )
+    accepted_event = accepted_integration.evidence_events[0]
+    accepted_signal = accepted_integration.normalized_signals[0]
+    memory = accepted_integration.evidence_memory
+
     manager = evidence_memory.EvidenceMemoryManager()
     normalizer = evidence_memory.SignalProvenanceNormalizer()
-    accepted_signal = normalizer.normalize(
-        ExternalSignal(
-            id="S_transition_accepted",
-            cycle_id="pending",
-            signal_kind=SignalKind.ACTIVE,
-            source_type="retrieved_source",
-            source="transition-fixture",
-            raw_content="A prior accepted observation supports H1.",
-            initial_target_hypotheses=["H1", "H2"],
-            provenance=SignalProvenance(
-                epistemic_origin=EpistemicOrigin.RETRIEVED_SOURCE,
-                source_identity="transition-fixture",
-                derivation_root_id="root-transition-accepted",
-                correlation_group="transition-fixture",
-                canonical_content_fingerprint="replace-me",
-            ),
-        ),
-        run_id=state.run_id,
-    )
-    accepted_decision = manager.classify(
-        EvidenceMemorySnapshot(),
-        accepted_signal,
-        likelihoods={
-            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
-            "H2": LikelihoodBand.MODERATELY_DISCONFIRMING,
-        },
-        unresolved_likelihood=LikelihoodBand.NEUTRAL,
-        base_effective_weight=0.25,
-    )
-    accepted_event = EvidenceEvent(
-        schema_version="v0.2",
-        id="E_transition_accepted",
-        derived_from_signal=accepted_signal.id,
-        epistemic_origin=accepted_signal.provenance.epistemic_origin,
-        derivation_root_id=accepted_signal.provenance.derivation_root_id,
-        target_hypotheses=["H1", "H2"],
-        evidence_type=EvidenceType.SUPPORTING,
-        content=accepted_signal.raw_content,
-        likelihoods={
-            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
-            "H2": LikelihoodBand.MODERATELY_DISCONFIRMING,
-        },
-        unresolved_likelihood=LikelihoodBand.NEUTRAL,
-        frame_fit=FrameFit.UNDERDETERMINED,
-        correlation_status=accepted_decision.correlation_status,
-        effective_update_weight=accepted_decision.effective_update_weight,
-    )
-    memory = manager.commit(
-        EvidenceMemorySnapshot(),
-        signal=accepted_signal,
-        event=accepted_event,
-        decision=accepted_decision,
-    )
-
     discarded_signal = normalizer.normalize(
         accepted_signal.model_copy(
             update={
@@ -2572,19 +2476,19 @@ def _native_transition_fixture():
     discarded_decision = manager.classify(
         memory,
         discarded_signal,
-        likelihoods={
-            "H1": LikelihoodBand.NEUTRAL,
-            "H2": LikelihoodBand.NEUTRAL,
-        },
-        unresolved_likelihood=LikelihoodBand.NEUTRAL,
-        base_effective_weight=0.0,
+        frame_version=state.frame_state.frame_version,
     )
+    discarded_root = evidence_memory.resolve_signal_contribution_roots(
+        memory,
+        [discarded_signal],
+    ).signal_contribution_roots[discarded_signal.id]
     discarded_event = EvidenceEvent(
         schema_version="v0.2",
         id="E_transition_discarded",
         derived_from_signal=discarded_signal.id,
         epistemic_origin=discarded_signal.provenance.epistemic_origin,
         derivation_root_id=discarded_signal.provenance.derivation_root_id,
+        contribution_root_id=discarded_root,
         target_hypotheses=["H1", "H2"],
         evidence_type=EvidenceType.NEUTRAL,
         content=discarded_signal.raw_content,
@@ -2595,15 +2499,19 @@ def _native_transition_fixture():
         unresolved_likelihood=LikelihoodBand.NEUTRAL,
         frame_fit=FrameFit.UNDERDETERMINED,
         correlation_status=discarded_decision.correlation_status,
-        effective_update_weight=discarded_decision.effective_update_weight,
+        effective_update_weight=None,
         discard_reason="schema_violation:fixture",
     )
-    memory = manager.commit(
+    memory = manager.commit_identity(
         memory,
         signal=discarded_signal,
         event=discarded_event,
-        decision=discarded_decision,
     )
+    memory = EvidenceRootReconciler().reconcile_cycle(
+        memory,
+        [discarded_event],
+        falsification_probe_executed=False,
+    ).evidence_memory
     memory = EvidenceMemorySnapshot.model_validate(
         {
             **memory.model_dump(mode="python"),
@@ -2637,6 +2545,7 @@ def _regressive_native_memory(
         payload["content_fingerprints"] = {}
         payload["source_content_fingerprints"] = {}
         payload["derivation_roots"] = {}
+        payload["signal_contribution_roots"] = {}
     elif mutation == "rebind_identity":
         signal_id = next(iter(payload["content_fingerprints"]))
         changed_fingerprint = "sha256:" + "b" * 64
@@ -2688,14 +2597,6 @@ def _regressive_native_memory(
         payload["counterevidence_ids_by_hypothesis"] = {
             "H2": [discarded_id]
         }
-    elif mutation == "empty_credit":
-        payload["correlation_credit"] = {}
-    elif mutation == "decrease_credit":
-        key = next(iter(payload["correlation_credit"]))
-        payload["correlation_credit"][key] /= 2
-    elif mutation == "increase_credit":
-        key = next(iter(payload["correlation_credit"]))
-        payload["correlation_credit"][key] += 0.1
     else:
         raise AssertionError(f"unknown memory mutation: {mutation}")
     return EvidenceMemorySnapshot.model_validate(payload)
@@ -2783,8 +2684,9 @@ def test_native_gate_wrong_event_signal_binding_fails_before_ledger(
                 schema_version="v0.2",
                 id="E_wrong_binding",
                 derived_from_signal=normalized.id,
-                epistemic_origin=EpistemicOrigin.MODEL_REASONING,
-                derivation_root_id=normalized.provenance.derivation_root_id,
+                    epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+                    derivation_root_id=normalized.provenance.derivation_root_id,
+                    contribution_root_id="root:wrong-binding",
                 target_hypotheses=["H1", "H2"],
                 evidence_type=EvidenceType.NEUTRAL,
                 content="A syntactically bound native event.",
@@ -2795,7 +2697,7 @@ def test_native_gate_wrong_event_signal_binding_fails_before_ledger(
                 unresolved_likelihood=LikelihoodBand.NEUTRAL,
                 frame_fit=FrameFit.UNDERDETERMINED,
                 correlation_status="novel",
-                effective_update_weight=0.0,
+                    effective_update_weight=None,
             )
             return EvidenceIntegrationResult(
                 evidence_events=[event],
@@ -2848,9 +2750,6 @@ def test_native_gate_wrong_event_signal_binding_fails_before_ledger(
         "rewrite_discovery",
         "drop_counterevidence",
         "rewrite_counterevidence",
-        "empty_credit",
-        "decrease_credit",
-        "increase_credit",
     ],
 )
 @pytest.mark.parametrize(
@@ -2872,7 +2771,7 @@ def test_native_memory_replacement_regressions_fail_before_solver_or_ledger(
         normalized_signals=[signal] if existing_event_only else [],
     )
     gateway = ScriptedModelGateway(
-        responses={"judge_evidence": _native_open_judgment()}
+        responses={"judge_evidence": _legacy_evidence_judgment()}
     )
     ledger_path = tmp_path / (
         f"native-transition-{mutation}-{existing_event_only}.jsonl"
@@ -2899,11 +2798,11 @@ def test_native_memory_replacement_regressions_fail_before_solver_or_ledger(
     assert ledger_path.read_bytes() == b""
 
 
-def test_existing_event_only_result_cannot_rewrite_directional_credit(
+def test_existing_event_only_result_cannot_drop_root_contribution(
     tmp_path: Path,
 ):
     state, prior_memory, event, signal = _native_transition_fixture()
-    candidate = prior_memory.model_copy(update={"correlation_credit": {}})
+    candidate = prior_memory.model_copy(update={"root_contributions": {}})
     integration = EvidenceIntegrationResult(
         evidence_events=[event],
         probe_candidates=[],
@@ -2930,7 +2829,9 @@ def test_existing_event_only_result_cannot_rewrite_directional_credit(
     assert ledger_path.read_bytes() == b""
 
 
-def test_new_directional_event_cannot_skip_its_credit_commit(tmp_path: Path):
+def test_new_native_event_cannot_skip_its_root_contribution_commit(
+    tmp_path: Path,
+):
     state = make_exact_belief_state()
     gateway = ScriptedModelGateway(
         responses={"judge_evidence": _native_open_judgment()}
@@ -2942,15 +2843,17 @@ def test_new_directional_event_cannot_skip_its_credit_commit(tmp_path: Path):
         probe_set=make_empty_probe_set(cycle.cycle_id),
         signals=[make_active_signal()],
     )
-    assert production.evidence_memory.correlation_credit
+    assert production.evidence_memory.root_contributions
     invalid_memory = production.evidence_memory.model_copy(
-        update={"correlation_credit": {}}
+        update={"root_contributions": {}}
     )
     integration = EvidenceIntegrationResult(
         evidence_events=production.evidence_events,
         probe_candidates=production.probe_candidates,
         evidence_memory=invalid_memory,
         normalized_signals=production.normalized_signals,
+        contribution_deltas=production.contribution_deltas,
+        epistemic_progress=production.epistemic_progress,
     )
     ledger_path = tmp_path / "native-missing-new-credit.jsonl"
     ledger_path.touch()
@@ -3050,11 +2953,10 @@ class _GateManagerAuthorityAttackCore(BayesProbeCore):
         return self.manager_attack_gate
 
 
-@pytest.mark.parametrize("attack", ["policy", "validator"])
-def test_gate_manager_mutation_cannot_redefine_core_transition_authority(
+def test_gate_manager_validator_mutation_cannot_bypass_core_event_contract(
     tmp_path: Path,
-    attack: str,
 ):
+    attack = "validator"
     ledger_path = tmp_path / f"gate-manager-{attack}.jsonl"
     ledger_path.touch()
     gateway = ScriptedModelGateway(
@@ -3073,7 +2975,7 @@ def test_gate_manager_mutation_cannot_redefine_core_transition_authority(
 
     with pytest.raises(
         ValueError,
-        match="native evidence memory transition is invalid",
+        match="native evidence event contract is invalid",
     ):
         core.integrate_cycle(
             cycle=cycle,
@@ -3166,12 +3068,14 @@ def test_native_event_content_rewrite_fails_before_solver_or_ledger(
     assert ledger_path.read_bytes() == b""
 
 
-def test_core_custom_credit_policy_is_shared_with_production_gate(tmp_path: Path):
+def test_core_custom_credit_policy_is_preserved_for_legacy_migration(
+    tmp_path: Path,
+):
     policy = CorrelationCreditPolicy(
         max_cumulative_effective_weight_per_direction=0.2
     )
     gateway = ScriptedModelGateway(
-        responses={"judge_evidence": _native_open_judgment()}
+        responses={"judge_evidence": _legacy_evidence_judgment()}
     )
     ledger = JsonlLedgerStore(tmp_path / "custom-credit-policy.jsonl")
     core = BayesProbeCore(
@@ -3179,7 +3083,7 @@ def test_core_custom_credit_policy_is_shared_with_production_gate(tmp_path: Path
         model_gateway=gateway,
         correlation_credit_policy=policy,
     )
-    state = make_exact_belief_state()
+    state = make_explicit_legacy_belief_state(cycle_id="cycle_0")
     first_cycle = make_cycle("cycle_custom_credit_first")
 
     first = core.integrate_cycle(
@@ -3228,15 +3132,15 @@ def test_core_custom_credit_policy_is_shared_with_production_gate(tmp_path: Path
     ] == [first_event.id, second_event.id]
 
 
-def test_core_default_credit_policy_behavior_is_unchanged():
+def test_core_default_credit_policy_behavior_is_preserved_for_legacy_migration():
     gateway = ScriptedModelGateway(
-        responses={"judge_evidence": _native_open_judgment()}
+        responses={"judge_evidence": _legacy_evidence_judgment()}
     )
     cycle = make_cycle("cycle_default_credit_policy")
 
     result = BayesProbeCore(model_gateway=gateway).integrate_cycle(
         cycle=cycle,
-        belief_state=make_exact_belief_state(),
+        belief_state=make_explicit_legacy_belief_state(cycle_id="cycle_0"),
         probe_set=make_empty_probe_set(cycle.cycle_id),
         signals=[make_active_signal()],
     )
@@ -3321,7 +3225,7 @@ def test_core_rejects_overcap_prior_before_custom_gate_call(tmp_path: Path):
     ledger_path = tmp_path / "pregate-overcap-prior.jsonl"
     ledger_path.touch()
     gateway = ScriptedModelGateway(
-        responses={"judge_evidence": _native_open_judgment()}
+        responses={"judge_evidence": _legacy_evidence_judgment()}
     )
     core = _PolicyPreflightCore(
         ledger=JsonlLedgerStore(ledger_path),
@@ -3330,7 +3234,7 @@ def test_core_rejects_overcap_prior_before_custom_gate_call(tmp_path: Path):
     )
     solver = _RecordingSolverProxy(core._belief_solver)
     core._belief_solver = solver
-    state = make_exact_belief_state()
+    state = make_explicit_legacy_belief_state(cycle_id="cycle_0")
     invalid_memory = state.evidence_memory.model_copy(
         update={
             "correlation_credit": {
@@ -3342,6 +3246,10 @@ def test_core_rejects_overcap_prior_before_custom_gate_call(tmp_path: Path):
         state.model_copy(
             update={"evidence_memory": invalid_memory}
         ).model_dump(mode="python")
+    )
+    state = _carry_v01_migration_receipt(
+        make_explicit_legacy_belief_state(cycle_id="cycle_0"),
+        state,
     )
     prior_state = state.model_dump(mode="json")
     cycle = make_cycle("cycle_pregate_overcap_prior")
@@ -3366,13 +3274,13 @@ def test_core_valid_exact_cap_prior_reaches_custom_gate_once():
         max_cumulative_effective_weight_per_direction=0.2
     )
     gateway = ScriptedModelGateway(
-        responses={"judge_evidence": _native_open_judgment()}
+        responses={"judge_evidence": _legacy_evidence_judgment()}
     )
     core = _PolicyPreflightCore(
         model_gateway=gateway,
         correlation_credit_policy=policy,
     )
-    state = make_exact_belief_state()
+    state = make_explicit_legacy_belief_state(cycle_id="cycle_0")
     valid_memory = state.evidence_memory.model_copy(
         update={
             "correlation_credit": {
@@ -3384,6 +3292,10 @@ def test_core_valid_exact_cap_prior_reaches_custom_gate_once():
         state.model_copy(
             update={"evidence_memory": valid_memory}
         ).model_dump(mode="python")
+    )
+    state = _carry_v01_migration_receipt(
+        make_explicit_legacy_belief_state(cycle_id="cycle_0"),
+        state,
     )
     cycle = make_cycle("cycle_pregate_exact_cap")
 
@@ -3445,13 +3357,10 @@ def test_core_rejects_one_ulp_native_event_weight_before_solver_or_ledger(
         signals=[make_active_signal()],
     )
     event = production.evidence_events[0]
-    assert event.effective_update_weight == 0.2
+    assert event.effective_update_weight is None
     inflated_event = event.model_copy(
         update={
-            "effective_update_weight": math.nextafter(
-                event.effective_update_weight,
-                math.inf,
-            )
+            "effective_update_weight": math.nextafter(0.2, math.inf)
         }
     )
 
@@ -3464,424 +3373,11 @@ def test_core_rejects_one_ulp_native_event_weight_before_solver_or_ledger(
             probe_candidates=[],
             evidence_memory=production.evidence_memory,
             normalized_signals=production.normalized_signals,
+            contribution_deltas=production.contribution_deltas,
+            epistemic_progress=production.epistemic_progress,
         ),
         correlation_credit_policy=policy,
-    )
-
-
-def _policy_snapshot_replay_fixture():
-    policy = CorrelationCreditPolicy(
-        max_cumulative_effective_weight_per_direction=0.2
-    )
-    state = make_exact_belief_state()
-    signal = make_active_signal().model_copy(
-        update={
-            "id": "S_policy_snapshot_replay",
-            "raw_content": "A replayed observation supports H1.",
-        }
-    )
-    cycle = make_cycle("cycle_policy_snapshot_seed")
-    production = EvidenceIntegrationGate(
-        model_gateway=ScriptedModelGateway(
-            responses={"judge_evidence": _native_open_judgment()}
-        ),
-        memory_manager=evidence_memory.EvidenceMemoryManager(policy),
-    ).integrate(
-        cycle=cycle,
-        belief_state=state,
-        probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[signal],
-    )
-    event = production.evidence_events[0]
-    ledger_refs = {
-        record_type: list(record_ids)
-        for record_type, record_ids in state.ledger_refs.items()
-    }
-    ledger_refs["evidence_events"] = [event.id]
-    valid_state = BeliefState.model_validate(
-        state.model_copy(
-            update={
-                "evidence_memory": production.evidence_memory,
-                "ledger_refs": ledger_refs,
-            }
-        ).model_dump(mode="python")
-    )
-    overcap_credit = dict(production.evidence_memory.correlation_credit)
-    overcap_credit["unrelated-policy-group|H2|disconfirming"] = 0.3
-    overcap_memory = EvidenceMemorySnapshot.model_validate(
-        production.evidence_memory.model_copy(
-            update={"correlation_credit": overcap_credit}
-        ).model_dump(mode="python")
-    )
-    overcap_state = BeliefState.model_validate(
-        valid_state.model_copy(
-            update={"evidence_memory": overcap_memory}
-        ).model_dump(mode="python")
-    )
-    return (
-        policy,
-        valid_state,
-        overcap_state,
-        production.normalized_signals[0],
-        event,
-        overcap_memory,
-    )
-
-
-def test_core_replay_rejects_same_overcap_prior_and_candidate_atomically(
-    tmp_path: Path,
-):
-    policy, _, overcap_state, signal, event, overcap_memory = (
-        _policy_snapshot_replay_fixture()
-    )
-
-    _assert_supplied_transition_rejected_atomically(
-        tmp_path,
-        name="same_overcap_policy_snapshot",
-        state=overcap_state,
-        integration=EvidenceIntegrationResult(
-            evidence_events=[event],
-            probe_candidates=[],
-            evidence_memory=overcap_memory,
-            normalized_signals=[signal],
-        ),
-        correlation_credit_policy=policy,
-        expected_error="correlation credit policy",
-    )
-
-
-def test_core_replay_rejects_candidate_only_overcap_atomically(tmp_path: Path):
-    policy, valid_state, _, signal, event, overcap_memory = (
-        _policy_snapshot_replay_fixture()
-    )
-
-    _assert_supplied_transition_rejected_atomically(
-        tmp_path,
-        name="candidate_overcap_policy_snapshot",
-        state=valid_state,
-        integration=EvidenceIntegrationResult(
-            evidence_events=[event],
-            probe_candidates=[],
-            evidence_memory=overcap_memory,
-            normalized_signals=[signal],
-        ),
-        correlation_credit_policy=policy,
-    )
-
-
-def _directional_projection_transition_fixture(*, cumulative: bool):
-    policy = CorrelationCreditPolicy(
-        max_cumulative_effective_weight_per_direction=0.15
-    )
-    state = make_exact_belief_state()
-    manager = evidence_memory.EvidenceMemoryManager(policy)
-    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
-        ExternalSignal(
-            id="S_core_directional_projection",
-            cycle_id="pending",
-            signal_kind=SignalKind.ACTIVE,
-            source_type="external_agent_projection",
-            source="agent-a",
-            raw_content="Agent A and cited source X both support H1.",
-            initial_target_hypotheses=["H1"],
-        ),
-        run_id=state.run_id,
-    )
-    likelihoods = {"H1": LikelihoodBand.MODERATELY_CONFIRMING}
-    event_specs = [
-        (
-            "E_core_directional_projection",
-            EvidenceType.SENDER_JUDGMENT,
-            {
-                "reliability": 0.55,
-                "independence": 0.45,
-                "relevance": 0.75,
-                "novelty": 0.6,
-                "specificity": 0.6,
-                "verifiability": 0.4,
-            },
-        ),
-        (
-            "E_core_directional_projection_source",
-            EvidenceType.SOURCE_CLAIM,
-            {
-                "reliability": 0.5,
-                "independence": 0.45,
-                "relevance": 0.7,
-                "novelty": 0.6,
-                "specificity": 0.6,
-                "verifiability": 0.4,
-            },
-        ),
-    ]
-    prior = state.evidence_memory
-    working = prior
-    events = []
-
-    for event_id, event_type, quality in event_specs:
-        credit_kwargs = {"credit_snapshot": working} if cumulative else {}
-        decision = manager.classify(
-            prior,
-            signal,
-            likelihoods=likelihoods,
-            unresolved_likelihood=LikelihoodBand.NEUTRAL,
-            frame_version=state.frame_state.frame_version,
-            base_effective_weight=(
-                quality["reliability"]
-                * quality["independence"]
-                * quality["relevance"]
-                * quality["novelty"]
-            ),
-            **credit_kwargs,
-        )
-        event = EvidenceEvent(
-            schema_version="v0.2",
-            id=event_id,
-            derived_from_signal=signal.id,
-            epistemic_origin=signal.provenance.epistemic_origin,
-            derivation_root_id=signal.provenance.derivation_root_id,
-            target_hypotheses=["H1"],
-            evidence_type=event_type,
-            content=signal.raw_content,
-            likelihoods=likelihoods,
-            unresolved_likelihood=LikelihoodBand.NEUTRAL,
-            frame_fit=FrameFit.UNDERDETERMINED,
-            interpretation="Directional projection transition fixture.",
-            correlation_status=decision.correlation_status,
-            effective_update_weight=decision.effective_update_weight,
-            discard_reason=decision.discard_reason,
-            **quality,
-        )
-        events.append(event)
-        if cumulative:
-            working = manager.commit(
-                working,
-                signal=signal,
-                event=event,
-                decision=decision,
-            )
-
-    if not cumulative:
-        identity_memory = manager.remember_signal_identity(prior, signal)
-        digest = evidence_memory.canonical_signal_identity_digest(signal)
-        credit_key = (
-            f"{signal.provenance.correlation_group}|H1|confirming"
-        )
-        working = EvidenceMemorySnapshot.model_validate(
-            identity_memory.model_copy(
-                update={
-                    "accepted_evidence_ids": [event.id for event in events],
-                    "event_signal_identity_digests": {
-                        event.id: digest for event in events
-                    },
-                    "correlation_credit": {
-                        credit_key: events[-1].effective_update_weight
-                    },
-                }
-            ).model_dump(mode="python")
-        )
-
-    return policy, state, signal, events, working
-
-
-def test_core_accepts_cumulative_projection_credit_and_bounds_solver_weight(
-    tmp_path: Path,
-):
-    policy, state, signal, events, candidate = (
-        _directional_projection_transition_fixture(cumulative=True)
-    )
-    core = SuppliedIntegrationCore(
-        EvidenceIntegrationResult(
-            evidence_events=events,
-            probe_candidates=[],
-            evidence_memory=candidate,
-            normalized_signals=[signal],
-        ),
-        ledger=JsonlLedgerStore(tmp_path / "cumulative-projection-credit.jsonl"),
-        correlation_credit_policy=policy,
-    )
-    real_solver = core._belief_solver
-
-    class CapturingSolver:
-        received_weights = []
-
-        def solve(self, belief_state, received_events, **kwargs):
-            self.received_weights = [
-                event.effective_update_weight for event in received_events
-            ]
-            return real_solver.solve(belief_state, received_events, **kwargs)
-
-        def __getattr__(self, name):
-            return getattr(real_solver, name)
-
-    solver = CapturingSolver()
-    core._belief_solver = solver
-    cycle = make_cycle("cycle_cumulative_projection_credit")
-
-    result = core.integrate_cycle(
-        cycle=cycle,
-        belief_state=state,
-        probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[signal],
-    )
-
-    assert solver.received_weights == pytest.approx([0.111375, 0.038625])
-    assert sum(solver.received_weights) == pytest.approx(0.15)
-    assert result.belief_state.evidence_memory == candidate
-    assert list(candidate.correlation_credit.values()) == [pytest.approx(0.15)]
-
-
-def test_core_rejects_stale_multi_event_credit_pair_atomically(tmp_path: Path):
-    policy, state, signal, events, stale_candidate = (
-        _directional_projection_transition_fixture(cumulative=False)
-    )
-
-    assert [event.effective_update_weight for event in events] == pytest.approx(
-        [0.111375, 0.0945]
-    )
-    assert list(stale_candidate.correlation_credit.values()) == [
-        pytest.approx(0.0945)
-    ]
-    _assert_supplied_transition_rejected_atomically(
-        tmp_path,
-        name="stale_multi_event_credit_pair",
-        state=state,
-        integration=EvidenceIntegrationResult(
-            evidence_events=events,
-            probe_candidates=[],
-            evidence_memory=stale_candidate,
-            normalized_signals=[signal],
-        ),
-        correlation_credit_policy=policy,
-    )
-
-
-def test_core_rejects_transition_built_under_a_different_credit_policy(
-    tmp_path: Path,
-):
-    state = make_exact_belief_state()
-    gateway = ScriptedModelGateway(
-        responses={"judge_evidence": _native_open_judgment()}
-    )
-    cycle = make_cycle("cycle_mismatched_credit_policy")
-    production = EvidenceIntegrationGate(model_gateway=gateway).integrate(
-        cycle=cycle,
-        belief_state=state,
-        probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[make_active_signal()],
-    )
-    prior_state = state.model_dump(mode="json")
-    prior_provider_calls = len(gateway.requests)
-
-    _assert_supplied_transition_rejected_atomically(
-        tmp_path,
-        name="mismatched_credit_policy",
-        state=state,
-        integration=production,
-        correlation_credit_policy=CorrelationCreditPolicy(
-            max_cumulative_effective_weight_per_direction=0.2
-        ),
-    )
-
-    assert len(gateway.requests) == prior_provider_calls
-    assert state.model_dump(mode="json") == prior_state
-
-
-def test_uncapped_same_batch_duplicate_transition_fails_atomically(tmp_path: Path):
-    state = make_exact_belief_state()
-    first_raw = _memory_signal(
-        "S_uncapped_signature_first",
-        "The same source repeats this audited observation.",
-        root="root-uncapped-signature-first",
-    )
-    second_raw = first_raw.model_copy(
-        update={
-            "id": "S_uncapped_signature_second",
-            "provenance": first_raw.provenance.model_copy(
-                update={
-                    "derivation_root_id": "root-uncapped-signature-second",
-                    "correlation_group": "caller-supplied-uncapped-second",
-                }
-            ),
-        }
-    )
-    gateway = ScriptedModelGateway(
-        responses={"judge_evidence": _native_open_judgment()}
-    )
-    cycle = make_cycle("cycle_uncapped_signature")
-    production = EvidenceIntegrationGate(model_gateway=gateway).integrate(
-        cycle=cycle,
-        belief_state=state,
-        probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[first_raw, second_raw],
-    )
-    first_signal, second_signal = production.normalized_signals
-    first_event, capped_second_event = production.evidence_events
-    assert capped_second_event.correlation_status == "correlated_novel"
-    assert capped_second_event.effective_update_weight == pytest.approx(0.045)
-
-    manager = evidence_memory.EvidenceMemoryManager()
-    first_decision = manager.classify(
-        state.evidence_memory,
-        first_signal,
-        likelihoods=first_event.likelihoods,
-        unresolved_likelihood=first_event.unresolved_likelihood,
-        frame_version=state.frame_state.frame_version,
-        base_effective_weight=(
-            first_event.reliability
-            * first_event.independence
-            * first_event.relevance
-            * first_event.novelty
-        ),
-    )
-    forged_memory = manager.commit(
-        state.evidence_memory,
-        signal=first_signal,
-        event=first_event,
-        decision=first_decision,
-    )
-    uncapped_quality = {
-        "reliability": 0.8,
-        "independence": 0.8,
-        "relevance": 0.9,
-        "novelty": 0.8,
-        "specificity": 0.7,
-        "verifiability": 0.7,
-    }
-    second_decision = manager.classify(
-        forged_memory,
-        second_signal,
-        likelihoods=capped_second_event.likelihoods,
-        unresolved_likelihood=capped_second_event.unresolved_likelihood,
-        frame_version=state.frame_state.frame_version,
-        base_effective_weight=0.8 * 0.8 * 0.9 * 0.8,
-    )
-    forged_second_event = EvidenceEvent.model_validate(
-        {
-            **capped_second_event.model_dump(mode="python"),
-            **uncapped_quality,
-            "correlation_status": second_decision.correlation_status,
-            "effective_update_weight": second_decision.effective_update_weight,
-        }
-    )
-    forged_memory = manager.commit(
-        forged_memory,
-        signal=second_signal,
-        event=forged_second_event,
-        decision=second_decision,
-    )
-    assert forged_second_event.effective_update_weight == pytest.approx(0.4608)
-
-    _assert_supplied_transition_rejected_atomically(
-        tmp_path,
-        name="uncapped_same_batch_duplicate",
-        state=state,
-        integration=EvidenceIntegrationResult(
-            evidence_events=[first_event, forged_second_event],
-            probe_candidates=[],
-            evidence_memory=forged_memory,
-            normalized_signals=[first_signal, second_signal],
-        ),
+        expected_error="native evidence event contract",
     )
 
 
@@ -4161,150 +3657,29 @@ def test_explicit_legacy_plain_list_gate_never_ledgers_raw_secrets(
     assert ledger_path.read_bytes() == b""
 
 
-@pytest.mark.parametrize(
-    ("prior_used_credit", "declared_weight", "resulting_used_credit"),
-    [
-        pytest.param(0.25, 0.9, 1.15, id="inflated-weight"),
-        pytest.param(1.0, 0.2, 1.2, id="saturated-over-cap"),
-    ],
-)
-def test_self_consistent_inflated_credit_transition_fails_atomically(
-    tmp_path: Path,
-    prior_used_credit: float,
-    declared_weight: float,
-    resulting_used_credit: float,
-):
-    state = make_exact_belief_state()
-    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
-        _memory_signal(
-            "S_forged_credit",
-            "A fresh audit favors H1.",
-            root="root-forged-credit",
-        ),
-        run_id=state.run_id,
-    )
-    group = signal.provenance.correlation_group
-    prior_memory = state.evidence_memory.model_copy(
-        update={
-            "correlation_credit": {
-                f"{group}|H1|confirming": prior_used_credit
-            }
-        }
-    )
-    state = state.model_copy(update={"evidence_memory": prior_memory})
-    event = _policy_transition_event(
-        signal,
-        event_id="E_forged_credit",
-        correlation_status="correlated_novel",
-        effective_update_weight=declared_weight,
-    )
-    candidate = _commit_self_declared_transition(
-        prior_memory,
-        signal=signal,
-        event=event,
-        resulting_used_credit=resulting_used_credit,
-    )
-    assert candidate.correlation_credit[
-        f"{group}|H1|confirming"
-    ] == pytest.approx(resulting_used_credit)
-
-    _assert_supplied_transition_rejected_atomically(
-        tmp_path,
-        name=f"self_consistent_credit_{prior_used_credit}",
-        state=state,
-        integration=EvidenceIntegrationResult(
-            evidence_events=[event],
-            probe_candidates=[],
-            evidence_memory=candidate,
-            normalized_signals=[signal],
-        ),
-    )
-
-
-@pytest.mark.parametrize("repeat_kind", ["exact", "same_root"])
-def test_repeat_mislabeled_novel_with_positive_weight_fails_atomically(
-    tmp_path: Path,
-    repeat_kind: str,
-):
-    state = make_exact_belief_state()
-    normalizer = evidence_memory.SignalProvenanceNormalizer()
-    prior_signal = normalizer.normalize(
-        _memory_signal(
-            "S_repeat_prior",
-            "A stable audited observation.",
-            root="root-repeat-policy",
-        ),
-        run_id=state.run_id,
-    )
-    prior_memory = evidence_memory.EvidenceMemoryManager().remember_signal_identity(
-        state.evidence_memory,
-        prior_signal,
-    )
-    current_raw = _memory_signal(
-        "S_repeat_current",
-        (
-            prior_signal.raw_content
-            if repeat_kind == "exact"
-            else "A differently worded result from the same factual root."
-        ),
-        root="root-repeat-policy",
-    )
-    current_signal = normalizer.normalize(current_raw, run_id=state.run_id)
-    state = state.model_copy(update={"evidence_memory": prior_memory})
-    quality = None
-    declared_weight = 0.2
-    if repeat_kind == "exact":
-        quality = {
-            "reliability": 0.8,
-            "independence": 0.25,
-            "relevance": 0.9,
-            "novelty": 0.25,
-            "specificity": 0.7,
-            "verifiability": 0.7,
-        }
-        declared_weight = 0.045
-    event = _policy_transition_event(
-        current_signal,
-        event_id=f"E_mislabeled_{repeat_kind}",
-        correlation_status="novel",
-        effective_update_weight=declared_weight,
-        quality=quality,
-    )
-    candidate = _commit_self_declared_transition(
-        prior_memory,
-        signal=current_signal,
-        event=event,
-        resulting_used_credit=declared_weight,
-    )
-
-    _assert_supplied_transition_rejected_atomically(
-        tmp_path,
-        name=f"mislabeled_{repeat_kind}",
-        state=state,
-        integration=EvidenceIntegrationResult(
-            evidence_events=[event],
-            probe_candidates=[],
-            evidence_memory=candidate,
-            normalized_signals=[current_signal],
-        ),
-    )
-
-
-def test_inflated_model_origin_quality_and_matching_memory_fail_atomically(
+def test_inflated_model_origin_quality_fails_atomically(
     tmp_path: Path,
 ):
     state = make_exact_belief_state()
-    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
-        ExternalSignal(
-            id="S_inflated_model_quality",
-            cycle_id="pending",
-            signal_kind=SignalKind.ACTIVE,
-            source_type="model_probe_gateway",
-            source="model_gateway:scripted",
-            raw_content="A model comparison favors H1.",
-            initial_target_hypotheses=["H1", "H2"],
-        ),
-        run_id=state.run_id,
+    signal = ExternalSignal(
+        id="S_inflated_model_quality",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="model_probe_gateway",
+        source="model_gateway:scripted",
+        raw_content="A model comparison favors H1.",
+        initial_target_hypotheses=["H1", "H2"],
+    )
+    cycle = make_cycle("cycle_inflated_model_quality")
+    production = EvidenceIntegrationGate(
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        )
+    ).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[signal],
     )
     inflated_quality = {
         "reliability": 0.9,
@@ -4314,19 +3689,8 @@ def test_inflated_model_origin_quality_and_matching_memory_fail_atomically(
         "specificity": 0.9,
         "verifiability": 0.9,
     }
-    declared_weight = 0.9**4
-    event = _policy_transition_event(
-        signal,
-        event_id="E_inflated_model_quality",
-        correlation_status="novel",
-        effective_update_weight=declared_weight,
-        quality=inflated_quality,
-    )
-    candidate = _commit_self_declared_transition(
-        state.evidence_memory,
-        signal=signal,
-        event=event,
-        resulting_used_credit=declared_weight,
+    event = production.evidence_events[0].model_copy(
+        update=inflated_quality
     )
 
     _assert_supplied_transition_rejected_atomically(
@@ -4336,25 +3700,24 @@ def test_inflated_model_origin_quality_and_matching_memory_fail_atomically(
         integration=EvidenceIntegrationResult(
             evidence_events=[event],
             probe_candidates=[],
-            evidence_memory=candidate,
-            normalized_signals=[signal],
+            evidence_memory=production.evidence_memory,
+            normalized_signals=production.normalized_signals,
+            contribution_deltas=production.contribution_deltas,
+            epistemic_progress=production.epistemic_progress,
         ),
     )
 
 
 def test_valid_lower_model_quality_transition_is_accepted(tmp_path: Path):
     state = make_exact_belief_state()
-    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
-        ExternalSignal(
-            id="S_lower_model_quality",
-            cycle_id="pending",
-            signal_kind=SignalKind.ACTIVE,
-            source_type="model_probe_gateway",
-            source="model_gateway:scripted",
-            raw_content="A cautious model comparison favors H1.",
-            initial_target_hypotheses=["H1", "H2"],
-        ),
-        run_id=state.run_id,
+    signal = ExternalSignal(
+        id="S_lower_model_quality",
+        cycle_id="pending",
+        signal_kind=SignalKind.ACTIVE,
+        source_type="model_probe_gateway",
+        source="model_gateway:scripted",
+        raw_content="A cautious model comparison favors H1.",
+        initial_target_hypotheses=["H1", "H2"],
     )
     lower_quality = {
         "reliability": 0.4,
@@ -4364,100 +3727,64 @@ def test_valid_lower_model_quality_transition_is_accepted(tmp_path: Path):
         "specificity": 0.5,
         "verifiability": 0.2,
     }
-    base_weight = 0.4 * 0.2 * 0.7 * 0.3
-    manager = evidence_memory.EvidenceMemoryManager()
-    decision = manager.classify(
-        state.evidence_memory,
-        signal,
-        likelihoods={
-            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
-            "H2": LikelihoodBand.NEUTRAL,
-        },
-        unresolved_likelihood=LikelihoodBand.NEUTRAL,
-        frame_version=state.frame_state.frame_version,
-        base_effective_weight=base_weight,
-    )
-    event = _policy_transition_event(
-        signal,
-        event_id="E_lower_model_quality",
-        correlation_status=decision.correlation_status,
-        effective_update_weight=decision.effective_update_weight,
-        quality=lower_quality,
-    )
-    candidate = manager.commit(
-        state.evidence_memory,
-        signal=signal,
-        event=event,
-        decision=decision,
+    judgment = _native_open_judgment()
+    judgment["quality_overrides"] = lower_quality
+    cycle = make_cycle("cycle_lower_model_quality")
+    production = EvidenceIntegrationGate(
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": judgment}
+        )
+    ).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[signal],
     )
     ledger = JsonlLedgerStore(tmp_path / "lower-model-quality.jsonl")
     result = SuppliedIntegrationCore(
-        EvidenceIntegrationResult(
-            evidence_events=[event],
-            probe_candidates=[],
-            evidence_memory=candidate,
-            normalized_signals=[signal],
-        ),
+        production,
         ledger=ledger,
     ).integrate_cycle(
-        cycle=make_cycle("cycle_lower_model_quality"),
+        cycle=cycle,
         belief_state=state,
-        probe_set=make_empty_probe_set("cycle_lower_model_quality"),
-        signals=[make_active_signal()],
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[signal],
     )
 
-    assert result.evidence_events == [event]
-    assert result.belief_state.evidence_memory == candidate
+    event = result.evidence_events[0]
+    assert {
+        metric: getattr(event, metric) for metric in lower_quality
+    } == lower_quality
+    assert result.belief_state.evidence_memory == production.evidence_memory
 
 
 def _existing_binding_transition_fixture():
     state = make_exact_belief_state()
-    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
-        _memory_signal(
-            "S_binding_prior",
-            "The bound historical audit favors H1.",
-            root="root-binding-prior",
-        ),
-        run_id=state.run_id,
+    cycle = make_cycle("cycle_binding_fixture")
+    production = EvidenceIntegrationGate(
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        )
+    ).integrate(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[
+            _memory_signal(
+                "S_binding_prior",
+                "The bound historical audit favors H1.",
+                root="root-binding-prior",
+            )
+        ],
     )
-    manager = evidence_memory.EvidenceMemoryManager()
-    quality = {
-        "reliability": 0.8,
-        "independence": 0.8,
-        "relevance": 0.9,
-        "novelty": 0.8,
-        "specificity": 0.7,
-        "verifiability": 0.7,
-    }
-    base_weight = 0.8 * 0.8 * 0.9 * 0.8
-    decision = manager.classify(
-        state.evidence_memory,
-        signal,
-        likelihoods={
-            "H1": LikelihoodBand.MODERATELY_CONFIRMING,
-            "H2": LikelihoodBand.NEUTRAL,
-        },
-        unresolved_likelihood=LikelihoodBand.NEUTRAL,
-        frame_version=state.frame_state.frame_version,
-        base_effective_weight=base_weight,
-    )
-    event = _policy_transition_event(
-        signal,
-        event_id="E_binding_prior",
-        correlation_status=decision.correlation_status,
-        effective_update_weight=decision.effective_update_weight,
-        quality=quality,
-    )
-    memory = manager.commit(
-        state.evidence_memory,
-        signal=signal,
-        event=event,
-        decision=decision,
-    )
+    signal = production.normalized_signals[0]
+    event = production.evidence_events[0]
     payload = state.model_dump(mode="python")
     payload.update(
         {
-            "evidence_memory": memory.model_dump(mode="python"),
+            "evidence_memory": production.evidence_memory.model_dump(
+                mode="python"
+            ),
             "ledger_refs": {
                 **state.ledger_refs,
                 "evidence_events": [event.id],
@@ -4498,8 +3825,8 @@ def test_existing_event_changed_signal_binding_fails_atomically(
                 "H2": LikelihoodBand.NEUTRAL,
             },
             "correlation_status": "duplicate_exact",
-            "effective_update_weight": 0.0,
-            "discard_reason": "duplicate evidence event id",
+            "effective_update_weight": None,
+            "discard_reason": "duplicate_exact",
         }
     )
     candidate = evidence_memory.EvidenceMemoryManager().remember_signal_identity(
@@ -4542,8 +3869,8 @@ def test_existing_event_missing_historical_binding_fails_atomically(
                 "H2": LikelihoodBand.NEUTRAL,
             },
             "correlation_status": "duplicate_exact",
-            "effective_update_weight": 0.0,
-            "discard_reason": "duplicate evidence event id",
+            "effective_update_weight": None,
+            "discard_reason": "duplicate_exact",
         }
     )
 
@@ -4562,49 +3889,38 @@ def test_existing_event_missing_historical_binding_fails_atomically(
 
 def _native_event_contract_case(*, replay: bool, malformed: str):
     state = make_exact_belief_state()
-    signal = evidence_memory.SignalProvenanceNormalizer().normalize(
-        make_active_signal().model_copy(update={"id": "S_native_contract"}),
-        run_id=state.run_id,
+    fixture_cycle = make_cycle("cycle_native_contract_fixture")
+    signal = _model_memory_signal(
+        "S_native_contract",
+        "The native contract fixture favors H1.",
+        root="native-contract-fixture",
+        supplied_group="native-contract-fixture",
     )
-    manager = evidence_memory.EvidenceMemoryManager()
-    decision = manager.classify(
-        EvidenceMemorySnapshot(),
-        signal,
-        likelihoods={
-            "H1": LikelihoodBand.NEUTRAL,
-            "H2": LikelihoodBand.NEUTRAL,
-        },
-        unresolved_likelihood=LikelihoodBand.NEUTRAL,
-        base_effective_weight=0.0,
+    valid_integration = EvidenceIntegrationGate(
+        model_gateway=ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        )
+    ).integrate(
+        cycle=fixture_cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(fixture_cycle.cycle_id),
+        signals=[signal],
     )
-    valid_event = EvidenceEvent(
-        schema_version="v0.2",
-        id="E_native_contract",
-        derived_from_signal=signal.id,
-        epistemic_origin=signal.provenance.epistemic_origin,
-        derivation_root_id=signal.provenance.derivation_root_id,
-        target_hypotheses=["H1", "H2"],
-        evidence_type=EvidenceType.NEUTRAL,
-        content=signal.raw_content,
-        likelihoods={
-            "H1": LikelihoodBand.NEUTRAL,
-            "H2": LikelihoodBand.NEUTRAL,
-        },
-        unresolved_likelihood=LikelihoodBand.NEUTRAL,
-        frame_fit=FrameFit.UNDERDETERMINED,
-        correlation_status=decision.correlation_status,
-        effective_update_weight=0.0,
-    )
-    committed = manager.commit(
-        EvidenceMemorySnapshot(),
-        signal=signal,
-        event=valid_event,
-        decision=decision,
-    )
-    if malformed == "legacy_v01":
+    valid_event = valid_integration.evidence_events[0]
+    if malformed == "weighted_rootless":
+        event = EvidenceEvent.model_validate(
+            {
+                **valid_event.model_dump(mode="python"),
+                "contribution_root_id": None,
+                "effective_update_weight": 0.5,
+            }
+        )
+    elif malformed == "legacy_v01":
         event = valid_event.model_copy(update={"schema_version": "v0.1"})
-    elif malformed == "missing_effective_weight":
-        event = valid_event.model_copy(update={"effective_update_weight": None})
+    elif malformed == "missing_contribution_root":
+        event = valid_event.model_copy(update={"contribution_root_id": None})
+    elif malformed == "missing_epistemic_origin":
+        event = valid_event.model_copy(update={"epistemic_origin": None})
     else:
         raise AssertionError(f"unknown native event defect: {malformed}")
 
@@ -4612,7 +3928,9 @@ def _native_event_contract_case(*, replay: bool, malformed: str):
         state_payload = state.model_dump(mode="python")
         state_payload.update(
             {
-                "evidence_memory": committed.model_dump(mode="python"),
+                "evidence_memory": valid_integration.evidence_memory.model_dump(
+                    mode="python"
+                ),
                 "ledger_refs": {
                     **state.ledger_refs,
                     "evidence_events": [valid_event.id],
@@ -4623,15 +3941,22 @@ def _native_event_contract_case(*, replay: bool, malformed: str):
     return state, EvidenceIntegrationResult(
         evidence_events=[event],
         probe_candidates=[],
-        evidence_memory=committed,
-        normalized_signals=[signal],
+        evidence_memory=valid_integration.evidence_memory,
+        normalized_signals=valid_integration.normalized_signals,
+        contribution_deltas=valid_integration.contribution_deltas,
+        epistemic_progress=valid_integration.epistemic_progress,
     )
 
 
 @pytest.mark.parametrize("replay", [False, True], ids=["new", "replay"])
 @pytest.mark.parametrize(
     "malformed",
-    ["legacy_v01", "missing_effective_weight"],
+    [
+        "weighted_rootless",
+        "legacy_v01",
+        "missing_contribution_root",
+        "missing_epistemic_origin",
+    ],
 )
 def test_native_event_contract_fails_before_solver_or_ledger(
     tmp_path: Path,
@@ -4845,7 +4170,9 @@ def test_core_integrates_named_and_unresolved_mass_atomically(tmp_path: Path):
     assert active_mass + unresolved == pytest.approx(1.0)
     assert unresolved > 0.50
     assert len(result.frame_mass_updates) == 1
-    assert result.frame_mass_updates[0].evidence_id == event.id
+    assert result.frame_mass_updates[0].evidence_id == (
+        result.contribution_deltas[0].contribution_root_id
+    )
     assert result.belief_state.frame_state.adequacy_status == (
         FrameAdequacyStatus.CHALLENGED
     )
@@ -5208,17 +4535,25 @@ def test_core_rejects_non_open_all_retired_state_before_cycle_ledger_append(
 
 def test_core_open_duplicate_event_moves_frame_mass_once(tmp_path: Path):
     event = EvidenceEvent(
-        id="E_open_duplicate",
-        derived_from_signal="S_open_duplicate",
+        id="E_open_duplicate_1",
+        derived_from_signal="S_open_duplicate_1",
         target_hypotheses=["H1"],
         evidence_type=EvidenceType.SUPPORTING,
         content="A repeated open-frame event.",
         likelihoods={"H1": LikelihoodBand.MODERATELY_CONFIRMING},
         unresolved_likelihood=LikelihoodBand.NEUTRAL,
         effective_update_weight=1.0,
+        epistemic_origin=EpistemicOrigin.TOOL_RESULT,
+        derivation_root_id="open-duplicate-root",
+    )
+    duplicate = event.model_copy(
+        update={
+            "id": "E_open_duplicate_2",
+            "derived_from_signal": "S_open_duplicate_2",
+        }
     )
     ledger = JsonlLedgerStore(tmp_path / "open-duplicate-ledger.jsonl")
-    core = StaticEventCore([event, event], ledger=ledger)
+    core = StaticEventCore([event, duplicate], ledger=ledger)
 
     result = core.integrate_cycle(
         cycle=make_cycle("cycle_open_duplicate"),
@@ -5228,11 +4563,17 @@ def test_core_open_duplicate_event_moves_frame_mass_once(tmp_path: Path):
     )
 
     assert len(result.frame_mass_updates) == 1
-    assert {update.evidence_id for update in result.belief_updates} == {event.id}
+    assert {update.evidence_id for update in result.belief_updates} == {
+        result.contribution_deltas[0].contribution_root_id
+    }
+    assert result.contribution_deltas[0].caused_by_event_ids == [
+        event.id,
+        duplicate.id,
+    ]
     assert [
         record["payload"]["id"]
         for record in ledger.read_all("evidence_event")
-    ] == [event.id]
+    ] == [event.id, duplicate.id]
 
 
 def test_core_marks_past_evidence_replay_without_duplicate_canonical_record(
@@ -5302,8 +4643,9 @@ def test_core_persists_same_cycle_duplicate_identity_once(tmp_path: Path):
     assert result.evidence_events[0].discard_reason is None
     assert result.evidence_events[1].discard_reason == "duplicate evidence event id"
     assert {update.evidence_id for update in result.belief_updates} == {
-        "E_same_cycle"
+        result.contribution_deltas[0].contribution_root_id
     }
+    assert result.contribution_deltas[0].caused_by_event_ids == ["E_same_cycle"]
     assert len(result.belief_updates) == 2
     assert result.belief_state.ledger_refs["evidence_events"] == ["E_same_cycle"]
     evidence_records = ledger.read_all("evidence_event")
@@ -6005,8 +5347,10 @@ class _InPlaceCoreInputMutationGate:
             memory.content_fingerprints.clear()
             memory.source_content_fingerprints.clear()
             memory.derivation_roots.clear()
+            memory.signal_contribution_roots.clear()
             memory.event_signal_identity_digests.clear()
             memory.correlation_credit.clear()
+            memory.root_contributions.clear()
             memory.discovery_evidence_ids.clear()
             memory.counterevidence_ids_by_hypothesis.clear()
             memory.discard_and_schema_history.clear()
@@ -6552,7 +5896,9 @@ def test_core_commits_memory_once_and_ledgers_normalized_cross_cycle_duplicate(
         probe_set=make_empty_probe_set(first_cycle.cycle_id),
         signals=[_memory_signal("S_memory_1", "The audit supports H1.", root="root-audit")],
     )
-    first_credit = dict(first.belief_state.evidence_memory.correlation_credit)
+    first_root_contributions = dict(
+        first.belief_state.evidence_memory.root_contributions
+    )
     second_cycle = make_cycle("cycle_memory_2").model_copy(update={"cycle_index": 2})
 
     second = core.integrate_cycle(
@@ -6564,10 +5910,13 @@ def test_core_commits_memory_once_and_ledgers_normalized_cross_cycle_duplicate(
 
     assert len(gateway.requests) == 1
     assert second.evidence_events[0].discard_reason == "duplicate_exact"
-    assert second.evidence_events[0].effective_update_weight == 0.0
+    assert second.evidence_events[0].effective_update_weight is None
+    assert second.contribution_deltas == []
     assert second.belief_updates == []
     assert second.frame_mass_updates == []
-    assert second.belief_state.evidence_memory.correlation_credit == first_credit
+    assert second.belief_state.evidence_memory.root_contributions == (
+        first_root_contributions
+    )
     assert second.belief_state.evidence_memory.accepted_evidence_ids == [
         first.evidence_events[0].id
     ]
@@ -6786,10 +6135,9 @@ def test_matching_parent_root_succeeds_with_zero_independence_in_both_orders(
     assert child_event.discard_reason is None
     assert child_event.correlation_status == "correlated_restatement"
     assert child_event.independence == 0.0
-    assert child_event.effective_update_weight == 0.0
-    assert parent_event.correlation_status == (
-        "novel" if order == "parent_first" else "correlated_restatement"
-    )
+    assert child_event.effective_update_weight is None
+    assert child_event.contribution_root_id == parent_event.contribution_root_id
+    assert parent_event.correlation_status == "novel"
     assert len(gateway.requests) == 2
 
 
@@ -6912,12 +6260,12 @@ def test_replayed_native_evidence_id_does_not_recommit_credit_or_ledger_record(
     )
 
     assert len(gateway.requests) == 1
-    assert replayed.evidence_events[0].discard_reason == "duplicate evidence event id"
+    assert replayed.evidence_events[0].discard_reason == "duplicate_exact"
     replayed_memory = replayed.belief_state.evidence_memory
     assert set(replayed_memory.content_fingerprints) == {"S_replay_1", "S_replay_2"}
     assert replayed_memory.accepted_evidence_ids == prior_memory.accepted_evidence_ids
     assert replayed_memory.discard_and_schema_history == prior_memory.discard_and_schema_history
-    assert replayed_memory.correlation_credit == prior_memory.correlation_credit
+    assert replayed_memory.root_contributions == prior_memory.root_contributions
     assert replayed_memory.event_signal_identity_digests == (
         prior_memory.event_signal_identity_digests
     )
@@ -6973,7 +6321,7 @@ def test_replayed_new_signal_identity_is_persisted_then_conflict_fails_atomicall
     replayed_memory = replayed.belief_state.evidence_memory
 
     assert len(gateway.requests) == 1
-    assert replayed.evidence_events[0].discard_reason == "duplicate evidence event id"
+    assert replayed.evidence_events[0].discard_reason == "duplicate_exact"
     assert set(replayed_memory.content_fingerprints) == {
         first_signal.id,
         replay_signal.id,
@@ -6983,7 +6331,7 @@ def test_replayed_new_signal_identity_is_persisted_then_conflict_fails_atomicall
     )[2:] == ["source.example/audit", "replay-supplied-group"]
     assert replayed_memory.accepted_evidence_ids == first_memory.accepted_evidence_ids
     assert replayed_memory.discard_and_schema_history == first_memory.discard_and_schema_history
-    assert replayed_memory.correlation_credit == first_memory.correlation_credit
+    assert replayed_memory.root_contributions == first_memory.root_contributions
 
     replayed_again = core.integrate_cycle(
         cycle=cycle.model_copy(update={"cycle_index": 3}),
@@ -7111,56 +6459,55 @@ def test_historical_native_event_without_binding_fails_with_other_identity_memor
     assert ledger_path.read_bytes() == prior_ledger
 
 
-def test_saturated_correlation_event_is_ledger_visible_without_mass_update(
+def test_no_change_root_event_is_ledger_visible_without_mass_update(
     tmp_path: Path,
 ):
     gateway = ScriptedModelGateway(responses={"judge_evidence": _native_open_judgment()})
-    ledger = JsonlLedgerStore(tmp_path / "saturated-memory-ledger.jsonl")
+    ledger = JsonlLedgerStore(tmp_path / "no-change-memory-ledger.jsonl")
     core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
-    state = make_exact_belief_state()
-    signal = ExternalSignal(
-        id="S_saturated",
-        cycle_id="pending",
-        signal_kind=SignalKind.ACTIVE,
-        source_type="model_probe_gateway",
-        source="model_gateway:scripted",
-        raw_content="A fresh model restatement favors H1.",
-        initial_target_hypotheses=["H1", "H2"],
-    )
-    group = evidence_memory.SignalProvenanceNormalizer().normalize(
-        signal,
-        run_id="run_1",
-    ).provenance.correlation_group
-    state = state.model_copy(
-        update={
-            "evidence_memory": state.evidence_memory.model_copy(
-                update={
-                    "correlation_credit": {
-                        f"{group}|H1|confirming": 1.0,
-                        f"{group}|H2|disconfirming": 1.0,
-                    }
-                }
+    first_cycle = make_cycle("cycle_no_change_1")
+    first = core.integrate_cycle(
+        cycle=first_cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(first_cycle.cycle_id),
+        signals=[
+            _model_memory_signal(
+                "S_no_change_1",
+                "The first model assessment favors H1.",
+                root="no-change-1",
+                supplied_group="no-change-root",
             )
-        }
+        ],
     )
-    cycle = make_cycle("cycle_saturated")
-
+    second_cycle = make_cycle("cycle_no_change_2").model_copy(
+        update={"cycle_index": 2}
+    )
     result = core.integrate_cycle(
-        cycle=cycle,
-        belief_state=state,
-        probe_set=make_empty_probe_set(cycle.cycle_id),
-        signals=[signal],
+        cycle=second_cycle,
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(second_cycle.cycle_id),
+        signals=[
+            _model_memory_signal(
+                "S_no_change_2",
+                "A separate model assessment reaches the same judgment.",
+                root="no-change-2",
+                supplied_group="no-change-root",
+            )
+        ],
     )
 
     event = result.evidence_events[0]
     assert event.correlation_status == "correlated_novel"
-    assert event.discard_reason == "correlation_credit_saturated"
-    assert event.effective_update_weight == 0.0
+    assert event.discard_reason is None
+    assert event.effective_update_weight is None
+    assert [delta.mode for delta in result.contribution_deltas] == [
+        EvidenceContributionMode.NO_CHANGE
+    ]
     assert result.belief_updates == []
     assert result.frame_mass_updates == []
     assert [
         record["payload"]["id"] for record in ledger.read_all("evidence_event")
-    ] == [event.id]
+    ] == [first.evidence_events[0].id, event.id]
 
 
 def test_generated_probe_candidates_are_written_to_ledger_and_belief_refs(tmp_path: Path):
@@ -7255,3 +6602,447 @@ def test_legacy_gate_returning_plain_event_list_still_integrates():
 
     assert result.evidence_events[0].id == "legacy_E1"
     assert result.probe_candidates == []
+
+
+def _posterior_vector(state: BeliefState) -> dict[str, float]:
+    return {
+        hypothesis.id: hypothesis.posterior
+        for hypothesis in state.hypotheses
+    }
+
+
+def _applied_penalty_state(state: BeliefState) -> dict[str, tuple[float, float]]:
+    return {
+        hypothesis.id: (
+            hypothesis.applied_complexity_penalty,
+            hypothesis.applied_ad_hoc_penalty,
+        )
+        for hypothesis in state.hypotheses
+    }
+
+
+def test_same_native_model_root_cannot_self_reinforce_across_cycles(
+    tmp_path: Path,
+):
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    ledger = JsonlLedgerStore(tmp_path / "same-root-deltas.jsonl")
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    first_cycle = make_cycle("cycle_same_root_1")
+    first = core.integrate_cycle(
+        cycle=first_cycle,
+        belief_state=make_exact_belief_state(),
+        probe_set=make_empty_probe_set(first_cycle.cycle_id),
+        signals=[
+            _model_memory_signal(
+                "S_same_root_1",
+                "The first model assessment favors H1.",
+                root="model-assessment-1",
+                supplied_group="same-model-root",
+            )
+        ],
+    )
+    second_cycle = make_cycle("cycle_same_root_2").model_copy(
+        update={"cycle_index": 2}
+    )
+    second = core.integrate_cycle(
+        cycle=second_cycle,
+        belief_state=first.belief_state,
+        probe_set=make_empty_probe_set(second_cycle.cycle_id),
+        signals=[
+            _model_memory_signal(
+                "S_same_root_2",
+                "A separate model assessment reaches the same judgment.",
+                root="model-assessment-2",
+                supplied_group="same-model-root",
+            )
+        ],
+    )
+
+    assert [delta.mode for delta in first.contribution_deltas] == [
+        EvidenceContributionMode.NEW_ROOT
+    ]
+    assert _posterior_vector(first.belief_state) != {
+        "H1": 0.45,
+        "H2": 0.45,
+    }
+    assert len(first.belief_state.evidence_memory.root_contributions) == 1
+    assert [delta.mode for delta in second.contribution_deltas] == [
+        EvidenceContributionMode.NO_CHANGE
+    ]
+    assert _posterior_vector(second.belief_state) == _posterior_vector(
+        first.belief_state
+    )
+    assert second.belief_state.frame_state == first.belief_state.frame_state
+    assert _applied_penalty_state(second.belief_state) == (
+        _applied_penalty_state(first.belief_state)
+    )
+    assert second.belief_updates == []
+    assert second.frame_mass_updates == []
+    assert len(second.belief_state.evidence_memory.root_contributions) == 1
+
+    event_records = ledger.read_all("evidence_event")
+    delta_records = ledger.read_all("evidence_contribution_delta")
+    assert len(event_records) == 2
+    assert [record["payload"]["mode"] for record in delta_records] == [
+        "new_root",
+        "no_change",
+    ]
+
+
+class _NativeEnvelopeMutationGate:
+    def __init__(self, delegate, mutation: str, secret: str | None = None) -> None:
+        self._delegate = delegate
+        self._mutation = mutation
+        self._secret = secret
+
+    def integrate(self, **kwargs) -> EvidenceIntegrationResult:
+        integration = self._delegate.integrate(**kwargs)
+        assert len(integration.contribution_deltas) == 1
+        events = list(integration.evidence_events)
+        deltas = list(integration.contribution_deltas)
+        progress = integration.epistemic_progress
+        if self._mutation == "missing":
+            deltas = []
+            progress = EpistemicProgress(
+                falsification_probe_executed=(
+                    integration.epistemic_progress.falsification_probe_executed
+                )
+            )
+        elif self._mutation == "forged":
+            payload = integration.contribution_deltas[0].model_dump(
+                mode="python"
+            )
+            hypothesis_id = sorted(payload["per_hypothesis_delta"])[0]
+            payload["current_contribution"][
+                "per_hypothesis_log_likelihood"
+            ][hypothesis_id] += 0.125
+            payload["per_hypothesis_delta"][hypothesis_id] += 0.125
+            forged = EvidenceContributionDelta.model_validate(payload)
+            deltas = [forged]
+            progress_payload = integration.epistemic_progress.model_dump(
+                mode="python"
+            )
+            progress_payload["max_absolute_contribution_delta"] = max(
+                *(abs(value) for value in forged.per_hypothesis_delta.values()),
+                abs(forged.unresolved_delta or 0.0),
+            )
+            progress = EpistemicProgress.model_validate(progress_payload)
+        elif self._mutation == "secret_event":
+            events[0] = events[0].model_copy(
+                update={"interpretation": self._secret}
+            )
+        elif self._mutation == "secret_delta":
+            deltas[0] = deltas[0].model_copy(
+                update={"caused_by_event_ids": [self._secret]}
+            )
+        else:
+            raise AssertionError(f"unknown native envelope mutation: {self._mutation}")
+        return EvidenceIntegrationResult(
+            evidence_events=events,
+            probe_candidates=list(integration.probe_candidates),
+            evidence_memory=integration.evidence_memory,
+            normalized_signals=integration.normalized_signals,
+            contribution_deltas=deltas,
+            epistemic_progress=progress,
+        )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "forged"])
+def test_native_delta_envelope_failure_is_atomic(
+    tmp_path: Path,
+    mutation: str,
+):
+    ledger_path = tmp_path / f"native-{mutation}-delta.jsonl"
+    ledger_path.touch()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = BayesProbeCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    core._evidence_gate = _NativeEnvelopeMutationGate(
+        core._evidence_gate,
+        mutation,
+    )
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    cycle = make_cycle(f"cycle_native_{mutation}_delta")
+
+    with pytest.raises(
+        ValueError,
+        match="native evidence integration envelope is invalid",
+    ):
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                _model_memory_signal(
+                    f"S_native_{mutation}_delta",
+                    "The native assessment favors H1.",
+                    root=f"native-{mutation}-delta",
+                    supplied_group=f"native-{mutation}-delta",
+                )
+            ],
+        )
+
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("secret_event", "native evidence event contract is invalid"),
+        ("secret_delta", "native evidence integration envelope is invalid"),
+    ],
+)
+def test_native_core_validation_errors_drop_secret_context_atomically(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+):
+    secret = "sk-" + "z" * 32
+    ledger_path = tmp_path / f"native-{mutation}-context.jsonl"
+    ledger_path.touch()
+    gateway = ScriptedModelGateway(
+        responses={"judge_evidence": _native_open_judgment()}
+    )
+    core = BayesProbeCore(
+        ledger=JsonlLedgerStore(ledger_path),
+        model_gateway=gateway,
+    )
+    core._evidence_gate = _NativeEnvelopeMutationGate(
+        core._evidence_gate,
+        mutation,
+        secret,
+    )
+    solver = _RecordingSolverProxy(core._belief_solver)
+    core._belief_solver = solver
+    state = make_exact_belief_state()
+    prior_state = state.model_dump(mode="json")
+    safe_label = mutation.replace("secret_", "validation_")
+    cycle = make_cycle(f"cycle_{safe_label}_context")
+
+    with pytest.raises(ValueError, match=message) as exc_info:
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=state,
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                _model_memory_signal(
+                    f"S_{safe_label}_context",
+                    "The native assessment favors H1.",
+                    root=f"{safe_label}-context",
+                    supplied_group=f"{safe_label}-context",
+                )
+            ],
+        )
+
+    error = exc_info.value
+    reachable_errors: list[BaseException] = []
+    pending_errors = [error]
+    seen_error_ids: set[int] = set()
+    rendered_errors: list[str] = []
+    while pending_errors:
+        current_error = pending_errors.pop()
+        if id(current_error) in seen_error_ids:
+            continue
+        seen_error_ids.add(id(current_error))
+        reachable_errors.append(current_error)
+        rendered_errors.extend([str(current_error), repr(current_error)])
+        errors = getattr(current_error, "errors", None)
+        if callable(errors):
+            rendered_errors.append(
+                json.dumps(errors(), default=str, sort_keys=True)
+            )
+        json_error = getattr(current_error, "json", None)
+        if callable(json_error):
+            rendered_errors.append(json_error())
+        for chained_error in (
+            current_error.__cause__,
+            current_error.__context__,
+        ):
+            if chained_error is not None:
+                pending_errors.append(chained_error)
+
+    if len(reachable_errors) != 1:
+        pytest.fail("raised error retained a reachable cause or context")
+    assert all(secret not in rendered for rendered in rendered_errors)
+    assert type(error) is ValueError
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert solver.calls == 0
+    assert state.model_dump(mode="json") == prior_state
+    assert ledger_path.read_bytes() == b""
+
+
+def test_native_all_neutral_new_root_requires_no_delta(tmp_path: Path):
+    gateway = ScriptedModelGateway(
+        responses={
+            "judge_evidence": {
+                "evidence_type": "neutral",
+                "likelihoods": {"H1": "neutral", "H2": "neutral"},
+                "unresolved_likelihood": "neutral",
+                "frame_fit": "underdetermined",
+                "unexplained_observation": None,
+                "interpretation": "The assessment is neutral.",
+                "quality_overrides": {},
+            }
+        }
+    )
+    ledger = JsonlLedgerStore(tmp_path / "neutral-native-root.jsonl")
+    core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+    state = make_exact_belief_state()
+    cycle = make_cycle("cycle_neutral_native_root")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[
+            _model_memory_signal(
+                "S_neutral_native_root",
+                "The model finds no discriminating information.",
+                root="neutral-native-root",
+                supplied_group="neutral-native-root",
+            )
+        ],
+    )
+
+    assert result.evidence_events[0].discard_reason is None
+    assert result.contribution_deltas == []
+    assert result.epistemic_progress == EpistemicProgress()
+    assert result.belief_state.evidence_memory.root_contributions == {}
+    assert _posterior_vector(result.belief_state) == _posterior_vector(state)
+    assert ledger.read_all("evidence_contribution_delta") == []
+    assert len(ledger.read_all("epistemic_progress")) == 1
+
+
+def test_explicit_legacy_cycle_adapts_events_and_preserves_arithmetic():
+    class LegacyEventGate(EvidenceIntegrationGate):
+        def integrate(self, *, cycle, belief_state, probe_set, signals):
+            return [
+                EvidenceEvent(
+                    id="E_legacy_delta",
+                    derived_from_signal=signals[0].id,
+                    target_hypotheses=["H1", "H2"],
+                    evidence_type=EvidenceType.SUPPORTING,
+                    content=signals[0].raw_content,
+                    reliability=1.0,
+                    independence=1.0,
+                    relevance=1.0,
+                    novelty=1.0,
+                    likelihoods={
+                        "H1": LikelihoodBand.MODERATELY_CONFIRMING,
+                        "H2": LikelihoodBand.MODERATELY_DISCONFIRMING,
+                    },
+                )
+            ]
+
+    core = BayesProbeCore()
+    core._evidence_gate = LegacyEventGate()
+    state = make_explicit_legacy_belief_state(cycle_id="cycle_0")
+    cycle = make_cycle("cycle_legacy_delta")
+
+    result = core.integrate_cycle(
+        cycle=cycle,
+        belief_state=state,
+        probe_set=make_empty_probe_set(cycle.cycle_id),
+        signals=[make_active_signal()],
+    )
+
+    assert len(result.contribution_deltas) == 1
+    assert result.contribution_deltas[0].contribution_root_id.startswith(
+        "legacy-event-root:sha256:"
+    )
+    assert result.epistemic_progress == EpistemicProgress()
+    assert _posterior_vector(result.belief_state)["H1"] > 0.5
+    assert _posterior_vector(result.belief_state)["H2"] < 0.5
+
+
+def test_cycle_result_delta_defaults_do_not_share_mutable_state():
+    state = make_exact_belief_state()
+    decision = FrameAdequacyDecision(
+        frame_state=state.frame_state,
+        should_expand=False,
+        trigger_event_ids=[],
+        reason="Default isolation fixture.",
+    )
+
+    def result() -> CycleResult:
+        return CycleResult(
+            cycle=make_cycle("cycle_result_defaults"),
+            belief_state=state,
+            evidence_events=[],
+            belief_updates=[],
+            frame_mass_updates=[],
+            frame_adequacy_decision=decision,
+            hypothesis_evolutions=[],
+        )
+
+    first = result()
+    second = result()
+
+    assert first.contribution_deltas is not second.contribution_deltas
+    assert first.epistemic_progress is not second.epistemic_progress
+
+
+def test_native_delta_and_progress_ledger_json_is_safe_and_deterministic(
+    tmp_path: Path,
+):
+    audited_records = []
+    for suffix in ("a", "b"):
+        ledger_path = tmp_path / f"native-audit-{suffix}.jsonl"
+        gateway = ScriptedModelGateway(
+            responses={"judge_evidence": _native_open_judgment()}
+        )
+        ledger = JsonlLedgerStore(ledger_path)
+        core = BayesProbeCore(ledger=ledger, model_gateway=gateway)
+        cycle = make_cycle("cycle_native_audit")
+        core.integrate_cycle(
+            cycle=cycle,
+            belief_state=make_exact_belief_state(),
+            probe_set=make_empty_probe_set(cycle.cycle_id),
+            signals=[
+                _model_memory_signal(
+                    "S_native_audit",
+                    "The model audit favors H1.",
+                    root="native-audit",
+                    supplied_group="native-audit",
+                )
+            ],
+        )
+        records = ledger.read_all()
+        record_types = [record["record_type"] for record in records]
+        assert record_types.index("evidence_event") < record_types.index(
+            "evidence_contribution_delta"
+        )
+        assert record_types.index("evidence_contribution_delta") < (
+            record_types.index("epistemic_progress")
+        )
+        assert record_types.index("epistemic_progress") < record_types.index(
+            "belief_state"
+        )
+        selected = [
+            (record["record_type"], record["payload"])
+            for record in records
+            if record["record_type"]
+            in {"evidence_contribution_delta", "epistemic_progress"}
+        ]
+        assert all(not contains_secret_material(payload) for _, payload in selected)
+        audited_records.append(selected)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines():
+            assert line == json.dumps(
+                json.loads(line),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+    assert audited_records[0] == audited_records[1]
