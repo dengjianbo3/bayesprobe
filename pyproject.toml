@@ -2,6 +2,7 @@
 name = "bayesprobe"
 version = "0.1.0"
 description = "BayesProbe MVP core for signal-grounded belief revision"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "pydantic>=2.7,<3",
@@ -21,6 +22,12 @@ hle = [
 
 [project.scripts]
 bayesprobe = "bayesprobe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bayesprobe", "bayesprobe.*"]
+
+[tool.setuptools.package-data]
+bayesprobe = ["webui_static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
