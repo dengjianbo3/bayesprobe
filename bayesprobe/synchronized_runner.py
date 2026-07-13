@@ -23,6 +23,8 @@ from bayesprobe.schemas import (
     BeliefUpdate,
     CycleRecord,
     CycleSignalShape,
+    EpistemicProgress,
+    EvidenceContributionDelta,
     EvidenceEvent,
     ExternalSignal,
     HypothesisEvolution,
@@ -113,6 +115,8 @@ class SynchronizedRoundResult:
     evidence_events: list[EvidenceEvent]
     belief_updates: list[BeliefUpdate]
     hypothesis_evolutions: list[HypothesisEvolution]
+    contribution_deltas: list[EvidenceContributionDelta]
+    epistemic_progress: EpistemicProgress
     belief_state_projection: BeliefStateProjection
     selected_probe_candidates: list[ProbeCandidate]
     remaining_probe_candidates: list[ProbeCandidate]
@@ -359,6 +363,8 @@ def _round_result(
         evidence_events=core_result.evidence_events,
         belief_updates=core_result.belief_updates,
         hypothesis_evolutions=core_result.hypothesis_evolutions,
+        contribution_deltas=core_result.contribution_deltas,
+        epistemic_progress=core_result.epistemic_progress,
         belief_state_projection=projection,
         selected_probe_candidates=list(execution.selected_probe_candidates),
         remaining_probe_candidates=list(remaining_candidates),

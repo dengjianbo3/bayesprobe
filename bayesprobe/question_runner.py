@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
-from bayesprobe.core import BayesProbeCore
+from bayesprobe.core import BayesProbeCore, CycleResult
 from bayesprobe.frame_policy import FrameAdequacyDecision
 from bayesprobe.initialization import (
     BayesProbeInitializer,
@@ -46,6 +46,8 @@ from bayesprobe.schemas import (
     CapabilityDescriptor,
     CycleRecord,
     CycleSignalShape,
+    EpistemicProgress,
+    EvidenceContributionDelta,
     EvidenceEvent,
     ExternalSignal,
     Hypothesis,
@@ -87,6 +89,7 @@ class AutonomousQuestionStopReason(StrEnum):
     NO_PROBES = "no_probes"
     CONFIDENCE_REACHED = "confidence_reached"
     POSTERIOR_STABLE = "posterior_stable"
+    EPISTEMIC_STAGNATION = "epistemic_stagnation"
 
 
 class AutonomousQuestionProgressKind(StrEnum):
@@ -120,6 +123,8 @@ class AutonomousQuestionCycleResult:
     evidence_events: list[EvidenceEvent]
     belief_updates: list[BeliefUpdate]
     hypothesis_evolutions: list[HypothesisEvolution]
+    contribution_deltas: list[EvidenceContributionDelta]
+    epistemic_progress: EpistemicProgress
     answer_projection: AnswerProjection
 
 
@@ -392,6 +397,7 @@ class AutonomousQuestionRunner:
             prospective_stop_reason = self._prospective_stop_reason(
                 previous=previous_belief_state,
                 current=core_result.belief_state,
+                cycle_result=core_result,
                 completed_cycle_count=len(cycle_results) + 1,
             )
             self._emit_progress(
@@ -422,6 +428,8 @@ class AutonomousQuestionRunner:
                 evidence_events=core_result.evidence_events,
                 belief_updates=core_result.belief_updates,
                 hypothesis_evolutions=core_result.hypothesis_evolutions,
+                contribution_deltas=core_result.contribution_deltas,
+                epistemic_progress=core_result.epistemic_progress,
                 answer_projection=answer_projection,
             )
             cycle_results.append(cycle_result)
@@ -588,8 +596,15 @@ class AutonomousQuestionRunner:
         *,
         previous: BeliefState,
         current: BeliefState,
+        cycle_result: CycleResult,
         completed_cycle_count: int,
     ) -> str | None:
+        if _is_epistemically_stagnant(
+            previous=previous,
+            current=current,
+            cycle_result=cycle_result,
+        ):
+            return AutonomousQuestionStopReason.EPISTEMIC_STAGNATION.value
         if completed_cycle_count >= self.config.max_cycles:
             return AutonomousQuestionStopReason.MAX_CYCLES.value
         if self._confidence_reached(current):
@@ -797,6 +812,26 @@ def _posterior_delta_is_stable(
     return all(
         abs(current_by_id[hypothesis_id].posterior - previous_by_id[hypothesis_id].posterior) <= threshold
         for hypothesis_id in continuing_ids
+    )
+
+
+def _is_epistemically_stagnant(
+    *,
+    previous: BeliefState,
+    current: BeliefState,
+    cycle_result: CycleResult,
+) -> bool:
+    progress = cycle_result.epistemic_progress
+    has_root_change = (
+        progress.new_root_count
+        + progress.revised_root_count
+        + progress.retracted_root_count
+    ) > 0
+    return (
+        not has_root_change
+        and progress.max_absolute_contribution_delta == 0.0
+        and not cycle_result.hypothesis_evolutions
+        and previous.frame_state == current.frame_state
     )
 
 

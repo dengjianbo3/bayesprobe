@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -46,9 +47,13 @@ from bayesprobe.schemas import (
     AnswerContractOutline,
     AnswerProjection,
     AnswerValueType,
+    BeliefState,
     ChangeMyMindCondition,
     CycleSignalShape,
+    EvidenceContributionMode,
+    EvolutionOperation,
     FramingMethod,
+    HypothesisEvolution,
     HypothesisRelation,
     ProbeCandidate,
     ProbeDesign,
@@ -156,6 +161,160 @@ class RecordingAnswerProjector:
             input.previous_belief_state,
             input.cycle_result,
         )
+
+
+class SequencedRunnerGateway:
+    adapter_kind = "runner_stagnation_test"
+
+    def __init__(
+        self,
+        bands=("weakly_confirming",),
+        *,
+        independent_roots=False,
+    ):
+        self.bands = tuple(bands)
+        self.independent_roots = independent_roots
+        self.execution_count = 0
+        self.judgment_count = 0
+
+    @property
+    def model_identity(self):
+        root_index = self.execution_count + 1 if self.independent_roots else 1
+        return f"runner-stagnation-model-{root_index}"
+
+    def complete_structured(self, request):
+        if request.task == "execute_probe":
+            self.execution_count += 1
+            return {
+                "raw_content": "MODEL REASONING: The assessment supports H1."
+            }
+        if request.task == "judge_evidence":
+            band = self.bands[min(self.judgment_count, len(self.bands) - 1)]
+            self.judgment_count += 1
+            return {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    hypothesis_id: (
+                        band if hypothesis_id == "H1" else "neutral"
+                    )
+                    for hypothesis_id in request.input["target_hypotheses"]
+                },
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
+                "interpretation": "The same model assessment was evaluated.",
+                "quality_overrides": {},
+            }
+        raise AssertionError(f"unexpected task: {request.task}")
+
+
+class RecordingCycleCore(BayesProbeCore):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.results = []
+
+    def integrate_cycle(self, **kwargs):
+        result = super().integrate_cycle(**kwargs)
+        self.results.append(result)
+        return result
+
+
+class ProgressExceptionCore(BayesProbeCore):
+    def __init__(self, reported_change=None):
+        super().__init__()
+        self.reported_change = reported_change
+
+    def integrate_cycle(self, *, cycle, belief_state, probe_set, signals):
+        result = super().integrate_cycle(
+            cycle=cycle,
+            belief_state=belief_state,
+            probe_set=probe_set,
+            signals=signals,
+        )
+        frame_state = belief_state.frame_state
+        assert frame_state is not None
+        hypothesis_evolutions = []
+        if self.reported_change == "hypothesis":
+            hypothesis_evolutions = [
+                HypothesisEvolution(
+                    evolution_id=f"evolution_{cycle.cycle_id}",
+                    cycle_id=cycle.cycle_id,
+                    operation=EvolutionOperation.REFRAME,
+                    from_hypothesis="H1",
+                    to_hypothesis="H1",
+                    reason="Core reported a hypothesis reframe.",
+                )
+            ]
+        elif self.reported_change == "frame":
+            frame_payload = frame_state.model_dump(mode="python")
+            frame_payload.update(
+                {
+                    "frame_version": frame_state.frame_version + 1,
+                    "parent_frame_version": frame_state.frame_version,
+                    "revision_count": frame_state.revision_count + 1,
+                    "revision_reason": "Core reported a frame revision.",
+                }
+            )
+            frame_state = type(frame_state).model_validate(frame_payload)
+
+        state_payload = result.belief_state.model_dump(mode="python")
+        state_payload["frame_state"] = frame_state.model_dump(mode="python")
+        current = BeliefState.model_validate(state_payload)
+        decision = replace(result.frame_adequacy_decision, frame_state=frame_state)
+        return replace(
+            result,
+            belief_state=current,
+            frame_adequacy_decision=decision,
+            hypothesis_evolutions=hypothesis_evolutions,
+        )
+
+
+def evidence_progress_runner(
+    *,
+    max_cycles,
+    bands=("weakly_confirming",),
+    independent_roots=False,
+    answer_projector=None,
+    ledger=None,
+    **config_overrides,
+):
+    gateway = SequencedRunnerGateway(
+        bands,
+        independent_roots=independent_roots,
+    )
+    core = RecordingCycleCore(model_gateway=gateway, ledger=ledger)
+    runner = AutonomousQuestionRunner(
+        core=core,
+        executor=ProbeExecutor(
+            ModelBackedProbeToolGateway(gateway),
+            ledger=ledger,
+        ),
+        answer_projector=answer_projector,
+        config=AutonomousQuestionRunConfig(
+            max_cycles=max_cycles,
+            max_probes_per_cycle=1,
+            **config_overrides,
+        ),
+    )
+    return runner, core
+
+
+def epistemic_runner_input(run_id):
+    return InitializeRunInput(
+        run_id=run_id,
+        problem="Does this cycle contribute new information?",
+        hypothesis_seeds=explicit_test_hypothesis_seeds(),
+    )
+
+
+def applied_penalty_state(belief_state):
+    return {
+        hypothesis.id: (
+            hypothesis.applied_complexity_penalty,
+            hypothesis.applied_ad_hoc_penalty,
+        )
+        for hypothesis in belief_state.hypotheses
+    }
 
 
 def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
@@ -663,7 +822,9 @@ def test_question_runner_executes_one_end_to_end_cycle():
     assert cycle_result.probe_set.probes
     assert cycle_result.signals
     assert cycle_result.evidence_events
-    assert cycle_result.belief_updates
+    assert cycle_result.belief_updates == []
+    assert cycle_result.contribution_deltas == []
+    assert cycle_result.epistemic_progress.max_absolute_contribution_delta == 0.0
     assert cycle_result.answer_projection.current_best_hypothesis
     assert cycle_result.signals[0].generated_by_probe == cycle_result.probe_set.probes[0].id
 
@@ -745,7 +906,7 @@ def test_question_runner_runs_multiple_cycles_with_candidate_pool_from_projectio
         first_cycle.answer_projection.change_my_mind_condition.structured_probe_candidates[0]
     )
 
-    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert result.stop_reason == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION
     assert len(result.cycle_results) == 2
     assert first_cycle.cycle.cycle_id == "run_question_multi_cycle_1"
     assert second_cycle.cycle.cycle_id == "run_question_multi_cycle_2"
@@ -771,7 +932,10 @@ def test_question_runner_projects_with_prospective_stop_reason_and_reuses_candid
         )
     )
 
-    assert [input.stop_reason for input in projector.inputs] == [None, "max_cycles"]
+    assert [input.stop_reason for input in projector.inputs] == [
+        None,
+        "epistemic_stagnation",
+    ]
     first_candidate = (
         result.cycle_results[0]
         .answer_projection.change_my_mind_condition.structured_probe_candidates[0]
@@ -781,14 +945,147 @@ def test_question_runner_projects_with_prospective_stop_reason_and_reuses_candid
     )
 
 
-def test_question_runner_stops_on_confidence_threshold():
-    runner = AutonomousQuestionRunner(
-        core=BayesProbeCore(),
-        config=AutonomousQuestionRunConfig(
-            max_cycles=3,
-            max_probes_per_cycle=1,
-            confidence_threshold=0.6,
+def test_autonomous_runner_stops_when_same_root_adds_no_information():
+    projector = RecordingAnswerProjector()
+    runner, core = evidence_progress_runner(
+        max_cycles=10,
+        answer_projector=projector,
+    )
+
+    result = runner.run_question(epistemic_runner_input("run_same_root_stop"))
+
+    first, second = result.cycle_results
+    assert result.stop_reason == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION
+    assert len(result.cycle_results) == 2
+    assert [delta.mode for delta in first.contribution_deltas] == [
+        EvidenceContributionMode.NEW_ROOT
+    ]
+    assert [delta.mode for delta in second.contribution_deltas] == [
+        EvidenceContributionMode.NO_CHANGE
+    ]
+    assert second.epistemic_progress.no_change_count == 1
+    assert second.epistemic_progress.max_absolute_contribution_delta == 0.0
+    assert second.contribution_deltas is core.results[1].contribution_deltas
+    assert second.epistemic_progress is core.results[1].epistemic_progress
+    assert second.belief_state.hypotheses == first.belief_state.hypotheses
+    assert second.belief_state.frame_state == first.belief_state.frame_state
+    assert applied_penalty_state(second.belief_state) == applied_penalty_state(
+        first.belief_state
+    )
+    assert second.belief_updates == []
+    assert projector.inputs[-1].stop_reason == "epistemic_stagnation"
+    assert result.run.metadata["stop_reason"] == "epistemic_stagnation"
+
+
+def test_autonomous_runner_does_not_stagnate_on_new_independent_root():
+    runner, _ = evidence_progress_runner(
+        max_cycles=2,
+        independent_roots=True,
+    )
+
+    result = runner.run_question(epistemic_runner_input("run_independent_roots"))
+
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert [
+        cycle.epistemic_progress.new_root_count for cycle in result.cycle_results
+    ] == [1, 1]
+    assert all(
+        cycle.contribution_deltas[0].mode == EvidenceContributionMode.NEW_ROOT
+        for cycle in result.cycle_results
+    )
+
+
+@pytest.mark.parametrize(
+    ("second_band", "expected_mode", "progress_field"),
+    [
+        (
+            "moderately_confirming",
+            EvidenceContributionMode.REVISE_ROOT,
+            "revised_root_count",
         ),
+        (
+            "neutral",
+            EvidenceContributionMode.RETRACT_ROOT,
+            "retracted_root_count",
+        ),
+    ],
+)
+def test_autonomous_runner_does_not_stagnate_on_root_progress(
+    second_band,
+    expected_mode,
+    progress_field,
+):
+    runner, _ = evidence_progress_runner(
+        max_cycles=2,
+        bands=("weakly_confirming", second_band),
+    )
+
+    result = runner.run_question(
+        epistemic_runner_input(f"run_{expected_mode.value}")
+    )
+
+    terminal_cycle = result.cycle_results[-1]
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert terminal_cycle.contribution_deltas[0].mode == expected_mode
+    assert getattr(terminal_cycle.epistemic_progress, progress_field) == 1
+    assert terminal_cycle.epistemic_progress.max_absolute_contribution_delta > 0.0
+
+
+def test_autonomous_runner_does_not_stagnate_on_hypothesis_evolution():
+    runner = AutonomousQuestionRunner(
+        core=ProgressExceptionCore("hypothesis"),
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+    )
+
+    result = runner.run_question(epistemic_runner_input("run_hypothesis_progress"))
+
+    cycle = result.cycle_results[0]
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert cycle.epistemic_progress.max_absolute_contribution_delta == 0.0
+    assert cycle.hypothesis_evolutions
+
+
+def test_autonomous_runner_does_not_stagnate_on_frame_revision():
+    runner = AutonomousQuestionRunner(
+        core=ProgressExceptionCore("frame"),
+        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+    )
+
+    result = runner.run_question(epistemic_runner_input("run_frame_progress"))
+
+    cycle = result.cycle_results[0]
+    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert cycle.epistemic_progress.max_absolute_contribution_delta == 0.0
+    assert result.initial_belief_state.frame_state != cycle.belief_state.frame_state
+
+
+def test_epistemic_stagnation_has_priority_after_an_integrated_cycle():
+    projector = RecordingAnswerProjector()
+    runner = AutonomousQuestionRunner(
+        core=ProgressExceptionCore(),
+        answer_projector=projector,
+        config=AutonomousQuestionRunConfig(
+            max_cycles=1,
+            max_probes_per_cycle=1,
+            confidence_threshold=0.0,
+            posterior_delta_threshold=0.0,
+        ),
+    )
+
+    result = runner.run_question(epistemic_runner_input("run_stagnation_priority"))
+
+    cycle = result.cycle_results[0]
+    assert cycle.epistemic_progress.no_change_count == 0
+    assert result.stop_reason == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION
+    assert projector.inputs[0].stop_reason == "epistemic_stagnation"
+    assert result.run.metadata["stop_reason"] == "epistemic_stagnation"
+
+
+def test_question_runner_stops_on_confidence_threshold():
+    runner, _ = evidence_progress_runner(
+        max_cycles=3,
+        bands=("strongly_confirming",),
+        confidence_threshold=0.55,
     )
 
     result = runner.run_question(
@@ -802,7 +1099,7 @@ def test_question_runner_stops_on_confidence_threshold():
     assert result.stop_reason == AutonomousQuestionStopReason.CONFIDENCE_REACHED
     assert len(result.cycle_results) == 1
     assert result.final_answer_projection is not None
-    assert result.final_belief_state.hypotheses_by_id()["H1"].posterior >= 0.6
+    assert result.final_belief_state.hypotheses_by_id()["H1"].posterior >= 0.55
 
 
 def test_question_runner_does_not_apply_winner_threshold_to_independent_credences():
@@ -827,7 +1124,7 @@ def test_question_runner_does_not_apply_winner_threshold_to_independent_credence
         )
     )
 
-    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
+    assert result.stop_reason == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION
     assert len(result.cycle_results) == 2
 
 
@@ -904,9 +1201,10 @@ def test_question_runner_rejects_invalid_config(config_kwargs):
 
 def test_question_runner_writes_end_to_end_ledger_records(tmp_path: Path):
     ledger = JsonlLedgerStore(tmp_path / "question-runner-ledger.jsonl")
-    runner = AutonomousQuestionRunner(
-        core=BayesProbeCore(ledger=ledger),
-        config=AutonomousQuestionRunConfig(max_cycles=1, max_probes_per_cycle=1),
+    runner, _ = evidence_progress_runner(
+        max_cycles=1,
+        bands=("strongly_confirming",),
+        ledger=ledger,
     )
 
     runner.run_question(
@@ -924,6 +1222,8 @@ def test_question_runner_writes_end_to_end_ledger_records(tmp_path: Path):
     assert "probe_execution" in record_types
     assert "external_signal" in record_types
     assert "evidence_event" in record_types
+    assert "evidence_contribution_delta" in record_types
+    assert "epistemic_progress" in record_types
     assert "belief_update" in record_types
     assert "belief_state" in record_types
     assert "answer_projection" in record_types
@@ -1192,13 +1492,13 @@ def test_question_runner_progress_observer_receives_detached_deep_snapshots():
         "cycle_result",
         "result",
     }
-    assert result.stop_reason == AutonomousQuestionStopReason.MAX_CYCLES
-    assert result.run.metadata["stop_reason"] == "max_cycles"
+    assert result.stop_reason == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION
+    assert result.run.metadata["stop_reason"] == "epistemic_stagnation"
     assert len(result.cycle_results) == 2
     assert all(cycle.probe_set.probes for cycle in result.cycle_results)
     assert all(cycle.signals for cycle in result.cycle_results)
     assert all(cycle.evidence_events for cycle in result.cycle_results)
-    assert all(cycle.belief_updates for cycle in result.cycle_results)
+    assert all(cycle.belief_updates == [] for cycle in result.cycle_results)
     assert all(
         signal.raw_content != "observer mutation"
         for cycle in result.cycle_results

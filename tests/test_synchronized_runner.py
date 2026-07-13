@@ -5,7 +5,9 @@ import pytest
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
+from bayesprobe.probe_executor import ModelBackedProbeToolGateway, ProbeExecutor
 from bayesprobe.schemas import (
+    EvidenceContributionMode,
     ExternalSignal,
     RunRegime,
     RunStatus,
@@ -17,6 +19,46 @@ from bayesprobe.synchronized_runner import (
     SynchronizedRoundShape,
     SynchronizedRunInput,
 )
+
+
+class SynchronizedSameRootGateway:
+    adapter_kind = "synchronized_stagnation_test"
+    model_identity = "synchronized-stagnation-model"
+
+    def complete_structured(self, request):
+        if request.task == "execute_probe":
+            return {
+                "raw_content": "MODEL REASONING: The assessment supports H1."
+            }
+        if request.task == "judge_evidence":
+            return {
+                "evidence_type": "supporting",
+                "likelihoods": {
+                    hypothesis_id: (
+                        "weakly_confirming"
+                        if hypothesis_id == "H1"
+                        else "neutral"
+                    )
+                    for hypothesis_id in request.input["target_hypotheses"]
+                },
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
+                "interpretation": "The same model assessment was evaluated.",
+                "quality_overrides": {},
+            }
+        raise AssertionError(f"unexpected task: {request.task}")
+
+
+class RecordingSynchronizedCore(BayesProbeCore):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.results = []
+
+    def integrate_cycle(self, **kwargs):
+        result = super().integrate_cycle(**kwargs)
+        self.results.append(result)
+        return result
 
 
 def passive_refutation_signal(signal_id: str = "S_passive_refute") -> ExternalSignal:
@@ -73,9 +115,11 @@ def test_synchronized_runner_processes_new_run_passive_only_round():
     assert round_result.passive_signal_count == 1
     assert round_result.signals[0].signal_kind == SignalKind.PASSIVE
     assert round_result.probe_set.probes == []
-    assert round_result.belief_state_projection.current_best_hypothesis == "H2"
+    assert round_result.belief_state_projection.current_best_hypothesis == "H1"
     assert round_result.evidence_events
-    assert round_result.belief_updates
+    assert round_result.belief_updates == []
+    assert round_result.contribution_deltas == []
+    assert round_result.epistemic_progress.max_absolute_contribution_delta == 0.0
 
 
 def test_synchronized_runner_processes_active_only_round():
@@ -141,9 +185,10 @@ def test_synchronized_runner_processes_active_plus_passive_round():
         SignalKind.ACTIVE,
         SignalKind.PASSIVE,
     ]
-    assert round_result.belief_state_projection.current_best_hypothesis == "H2"
+    assert round_result.belief_state_projection.current_best_hypothesis == "H1"
     assert len(round_result.evidence_events) == 2
-    assert len(round_result.belief_updates) == 4
+    assert round_result.belief_updates == []
+    assert round_result.contribution_deltas == []
 
 
 def test_synchronized_runner_carries_projection_candidates_across_rounds():
@@ -183,6 +228,46 @@ def test_synchronized_runner_carries_projection_candidates_across_rounds():
     )
     assert second_round.probe_set.probes[0].cycle_id == "sync_candidate_carry_cycle_2"
     assert result.remaining_probe_candidates[0].candidate_id.startswith("pc_sync_candidate_carry_cycle_2")
+
+
+def test_synchronized_round_exposes_stagnation_without_ending_external_session():
+    gateway = SynchronizedSameRootGateway()
+    core = RecordingSynchronizedCore(model_gateway=gateway)
+    runner = SynchronizedRoundRunner(
+        core=core,
+        executor=ProbeExecutor(ModelBackedProbeToolGateway(gateway)),
+    )
+
+    result = runner.run_rounds(
+        SynchronizedRunInput(
+            initialize_input=InitializeRunInput(
+                run_id="sync_same_root",
+                problem="Does repeated synchronized reasoning add information?",
+                hypothesis_seeds=explicit_test_hypothesis_seeds(),
+            ),
+            rounds=[
+                SynchronizedRoundInput(
+                    round_id="round_1",
+                    shape=SynchronizedRoundShape.ACTIVE_ONLY,
+                ),
+                SynchronizedRoundInput(
+                    round_id="round_2",
+                    shape=SynchronizedRoundShape.ACTIVE_ONLY,
+                ),
+            ],
+        )
+    )
+
+    first, second = result.round_results
+    assert len(result.round_results) == 2
+    assert first.contribution_deltas[0].mode == EvidenceContributionMode.NEW_ROOT
+    assert second.contribution_deltas[0].mode == EvidenceContributionMode.NO_CHANGE
+    assert second.epistemic_progress.no_change_count == 1
+    assert first.contribution_deltas is core.results[0].contribution_deltas
+    assert second.epistemic_progress is core.results[1].epistemic_progress
+    assert second.belief_state.run_id == first.belief_state.run_id
+    assert result.run.metadata["stop_reason"] == "fixed_rounds_completed"
+    assert result.run.metadata["completed_round_count"] == 2
 
 
 def test_synchronized_runner_accepts_existing_run_state():
@@ -302,4 +387,4 @@ def test_synchronized_runner_writes_projection_ledger_records_without_duplicate_
     assert "probe_execution" in record_types
     assert "external_signal" in record_types
     assert "evidence_event" in record_types
-    assert "belief_update" in record_types
+    assert "epistemic_progress" in record_types
