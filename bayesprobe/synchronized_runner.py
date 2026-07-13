@@ -11,9 +11,9 @@ from bayesprobe.initialization import (
 )
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
-    ProbeExecutionContext,
     ProbeExecutionResult,
     ProbeExecutor,
+    build_probe_execution_brief,
 )
 from bayesprobe.probe_planner import ProbePlanner, ProbePlanningConfig, ProbePlanningResult
 from bayesprobe.projections import build_belief_state_projection
@@ -298,10 +298,11 @@ class SynchronizedRoundRunner:
         )
         execution = self.executor.execute_probe_set(
             probe_set=planning.probe_set,
-            context=ProbeExecutionContext(
+            context=build_probe_execution_brief(
                 run_id=run.run_id,
                 cycle_id=cycle_id,
                 belief_state=belief_state,
+                problem=run.problem,
                 metadata={"round_id": round_input.round_id},
             ),
         )

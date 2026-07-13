@@ -83,10 +83,12 @@ from bayesprobe.openai_gateway import (
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
     ModelBackedProbeToolGateway,
-    ProbeExecutionContext,
+    ProbeExecutionBrief,
+    ProbeExecutionHypothesisView,
     ProbeExecutionResult,
     ProbeExecutor,
     ProbeToolGateway,
+    build_probe_execution_brief,
 )
 from bayesprobe.probe_design import (
     MODEL_REASONING_CAPABILITY,
@@ -270,7 +272,8 @@ __all__ = [
     "ProbeDesignResult",
     "ProbeDesigner",
     "ProbePurpose",
-    "ProbeExecutionContext",
+    "ProbeExecutionBrief",
+    "ProbeExecutionHypothesisView",
     "ProbeExecutionResult",
     "ProbeExecutor",
     "ProbeSet",
@@ -308,6 +311,7 @@ __all__ = [
     "SynchronizedRunResult",
     "build_model_gateway",
     "build_openai_request_payload",
+    "build_probe_execution_brief",
     "evidence_judgment_from_mapping",
     "load_benchmark_dataset",
     "load_experiment_config",

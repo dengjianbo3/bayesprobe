@@ -1,4 +1,6 @@
 import json
+from collections.abc import Mapping
+from dataclasses import FrozenInstanceError, fields, is_dataclass
 from pathlib import Path
 import unicodedata
 
@@ -12,7 +14,7 @@ from bayesprobe.evidence_memory import (
 )
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.model_gateway import ScriptedModelGateway
+from bayesprobe.model_gateway import ModelInvocationTrace, ScriptedModelGateway
 from bayesprobe.openai_gateway import (
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
@@ -21,11 +23,17 @@ from bayesprobe.openai_gateway import (
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
     ModelBackedProbeToolGateway,
-    ProbeExecutionContext,
+    ProbeExecutionBrief,
+    ProbeExecutionHypothesisView,
     ProbeExecutor,
+    build_probe_execution_brief,
 )
 from bayesprobe.recorded_gateway import RecordedModelGateway
 from bayesprobe.probe_planner import ProbePlanner, ProbePlanningConfig
+from bayesprobe.question_runner import (
+    AutonomousQuestionRunConfig,
+    AutonomousQuestionRunner,
+)
 from bayesprobe.schemas import (
     AnswerChoice,
     BeliefState,
@@ -42,6 +50,12 @@ from bayesprobe.schemas import (
     ProbeDesign,
     ProbeSet,
     SignalKind,
+)
+from bayesprobe.synchronized_runner import (
+    SynchronizedRoundInput,
+    SynchronizedRoundRunner,
+    SynchronizedRoundShape,
+    SynchronizedRunInput,
 )
 from bayesprobe.task_framing import migrate_legacy_belief_state
 
@@ -78,6 +92,52 @@ _SECRET_MODEL_IDENTITIES = (
 )
 _NFKC_SENSITIVE_NAME = "\uff41\uff50\uff49\uff3f\uff4b\uff45\uff59"
 _OPENAI_MODEL_IDENTITY_PREFIX = "openai_model_identity:v1:"
+_FORBIDDEN_EXECUTION_BELIEF_KEYS = {
+    "ad_hoc_penalty",
+    "applied_ad_hoc_penalty",
+    "applied_complexity_penalty",
+    "belief_state",
+    "complexity_penalty",
+    "correlation_credit",
+    "current_best_hypothesis",
+    "effective_update_weight",
+    "evidence_credit",
+    "gap",
+    "initial_prior",
+    "posterior",
+    "posterior_summary",
+    "prior",
+    "rank",
+    "ranking",
+    "top_hypothesis",
+    "uncertainty_summary",
+    "unresolved_alternative_mass",
+}
+
+
+def recursive_keys(value) -> set[str]:
+    if is_dataclass(value):
+        return recursive_keys(
+            {field.name: getattr(value, field.name) for field in fields(value)}
+        )
+    if hasattr(value, "model_dump"):
+        return recursive_keys(value.model_dump(mode="python"))
+    if isinstance(value, Mapping):
+        return {
+            *(str(key).casefold() for key in value),
+            *(
+                nested_key
+                for item in value.values()
+                for nested_key in recursive_keys(item)
+            ),
+        }
+    if isinstance(value, list | tuple):
+        return {
+            nested_key
+            for item in value
+            for nested_key in recursive_keys(item)
+        }
+    return set()
 
 
 def parse_openai_model_identity(identity: str) -> dict[str, str]:
@@ -104,10 +164,12 @@ def assert_sha256_identity(value: str, *, prefix: str) -> None:
 class RecordingGateway:
     def __init__(self, signals_by_probe_id: dict[str, list[ExternalSignal]] | None = None):
         self.calls: list[str] = []
+        self.contexts: list[ProbeExecutionBrief] = []
         self.signals_by_probe_id = signals_by_probe_id or {}
 
-    def execute_probe(self, *, probe: ProbeDesign, context: ProbeExecutionContext) -> list[ExternalSignal]:
+    def execute_probe(self, *, probe: ProbeDesign, context: ProbeExecutionBrief) -> list[ExternalSignal]:
         self.calls.append(probe.id)
+        self.contexts.append(context)
         return self.signals_by_probe_id.get(
             probe.id,
             [
@@ -131,7 +193,7 @@ def explicit_test_hypothesis_seeds() -> list[HypothesisSeed]:
 
 
 class PassiveGateway:
-    def execute_probe(self, *, probe: ProbeDesign, context: ProbeExecutionContext) -> list[ExternalSignal]:
+    def execute_probe(self, *, probe: ProbeDesign, context: ProbeExecutionBrief) -> list[ExternalSignal]:
         return [
             ExternalSignal(
                 id="S_passive_bad",
@@ -328,11 +390,22 @@ def make_probe_set(
     )
 
 
-def make_context(cycle_id: str = "run_exec_cycle_1") -> ProbeExecutionContext:
-    return ProbeExecutionContext(
-        run_id="run_exec",
+def make_execution_brief(
+    cycle_id: str = "run_exec_cycle_1",
+    *,
+    belief_state: BeliefState | None = None,
+    run_id: str = "run_exec",
+    problem: str = "Which claim survives testing?",
+    task_context: str = "",
+    metadata: Mapping[str, object] | None = None,
+) -> ProbeExecutionBrief:
+    return build_probe_execution_brief(
+        run_id=run_id,
         cycle_id=cycle_id,
-        belief_state=make_belief_state(),
+        belief_state=belief_state or make_native_belief_state(),
+        problem=problem,
+        task_context=task_context,
+        metadata=metadata,
     )
 
 
@@ -346,7 +419,7 @@ def test_executor_turns_probe_set_into_active_signals():
 
     result = ProbeExecutor(DeterministicProbeToolGateway()).execute_probe_set(
         probe_set=probe_set,
-        context=make_context(),
+        context=make_execution_brief(),
     )
 
     assert result.probe_set == probe_set
@@ -383,8 +456,7 @@ def test_repeated_deterministic_probe_reuses_root_and_spends_no_fresh_credit():
     def execute(probe: ProbeDesign, cycle_id: str):
         return ProbeExecutor(DeterministicProbeToolGateway()).execute_probe_set(
             probe_set=make_probe_set([probe], cycle_id=cycle_id),
-            context=ProbeExecutionContext(
-                run_id="run_exec",
+            context=make_execution_brief(
                 cycle_id=cycle_id,
                 belief_state=state,
             ),
@@ -443,7 +515,7 @@ def test_repeated_deterministic_probe_reuses_root_and_spends_no_fresh_credit():
     event = repeated.evidence_events[0]
     assert event.correlation_status == "correlated_restatement"
     assert event.independence == 0.0
-    assert event.effective_update_weight == 0.0
+    assert event.effective_update_weight is None
     assert repeated.evidence_memory.correlation_credit == (
         first.evidence_memory.correlation_credit
     )
@@ -471,13 +543,13 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
             hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
-    context = ProbeExecutionContext(
+    context = build_probe_execution_brief(
         run_id="run_exec",
         cycle_id="run_exec_cycle_1",
         belief_state=initialized.belief_state,
+        problem="Which answer choice is correct?",
+        task_context="Use graph-chain irreducibility and aperiodicity.",
         metadata={
-            "problem": "Which answer choice is correct?",
-            "task_context": "Use graph-chain irreducibility and aperiodicity.",
             "initial_context": "SUPPORTS: This initial signal must remain outside model execution.",
         },
     )
@@ -506,12 +578,164 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert request.input["hypotheses"][0]["statement"] == (
         "The fixture's H1 condition holds."
     )
+    assert not hasattr(context, "belief_state")
+    assert _FORBIDDEN_EXECUTION_BELIEF_KEYS.isdisjoint(recursive_keys(context))
+    assert _FORBIDDEN_EXECUTION_BELIEF_KEYS.isdisjoint(recursive_keys(request.input))
+    assert set(vars(context.hypotheses[0])) == {
+        "id",
+        "statement",
+        "scope",
+        "predictions",
+        "falsifiers",
+    }
+    assert "hypotheses" not in context.task_frame["hypothesis_frame"]
+    assert request.metadata["belief_context_policy"] == "blind_no_scores_v1"
+    trace = ModelInvocationTrace.from_request(request, adapter_kind="scripted")
+    assert trace.metadata["belief_context_policy"] == "blind_no_scores_v1"
     assert signal.signal_kind == SignalKind.ACTIVE
     assert signal.source_type == "model_probe_gateway"
     assert signal.source == "model_gateway:scripted"
     assert signal.raw_content.startswith("A direct comparison")
     assert signal.provenance.provider_model_or_tool_identity == "scripted"
     assert signal.provenance.session_id == "run_exec"
+
+
+def test_probe_execution_brief_is_recursively_immutable():
+    brief = make_execution_brief(
+        metadata={"audit": {"labels": ["blind", "execution"]}}
+    )
+
+    assert isinstance(brief.hypotheses[0], ProbeExecutionHypothesisView)
+    with pytest.raises(FrozenInstanceError):
+        brief.run_id = "changed"
+    with pytest.raises(FrozenInstanceError):
+        brief.hypotheses[0].statement = "changed"
+    with pytest.raises(TypeError):
+        brief.metadata["audit"] = "changed"
+    with pytest.raises(TypeError):
+        brief.metadata["audit"]["labels"] = ("changed",)
+
+
+def test_deterministic_and_python_gateways_receive_the_same_blind_brief():
+    class RecordingDeterministicGateway(DeterministicProbeToolGateway):
+        def __init__(self):
+            self.contexts = []
+
+        def execute_probe(self, *, probe, context):
+            self.contexts.append(context)
+            return super().execute_probe(probe=probe, context=context)
+
+    brief = make_execution_brief()
+    probe_set = make_probe_set([make_probe("P_shared_brief", ["H1"])])
+    deterministic_gateway = RecordingDeterministicGateway()
+    python_gateway = RecordingGateway()
+
+    ProbeExecutor(deterministic_gateway).execute_probe_set(
+        probe_set=probe_set,
+        context=brief,
+    )
+    ProbeExecutor(python_gateway).execute_probe_set(
+        probe_set=probe_set,
+        context=brief,
+    )
+
+    assert deterministic_gateway.contexts == [brief]
+    assert python_gateway.contexts == [brief]
+    assert not hasattr(deterministic_gateway.contexts[0], "belief_state")
+    assert not hasattr(python_gateway.contexts[0], "belief_state")
+
+
+def test_autonomous_and_synchronized_runners_build_equivalent_blind_briefs():
+    initialize_input = InitializeRunInput(
+        run_id="run_equivalent_briefs",
+        problem="Which runner preserves execution blindness?",
+        task_context="Use the same supplied conditions.",
+        hypothesis_seeds=explicit_test_hypothesis_seeds(),
+    )
+    autonomous_gateway = RecordingGateway()
+    synchronized_gateway = RecordingGateway()
+    AutonomousQuestionRunner(
+        core=BayesProbeCore(),
+        executor=ProbeExecutor(autonomous_gateway),
+        config=AutonomousQuestionRunConfig(max_cycles=1),
+    ).run_question(initialize_input)
+    SynchronizedRoundRunner(
+        core=BayesProbeCore(),
+        executor=ProbeExecutor(synchronized_gateway),
+    ).run_rounds(
+        SynchronizedRunInput(
+            initialize_input=initialize_input,
+            rounds=[
+                SynchronizedRoundInput(
+                    round_id="round_1",
+                    shape=SynchronizedRoundShape.ACTIVE_ONLY,
+                )
+            ],
+        )
+    )
+
+    autonomous_brief = autonomous_gateway.contexts[0]
+    synchronized_brief = synchronized_gateway.contexts[0]
+    assert isinstance(autonomous_brief, ProbeExecutionBrief)
+    assert isinstance(synchronized_brief, ProbeExecutionBrief)
+    assert not hasattr(autonomous_brief, "belief_state")
+    assert not hasattr(synchronized_brief, "belief_state")
+    assert autonomous_brief.run_id == synchronized_brief.run_id
+    assert autonomous_brief.cycle_id == synchronized_brief.cycle_id
+    assert autonomous_brief.problem == synchronized_brief.problem
+    assert autonomous_brief.task_context == synchronized_brief.task_context
+    assert autonomous_brief.task_frame == synchronized_brief.task_frame
+    assert autonomous_brief.provider_schema_version == (
+        synchronized_brief.provider_schema_version
+    )
+    assert autonomous_brief.hypotheses == synchronized_brief.hypotheses
+    assert _FORBIDDEN_EXECUTION_BELIEF_KEYS.isdisjoint(
+        recursive_keys(autonomous_brief)
+    )
+    assert _FORBIDDEN_EXECUTION_BELIEF_KEYS.isdisjoint(
+        recursive_keys(synchronized_brief)
+    )
+
+
+def test_nested_secret_metadata_fails_atomically_before_provider_or_ledger_access(
+    tmp_path: Path,
+):
+    secret = "sk-" + "z" * 32
+    model_gateway = ScriptedModelGateway(
+        responses={"execute_probe": {"raw_content": "Must not execute."}}
+    )
+    ledger = JsonlLedgerStore(tmp_path / "secret-metadata-ledger.jsonl")
+    executor = ProbeExecutor(
+        ModelBackedProbeToolGateway(model_gateway),
+        ledger=ledger,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="probe execution metadata must not contain secret material",
+    ) as exc_info:
+        executor.execute_probe_set(
+            probe_set=make_probe_set([make_probe("P_secret_metadata", ["H1"])]),
+            context=build_probe_execution_brief(
+                run_id="run_exec",
+                cycle_id="run_exec_cycle_1",
+                belief_state=make_native_belief_state(),
+                problem="Which claim survives testing?",
+                metadata={"audit": [{"nested": {"api_key": secret}}]},
+            ),
+        )
+
+    reachable_errors = (
+        str(exc_info.value),
+        repr(exc_info.value),
+        repr(exc_info.value.args),
+        repr(exc_info.value.__cause__),
+        repr(exc_info.value.__context__),
+    )
+    assert all(secret not in rendered for rendered in reachable_errors)
+    assert all("api_key" not in rendered for rendered in reachable_errors)
+    assert model_gateway.requests == []
+    assert ledger.read_all() == []
 
 
 @pytest.mark.parametrize("model_identity", _SECRET_MODEL_IDENTITIES)
@@ -529,11 +753,7 @@ def test_model_backed_probe_rejects_secret_identity_before_provider_call(
     with pytest.raises(ValueError, match="model gateway identity") as exc_info:
         ModelBackedProbeToolGateway(model_gateway).execute_probe(
             probe=make_probe("P_secret_identity", ["H1", "H2"]),
-            context=ProbeExecutionContext(
-                run_id="run_exec",
-                cycle_id="run_exec_cycle_1",
-                belief_state=state,
-            ),
+            context=make_execution_brief(belief_state=state),
         )
 
     error_text = str(exc_info.value)
@@ -554,10 +774,9 @@ def test_model_backed_probe_rejects_sensitive_session_before_provider_call():
     with pytest.raises(ValueError, match="model provenance") as exc_info:
         ModelBackedProbeToolGateway(model_gateway).execute_probe(
             probe=make_probe("P_sensitive_session", ["H1", "H2"]),
-            context=ProbeExecutionContext(
-                run_id=_NFKC_SENSITIVE_NAME,
-                cycle_id="run_exec_cycle_1",
+            context=make_execution_brief(
                 belief_state=state,
+                run_id=_NFKC_SENSITIVE_NAME,
             ),
         )
 
@@ -581,11 +800,7 @@ def test_model_backed_probe_rejects_sensitive_adapter_before_provider_call():
     with pytest.raises(ValueError, match="model signal source") as exc_info:
         ModelBackedProbeToolGateway(model_gateway).execute_probe(
             probe=make_probe("P_sensitive_adapter", ["H1", "H2"]),
-            context=ProbeExecutionContext(
-                run_id="run_exec",
-                cycle_id="run_exec_cycle_1",
-                belief_state=state,
-            ),
+            context=make_execution_brief(belief_state=state),
         )
 
     error_text = str(exc_info.value)
@@ -602,18 +817,15 @@ def test_model_backed_probe_gateway_rejects_invalid_migration_envelope(
     model_gateway = ScriptedModelGateway(
         responses={"execute_probe": {"raw_content": "Must not execute."}}
     )
-    gateway = ModelBackedProbeToolGateway(model_gateway)
     state = make_invalid_migration_envelope(invalid_envelope)
     prior_state = state.model_dump(mode="json")
 
     with pytest.raises(ValueError, match="invalid belief lifecycle"):
-        gateway.execute_probe(
-            probe=make_probe("P_invalid_migration", ["H1", "H2"]),
-            context=ProbeExecutionContext(
-                run_id="run_exec",
-                cycle_id="run_exec_cycle_1",
-                belief_state=state,
-            ),
+        build_probe_execution_brief(
+            run_id="run_exec",
+            cycle_id="run_exec_cycle_1",
+            belief_state=state,
+            problem="Which claim survives testing?",
         )
 
     assert model_gateway.requests == []
@@ -631,15 +843,14 @@ def test_model_backed_probe_gateway_uses_v01_only_for_explicit_migration(
 
     ModelBackedProbeToolGateway(model_gateway).execute_probe(
         probe=make_probe("P_migrated", ["H1", "H2"]),
-        context=ProbeExecutionContext(
-            run_id="run_exec",
-            cycle_id="run_exec_cycle_1",
-            belief_state=migrated,
-        ),
+        context=make_execution_brief(belief_state=migrated),
     )
 
     assert migrated.task_frame.framing_method.value == "legacy_migration"
     assert migrated.task_frame.framing_trace["migration"] == migration_marker
+    assert make_execution_brief(belief_state=migrated).provider_schema_version == (
+        "v0.1"
+    )
     assert model_gateway.requests[0].prompt_version == "v0.1"
     assert model_gateway.requests[0].schema_version == "v0.1"
 
@@ -662,13 +873,11 @@ def test_model_backed_probe_rejects_migrated_marker_with_nonlegacy_method(
     prior_state = state.model_dump(mode="json")
 
     with pytest.raises(ValueError, match="invalid belief lifecycle"):
-        ModelBackedProbeToolGateway(model_gateway).execute_probe(
-            probe=make_probe("P_migration_method_conflict", ["H1", "H2"]),
-            context=ProbeExecutionContext(
-                run_id="run_exec",
-                cycle_id="run_exec_cycle_1",
-                belief_state=state,
-            ),
+        build_probe_execution_brief(
+            run_id="run_exec",
+            cycle_id="run_exec_cycle_1",
+            belief_state=state,
+            problem="Which claim survives testing?",
         )
 
     assert model_gateway.requests == []
@@ -694,11 +903,11 @@ def test_model_backed_probe_gateway_uses_task_frame_context_when_metadata_is_emp
 
     result = ProbeExecutor(ModelBackedProbeToolGateway(model_gateway)).execute_probe_set(
         probe_set=make_probe_set([probe]),
-        context=ProbeExecutionContext(
+        context=build_probe_execution_brief(
             run_id="run_task_context_fallback",
             cycle_id="run_exec_cycle_1",
             belief_state=initialized.belief_state,
-            metadata={"problem": "Which answer choice is correct?"},
+            problem="Which answer choice is correct?",
         ),
     )
 
@@ -737,10 +946,11 @@ def test_model_probe_provenance_uses_injective_openai_component_identity(
             hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
-    context = ProbeExecutionContext(
+    context = build_probe_execution_brief(
         run_id="run_exec",
         cycle_id="run_exec_cycle_1",
         belief_state=initialized.belief_state,
+        problem="Which model-backed claim is supported?",
     )
 
     def execute(model: str, base_url: str):
@@ -859,10 +1069,11 @@ def test_pipe_bearing_openai_model_uses_preflight_machine_provenance(
     )
     signal = ModelBackedProbeToolGateway(gateway).execute_probe(
         probe=make_probe("P_pipe_model", ["H1", "H2"]),
-        context=ProbeExecutionContext(
+        context=build_probe_execution_brief(
             run_id="run_pipe_model",
             cycle_id="run_pipe_model_cycle_1",
             belief_state=initialized.belief_state,
+            problem="Which pipe-bearing model observation is supported?",
         ),
     )[0]
 
@@ -951,10 +1162,11 @@ def test_exact_openai_model_identity_survives_normalization_and_memory(
             )
         ).execute_probe_set(
             probe_set=make_probe_set([probe], cycle_id=cycle_id),
-            context=ProbeExecutionContext(
+            context=build_probe_execution_brief(
                 run_id="run_exact_model_identity",
                 cycle_id=cycle_id,
                 belief_state=initialized.belief_state,
+                problem="Which model observation is independently sourced?",
             ),
         ).signals[0]
         return SignalProvenanceNormalizer().normalize(
@@ -1083,11 +1295,11 @@ def test_recorded_probe_provenance_distinguishes_fixture_and_model_identity():
             hypothesis_seeds=explicit_test_hypothesis_seeds(),
         )
     )
-    context = ProbeExecutionContext(
+    context = build_probe_execution_brief(
         run_id="run_recorded_identity",
         cycle_id="run_exec_cycle_1",
         belief_state=initialized.belief_state,
-        metadata={"problem": "Which fixture-backed claim is supported?"},
+        problem="Which fixture-backed claim is supported?",
     )
     probe = make_probe("P_recorded", ["H1", "H2"])
     response = [
@@ -1152,7 +1364,7 @@ def test_executor_preserves_probe_and_signal_order():
 
     result = ProbeExecutor(gateway).execute_probe_set(
         probe_set=probe_set,
-        context=make_context(),
+        context=make_execution_brief(),
     )
 
     assert gateway.calls == ["P1", "P2"]
@@ -1167,7 +1379,7 @@ def test_executor_returns_empty_result_for_empty_probe_set():
 
     result = ProbeExecutor(gateway).execute_probe_set(
         probe_set=probe_set,
-        context=make_context(),
+        context=make_execution_brief(),
     )
 
     assert gateway.calls == []
@@ -1182,7 +1394,7 @@ def test_executor_rejects_probe_set_cycle_mismatch():
     with pytest.raises(ValueError):
         ProbeExecutor(RecordingGateway()).execute_probe_set(
             probe_set=probe_set,
-            context=make_context(cycle_id="run_exec_cycle_2"),
+            context=make_execution_brief(cycle_id="run_exec_cycle_2"),
         )
 
 
@@ -1192,7 +1404,7 @@ def test_executor_rejects_passive_gateway_signals():
     with pytest.raises(ValueError):
         ProbeExecutor(PassiveGateway()).execute_probe_set(
             probe_set=probe_set,
-            context=make_context(),
+            context=make_execution_brief(),
         )
 
 
@@ -1212,7 +1424,7 @@ def test_executor_normalizes_gateway_signals_without_mutating_originals():
 
     result = ProbeExecutor(gateway).execute_probe_set(
         probe_set=probe_set,
-        context=make_context(),
+        context=make_execution_brief(),
     )
 
     normalized = result.signals[0]
@@ -1232,7 +1444,7 @@ def test_executor_writes_only_execution_diagnostics_to_ledger(tmp_path: Path):
 
     ProbeExecutor(DeterministicProbeToolGateway(), ledger=ledger).execute_probe_set(
         probe_set=probe_set,
-        context=make_context(),
+        context=make_execution_brief(),
     )
 
     record_types = [record["record_type"] for record in ledger.read_all()]
@@ -1267,10 +1479,11 @@ def test_planned_probe_set_executes_and_integrates_through_core():
     )
     execution = ProbeExecutor(DeterministicProbeToolGateway()).execute_probe_set(
         probe_set=planning.probe_set,
-        context=ProbeExecutionContext(
+        context=build_probe_execution_brief(
             run_id=initialization.run.run_id,
             cycle_id=cycle.cycle_id,
             belief_state=initialization.belief_state,
+            problem="Can the active path produce signals for the core?",
         ),
     )
 
@@ -1283,5 +1496,5 @@ def test_planned_probe_set_executes_and_integrates_through_core():
 
     assert execution.signals
     assert result.evidence_events
-    assert result.belief_updates
+    assert result.epistemic_progress is not None
     assert result.belief_state.cycle_id == cycle.cycle_id

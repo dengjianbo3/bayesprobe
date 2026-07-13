@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.schemas import BeliefState, Hypothesis, ProbeCandidate, ProbeSet
+from bayesprobe.schemas import (
+    BeliefState,
+    Hypothesis,
+    ProbeCandidate,
+    ProbePurpose,
+    ProbeSet,
+)
 
 
 @dataclass(frozen=True)
@@ -91,12 +97,13 @@ class ProbePlanner:
             ),
         )
         selected_scored = ranked_candidates[: planning_config.max_probes]
-        selected_scored = _ensure_top_hypothesis_probe(
-            selected=selected_scored,
-            ranked=ranked_candidates,
-            top_hypothesis_id=top_hypothesis.id,
-            max_probes=planning_config.max_probes,
-        )
+        if belief_state.cycle_index > 0:
+            selected_scored = _reserve_top_falsification(
+                selected=selected_scored,
+                ranked=ranked_candidates,
+                top_hypothesis_id=top_hypothesis.id,
+                max_probes=planning_config.max_probes,
+            )
         selected_ids = {item.candidate.candidate_id for item in selected_scored}
         selected_candidates = [
             _freeze_candidate(candidate=item.candidate, cycle_id=clean_cycle_id, belief_state=belief_state)
@@ -248,7 +255,7 @@ def _score_candidate(
 ) -> float:
     probe = candidate.candidate_probe
     score = probe.expected_information_gain * probe.decision_relevance
-    if top_hypothesis_id in probe.target_hypotheses:
+    if _is_top_falsification(candidate, top_hypothesis_id):
         score *= config.attack_top_hypothesis_bonus
     if belief_state.uncertainty_summary.strip():
         score *= config.unresolved_uncertainty_bonus
@@ -256,27 +263,44 @@ def _score_candidate(
     return round(score, 6)
 
 
-def _ensure_top_hypothesis_probe(
+def _reserve_top_falsification(
     *,
     selected: list[_ScoredProbeCandidate],
     ranked: list[_ScoredProbeCandidate],
     top_hypothesis_id: str,
     max_probes: int,
 ) -> list[_ScoredProbeCandidate]:
-    if any(_targets_hypothesis(item.candidate, top_hypothesis_id) for item in selected):
+    if any(
+        _is_top_falsification(item.candidate, top_hypothesis_id)
+        for item in selected
+    ):
         return selected
-    top_targeting = [
-        item for item in ranked if _targets_hypothesis(item.candidate, top_hypothesis_id)
+    top_falsifiers = [
+        item
+        for item in ranked
+        if _is_top_falsification(item.candidate, top_hypothesis_id)
     ]
-    if not top_targeting:
+    if not top_falsifiers:
         return selected
-    top_item = top_targeting[0]
-    remaining = [item for item in selected if item.candidate.candidate_id != top_item.candidate.candidate_id]
-    return [top_item, *remaining][:max_probes]
+    reserved = [*selected[: max_probes - 1], top_falsifiers[0]]
+    reserved_ids = {item.candidate.candidate_id for item in reserved}
+    return [
+        item
+        for item in ranked
+        if item.candidate.candidate_id in reserved_ids
+    ][:max_probes]
 
 
-def _targets_hypothesis(candidate: ProbeCandidate, hypothesis_id: str) -> bool:
-    return hypothesis_id in candidate.candidate_probe.target_hypotheses
+def _is_top_falsification(
+    candidate: ProbeCandidate,
+    top_hypothesis_id: str,
+) -> bool:
+    probe = candidate.candidate_probe
+    return (
+        probe.purpose == ProbePurpose.HYPOTHESIS_FALSIFICATION
+        and top_hypothesis_id in probe.target_hypotheses
+        and bool(probe.weaken_condition.get(top_hypothesis_id, "").strip())
+    )
 
 
 def _freeze_candidate(

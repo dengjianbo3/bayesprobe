@@ -5,7 +5,11 @@ import pytest
 from bayesprobe.core import BayesProbeCore
 from bayesprobe.initialization import BayesProbeInitializer, HypothesisSeed, InitializeRunInput
 from bayesprobe.ledger import JsonlLedgerStore
-from bayesprobe.probe_planner import ProbePlanner, ProbePlanningConfig
+from bayesprobe.probe_planner import (
+    ProbePlanner,
+    ProbePlanningConfig,
+    _is_top_falsification,
+)
 from bayesprobe.schemas import (
     BeliefState,
     CycleRecord,
@@ -14,15 +18,22 @@ from bayesprobe.schemas import (
     Hypothesis,
     ProbeCandidate,
     ProbeDesign,
+    ProbePurpose,
     SignalKind,
 )
 
 
-def make_belief_state(h1_posterior: float = 0.4, h2_posterior: float = 0.6) -> BeliefState:
+def make_belief_state(
+    h1_posterior: float = 0.4,
+    h2_posterior: float = 0.6,
+    *,
+    cycle_index: int = 0,
+) -> BeliefState:
     return BeliefState(
         belief_state_id="bs_plan_1",
         run_id="run_plan",
         cycle_id="cycle_0",
+        cycle_index=cycle_index,
         hypotheses=[
             Hypothesis(
                 id="H1",
@@ -63,15 +74,18 @@ def make_candidate(
     expected_information_gain: float = 0.5,
     decision_relevance: float = 0.5,
     cost_estimate: float = 0.5,
+    purpose: ProbePurpose = ProbePurpose.HYPOTHESIS_DISCRIMINATION,
+    weaken_condition: dict[str, str] | None = None,
 ) -> ProbeCandidate:
     support_condition = {
         hypothesis_id: f"Independent support appears for {hypothesis_id}."
         for hypothesis_id in target_hypotheses
     }
-    weaken_condition = {
-        hypothesis_id: f"Independent counterevidence appears for {hypothesis_id}."
-        for hypothesis_id in target_hypotheses
-    }
+    if weaken_condition is None:
+        weaken_condition = {
+            hypothesis_id: f"Independent counterevidence appears for {hypothesis_id}."
+            for hypothesis_id in target_hypotheses
+        }
     return ProbeCandidate(
         candidate_id=candidate_id,
         source="manual",
@@ -81,6 +95,7 @@ def make_candidate(
             target_hypotheses=target_hypotheses,
             inquiry_goal=f"Probe {candidate_id}.",
             method="source_tracing",
+            purpose=purpose,
             support_condition=support_condition,
             weaken_condition=weaken_condition,
             expected_information_gain=expected_information_gain,
@@ -140,34 +155,125 @@ def test_planner_selects_top_scoring_candidates_and_freezes_cycle():
     assert low.candidate_probe.cycle_id == "cycle_0"
 
 
-def test_planner_prioritizes_probe_that_attacks_top_hypothesis():
-    high_non_top = make_candidate(
-        "c_high_non_top",
-        ["H1"],
-        expected_information_gain=0.9,
-        decision_relevance=0.9,
-        cost_estimate=0.1,
-    )
-    lower_top = make_candidate(
-        "c_lower_top",
+def test_planner_reserves_real_top_falsifier_after_initial_cycle():
+    high_top_targeting_discriminator = make_candidate(
+        "c_high_top_targeting_discriminator",
         ["H2"],
+        expected_information_gain=1.0,
+        decision_relevance=1.0,
+        cost_estimate=0.01,
+    )
+    lower_top_falsifier = make_candidate(
+        "c_lower_top_falsifier",
+        ["H2"],
+        purpose=ProbePurpose.HYPOTHESIS_FALSIFICATION,
         expected_information_gain=0.2,
         decision_relevance=0.2,
-        cost_estimate=0.5,
+        cost_estimate=1.0,
     )
 
     result = ProbePlanner().design_probe_set(
         run_id="run_plan",
         cycle_id="run_plan_cycle_1",
-        belief_state=make_belief_state(h1_posterior=0.4, h2_posterior=0.6),
-        candidates=[high_non_top, lower_top],
+        belief_state=make_belief_state(
+            h1_posterior=0.4,
+            h2_posterior=0.6,
+            cycle_index=1,
+        ),
+        candidates=[high_top_targeting_discriminator, lower_top_falsifier],
         config=ProbePlanningConfig(max_probes=1),
     )
 
-    assert [candidate.candidate_id for candidate in result.selected_candidates] == ["c_lower_top"]
+    assert [candidate.candidate_id for candidate in result.selected_candidates] == [
+        "c_lower_top_falsifier"
+    ]
     assert result.probe_set.probes[0].target_hypotheses == ["H2"]
-    assert result.rejected_candidates[0].candidate.candidate_id == "c_high_non_top"
+    assert result.rejected_candidates[0].candidate.candidate_id == (
+        "c_high_top_targeting_discriminator"
+    )
     assert result.rejected_candidates[0].reason == "not_selected_budget_limit"
+
+
+def test_planner_does_not_force_falsifier_reservation_in_cycle_zero():
+    high_top_targeting_discriminator = make_candidate(
+        "c_high_top_targeting_discriminator",
+        ["H2"],
+        expected_information_gain=1.0,
+        decision_relevance=1.0,
+        cost_estimate=0.01,
+    )
+    lower_top_falsifier = make_candidate(
+        "c_lower_top_falsifier",
+        ["H2"],
+        purpose=ProbePurpose.HYPOTHESIS_FALSIFICATION,
+        expected_information_gain=0.2,
+        decision_relevance=0.2,
+        cost_estimate=1.0,
+    )
+
+    result = ProbePlanner().design_probe_set(
+        run_id="run_plan",
+        cycle_id="run_plan_cycle_1",
+        belief_state=make_belief_state(
+            h1_posterior=0.4,
+            h2_posterior=0.6,
+            cycle_index=0,
+        ),
+        candidates=[high_top_targeting_discriminator, lower_top_falsifier],
+        config=ProbePlanningConfig(max_probes=1),
+    )
+
+    assert [candidate.candidate_id for candidate in result.selected_candidates] == [
+        "c_high_top_targeting_discriminator"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("candidate", "top_hypothesis_id"),
+    [
+        (
+            make_candidate(
+                "c_wrong_purpose",
+                ["H2"],
+                purpose=ProbePurpose.HYPOTHESIS_DISCRIMINATION,
+            ),
+            "H2",
+        ),
+        (
+            make_candidate(
+                "c_wrong_target",
+                ["H1"],
+                purpose=ProbePurpose.HYPOTHESIS_FALSIFICATION,
+            ),
+            "H2",
+        ),
+        (
+            make_candidate(
+                "c_empty_weaken",
+                ["H2"],
+                purpose=ProbePurpose.HYPOTHESIS_FALSIFICATION,
+                weaken_condition={"H2": "   "},
+            ),
+            "H2",
+        ),
+    ],
+)
+def test_top_falsification_requires_purpose_target_and_nonempty_weaken_condition(
+    candidate,
+    top_hypothesis_id,
+):
+    assert _is_top_falsification(candidate, top_hypothesis_id) is False
+
+
+def test_top_falsification_accepts_explicit_nonempty_top_weaken_condition():
+    candidate = make_candidate(
+        "c_valid_falsifier",
+        ["H2"],
+        purpose=ProbePurpose.HYPOTHESIS_FALSIFICATION,
+        weaken_condition={"H2": "Observation X would contradict H2."},
+    )
+
+    assert _is_top_falsification(candidate, "H2") is True
 
 
 def test_planner_rejects_invalid_candidates():
@@ -297,4 +403,4 @@ def test_initializer_probe_candidates_can_be_planned_and_consumed_by_core():
 
     assert result.cycle.cycle_id == "run_integrated_cycle_1"
     assert result.evidence_events[0].target_hypotheses == selected_probe.target_hypotheses
-    assert result.belief_updates
+    assert result.epistemic_progress is not None

@@ -28,9 +28,9 @@ from bayesprobe.task_admission import (
 from bayesprobe.task_framing import parse_legacy_answer_choice_frame
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
-    ProbeExecutionContext,
     ProbeExecutionResult,
     ProbeExecutor,
+    build_probe_execution_brief,
 )
 from bayesprobe.probe_planner import ProbePlanner, ProbePlanningConfig, ProbePlanningResult
 from bayesprobe.projections import (
@@ -329,14 +329,12 @@ class AutonomousQuestionRunner:
             )
             execution = self.executor.execute_probe_set(
                 probe_set=planning.probe_set,
-                context=ProbeExecutionContext(
+                context=build_probe_execution_brief(
                     run_id=run.run_id,
                     cycle_id=cycle_id,
                     belief_state=current_belief_state,
-                    metadata={
-                        "problem": run.problem,
-                        "task_context": input.task_context.strip(),
-                    },
+                    problem=run.problem,
+                    task_context=input.task_context,
                 ),
             )
             signals = [*execution.signals, *passive_signals]
