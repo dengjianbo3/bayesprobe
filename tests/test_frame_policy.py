@@ -645,6 +645,28 @@ def test_unresolved_mass_above_every_named_candidate_challenges_open_frame():
     assert decision.should_expand is True
 
 
+def test_named_explanation_prevents_residual_mass_only_reexpansion():
+    state = _exact_state(named={"H1": 0.20, "H2": 0.20}, unresolved=0.60)
+    event = _event(
+        likelihoods={
+            "H1": LikelihoodBand.STRONGLY_CONFIRMING,
+            "H2": LikelihoodBand.STRONGLY_DISCONFIRMING,
+        },
+        unresolved_likelihood=LikelihoodBand.STRONGLY_DISCONFIRMING,
+        frame_fit=FrameFit.EXPLAINED_BY_NAMED,
+    )
+
+    decision = FrameAdequacyPolicy().assess(
+        previous=state.frame_state,
+        events=[event],
+        hypotheses=state.hypotheses,
+    )
+
+    assert decision.frame_state.adequacy_status == FrameAdequacyStatus.PROVISIONAL
+    assert decision.should_expand is False
+    assert decision.trigger_event_ids == []
+
+
 def test_policy_configuration_is_immutable():
     policy = OpenCoveragePolicy()
 

@@ -76,7 +76,7 @@ class RecordedModelGateway:
 
     def complete_structured(self, request: StructuredModelRequest) -> dict[str, Any]:
         self.requests.append(request)
-        signal_id = str(request.input.get("signal_id", ""))
+        signal_id = _request_signal_id(request)
         for entry in self.responses:
             match = entry["match"]
             if _matches_request(match, request):
@@ -91,13 +91,23 @@ def _matches_request(match: Mapping[str, Any], request: StructuredModelRequest) 
     if task is not None and task != request.task:
         return False
     signal_id = match.get("signal_id")
-    if signal_id is not None and signal_id != request.input.get("signal_id"):
+    if signal_id is not None and signal_id != _request_signal_id(request):
         return False
     for key in ("cycle_id", "probe_id"):
         expected = match.get(key)
         if expected is not None and expected != request.metadata.get(key):
             return False
     return True
+
+
+def _request_signal_id(request: StructuredModelRequest) -> str:
+    metadata_signal_id = request.metadata.get("signal_id")
+    input_signal_id = request.input.get("signal_id")
+    if isinstance(metadata_signal_id, str):
+        return metadata_signal_id
+    if isinstance(input_signal_id, str):
+        return input_signal_id
+    return ""
 
 
 def _validate_entry(entry: Any) -> None:

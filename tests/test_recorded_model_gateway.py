@@ -77,6 +77,35 @@ def test_recorded_model_gateway_replays_response_by_task_and_signal_id(tmp_path:
     assert gateway.requests[0].input["signal_id"] == "S_chem_constant_volume"
 
 
+def test_recorded_model_gateway_matches_blind_evidence_signal_id_from_metadata(
+    tmp_path: Path,
+):
+    path = tmp_path / "recorded-blind-evidence.json"
+    write_fixture(path, recorded_fixture_payload())
+    gateway = RecordedModelGateway.from_json(path)
+    request = StructuredModelRequest(
+        task="judge_evidence",
+        input={
+            "signal": {
+                "id": "S_chem_constant_volume",
+                "raw_content": "Constant-volume inert gas evidence.",
+            }
+        },
+        prompt_id="evidence_judgment",
+        prompt_version="v0.2",
+        schema_name="EvidenceJudgment",
+        schema_version="v0.2",
+        metadata={"signal_id": "S_chem_constant_volume"},
+    )
+
+    result = gateway.complete_structured(request)
+
+    assert result["evidence_type"] == "supporting"
+    assert gateway.requests[0].metadata["signal_id"] == (
+        "S_chem_constant_volume"
+    )
+
+
 def test_recorded_model_gateway_matches_responses_by_cycle_and_probe_metadata(
     tmp_path: Path,
 ):

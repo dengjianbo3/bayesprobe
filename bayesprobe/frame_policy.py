@@ -167,16 +167,27 @@ class FrameAdequacyPolicy:
                     "hold all frame mass."
                 ),
             )
+        active_ids = {hypothesis.id for hypothesis in active}
+        named_explanation = any(
+            event.frame_fit == FrameFit.EXPLAINED_BY_NAMED
+            and event.unresolved_likelihood in _DISCONFIRMING
+            and any(
+                hypothesis_id in active_ids
+                and band in _MODERATE_OR_STRONG_CONFIRMING
+                for hypothesis_id, band in event.likelihoods.items()
+            )
+            for event in accepted
+        )
         unresolved_dominates = (
             previous.unresolved_alternative_mass is not None
             and bool(active)
             and previous.unresolved_alternative_mass
             > max(hypothesis.posterior for hypothesis in active)
+            and not named_explanation
         )
         all_named_disconfirmed = _all_named_disconfirmed(accepted, active)
         challenge_trigger_event_ids = trigger_event_ids
         if all_named_disconfirmed and not challenge_trigger_event_ids:
-            active_ids = {hypothesis.id for hypothesis in active}
             challenge_trigger_event_ids = _unique_ids(
                 event.id
                 for event in accepted

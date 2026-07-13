@@ -183,6 +183,7 @@ def _input(
     result: CycleResult,
     *,
     belief_state: BeliefState | None = None,
+    stop_reason: str | None = "cycle limit reached",
 ) -> AnswerProjectionInput:
     return AnswerProjectionInput(
         cycle_id="cycle_1",
@@ -196,7 +197,7 @@ def _input(
             frame_adequacy_decision=result.frame_adequacy_decision,
             hypothesis_evolutions=result.hypothesis_evolutions,
         ),
-        stop_reason="cycle limit reached",
+        stop_reason=stop_reason,
     )
 
 
@@ -211,7 +212,7 @@ def test_exact_projection_returns_typed_value_from_expanded_hypothesis():
     assert projection.current_best_hypothesis == "H_exp_f2_1"
 
 
-def test_exact_projection_abstains_while_unresolved_outranks_named():
+def test_exact_projection_abstains_while_unresolved_outranks_named_during_loop():
     result = _cycle_result(relationship=AnswerRelationship.SELECTION)
     state = result.belief_state.model_copy(
         update={
@@ -225,11 +226,40 @@ def test_exact_projection_abstains_while_unresolved_outranks_named():
         }
     )
 
-    projection = TaskAwareAnswerProjector().project(_input(result, belief_state=state))
+    projection = TaskAwareAnswerProjector().project(
+        _input(result, belief_state=state, stop_reason=None)
+    )
 
     assert projection.mode == ProjectionMode.ABSTENTION
     assert projection.answer_value is None
     assert "unresolved" in projection.main_uncertainty.lower()
+
+
+def test_terminal_exact_projection_selects_best_named_with_unresolved_warning():
+    result = _cycle_result(relationship=AnswerRelationship.SELECTION)
+    state = result.belief_state.model_copy(
+        update={
+            "hypotheses": [
+                item.model_copy(
+                    update={"posterior": 0.35 if index == 0 else 0.25}
+                )
+                for index, item in enumerate(result.belief_state.hypotheses)
+            ],
+            "frame_state": result.belief_state.frame_state.model_copy(
+                update={"unresolved_alternative_mass": 0.40}
+            ),
+        }
+    )
+
+    projection = TaskAwareAnswerProjector().project(
+        _input(result, belief_state=state, stop_reason="max_cycles")
+    )
+
+    assert projection.mode == ProjectionMode.SELECTION
+    assert projection.answer_value == 4
+    assert projection.current_best_hypothesis == "H_exp_f2_1"
+    assert "unresolved" in projection.main_uncertainty.lower()
+    assert "terminal" in projection.answer_utility_notes.lower()
 
 
 def test_synthesis_projection_satisfies_every_required_section():

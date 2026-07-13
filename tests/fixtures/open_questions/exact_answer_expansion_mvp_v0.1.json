@@ -152,9 +152,9 @@
       }
     },
     {
-      "match": {"task": "execute_probe", "cycle_id": "recorded_open_mvp_cycle_2", "probe_id": "P_recorded_open_mvp_cycle_1_a70af361fe9c_recorded_open_mvp_cycle_2"},
+      "match": {"task": "execute_probe", "cycle_id": "recorded_open_mvp_cycle_2", "probe_id": "P_recorded_open_mvp_cycle_1_H_exp_f2_1_recorded_open_mvp_cycle_2"},
       "response": {
-        "raw_content": "MODEL REASONING: the expanded-candidate discriminator supports four components and excludes a fifth component."
+        "raw_content": "MODEL REASONING: the strongest falsifier check finds no missing attachment in the four-component account, while five requires an absent attachment."
       }
     },
     {
@@ -170,14 +170,14 @@
       }
     },
     {
-      "match": {"task": "judge_evidence", "cycle_id": "recorded_open_mvp_cycle_2", "signal_id": "S_recorded_open_mvp_cycle_2_P_recorded_open_mvp_cycle_1_a70af361fe9c_recorded_open_mvp_cycle_2"},
+      "match": {"task": "judge_evidence", "cycle_id": "recorded_open_mvp_cycle_2", "signal_id": "S_recorded_open_mvp_cycle_2_P_recorded_open_mvp_cycle_1_H_exp_f2_1_recorded_open_mvp_cycle_2"},
       "response": {
         "evidence_type": "supporting",
-        "likelihoods": {"H_exp_f2_1": "strongly_confirming", "H_exp_f2_2": "strongly_disconfirming"},
+        "likelihoods": {"H_exp_f2_1": "strongly_confirming"},
         "unresolved_likelihood": "strongly_disconfirming",
         "frame_fit": "explained_by_named",
         "unexplained_observation": null,
-        "interpretation": "The expanded-candidate discriminator independently favors four over five.",
+        "interpretation": "The strongest stated falsifier for the four-component account was not observed.",
         "quality_overrides": {}
       }
     }

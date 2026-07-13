@@ -84,7 +84,10 @@ class TaskAwareAnswerProjector:
             if belief_state.frame_state is not None
             else None
         )
-        if unresolved_mass is not None and unresolved_mass > top.posterior:
+        unresolved_outranks_named = (
+            unresolved_mass is not None and unresolved_mass > top.posterior
+        )
+        if unresolved_outranks_named and input.stop_reason is None:
             return _abstention_projection(
                 input=input,
                 top=top,
@@ -111,9 +114,15 @@ class TaskAwareAnswerProjector:
             answer_value=top.answer_value,
             current_best_hypothesis=top.id,
             posterior_summary=_posterior_summary_text(belief_state),
-            main_uncertainty=_main_uncertainty_text(
-                previous_belief_state=input.previous_belief_state,
-                cycle_result=input.cycle_result,
+            main_uncertainty=(
+                "Unresolved alternative mass still outranks the best named "
+                "candidate; the terminal task contract requires the current "
+                "best named answer."
+                if unresolved_outranks_named
+                else _main_uncertainty_text(
+                    previous_belief_state=input.previous_belief_state,
+                    cycle_result=input.cycle_result,
+                )
             ),
             weakest_assumption=_weakest_assumption(top, task_frame),
             main_evidence_events=_admitted_evidence_ids(input.cycle_result),
@@ -122,8 +131,13 @@ class TaskAwareAnswerProjector:
                 top,
             ),
             answer_utility_notes=(
-                "Selected deterministically from the active hypothesis with a "
-                "contract-compatible answer value."
+                "Terminal selection from the best active named hypothesis "
+                "despite unresolved alternative mass."
+                if unresolved_outranks_named
+                else (
+                    "Selected deterministically from the active hypothesis "
+                    "with a contract-compatible answer value."
+                )
             ),
         )
 
