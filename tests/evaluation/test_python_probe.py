@@ -1551,6 +1551,62 @@ def test_invalid_plan_gets_one_plan_repair():
     assert {request.schema_version for request in model.requests} == {"v0.2"}
 
 
+def test_plan_repair_uses_only_fixed_summary_for_raw_payload_and_validation_error():
+    secret = "sk-" + "r" * 32
+    invalid_payloads = [
+        {
+            **python_plan(),
+            "posterior": 0.99,
+            "winner": "B",
+            "api_key": secret,
+            "raw_provider_value": "raw-provider-value",
+        },
+        {
+            **python_plan(),
+            "target_hypotheses": [secret],
+        },
+    ]
+
+    for invalid_payload in invalid_payloads:
+        model = SequenceModelGateway([invalid_payload, python_plan()])
+        gateway = PythonAugmentedProbeToolGateway(
+            model,
+            FakeSandbox([execution_record()]),
+        )
+        probe, context = probe_context()
+
+        signal = gateway.execute_probe(probe=probe, context=context)[0]
+
+        repair_request = model.requests[1]
+        serialized_request = json.dumps(
+            {
+                "input": repair_request.input,
+                "metadata": repair_request.metadata,
+            },
+            sort_keys=True,
+        )
+        assert signal.source_type == "python_sandbox"
+        assert repair_request.task == "repair_python_probe_plan"
+        assert repair_request.input["invalid_payload"] == {
+            "status": "schema_invalid"
+        }
+        assert repair_request.input["validation_error"] == (
+            "Python probe plan failed schema validation"
+        )
+        assert repair_request.metadata["belief_context_policy"] == (
+            "blind_no_scores_v1"
+        )
+        for forbidden_text in (
+            "posterior",
+            "winner",
+            "api_key",
+            secret,
+            "raw_provider_value",
+            "raw-provider-value",
+        ):
+            assert forbidden_text not in serialized_request
+
+
 @pytest.mark.parametrize("migration_marker", _MIGRATION_MARKERS)
 def test_explicit_migration_uses_v01_for_every_python_model_route(
     migration_marker,

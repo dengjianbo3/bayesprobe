@@ -140,6 +140,63 @@ def recursive_keys(value) -> set[str]:
     return set()
 
 
+class OneShotMapping(Mapping):
+    def __init__(self, values):
+        self._values = dict(values)
+        self.traversal_count = 0
+
+    def __getitem__(self, key):
+        return self._values[key]
+
+    def __iter__(self):
+        self.traversal_count += 1
+        if self.traversal_count > 1:
+            raise RuntimeError("mapping traversed more than once")
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+
+class ThrowingMapping(Mapping):
+    def __init__(self, secret):
+        self._secret = secret
+
+    def __getitem__(self, key):
+        raise RuntimeError(f"api_key={self._secret}")
+
+    def __iter__(self):
+        raise RuntimeError(f"api_key={self._secret}")
+
+    def __len__(self):
+        return 1
+
+
+def plain_json(value):
+    if isinstance(value, Mapping):
+        return {key: plain_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [plain_json(item) for item in value]
+    if isinstance(value, list):
+        return [plain_json(item) for item in value]
+    return value
+
+
+def one_shot_json_mappings(value, observed):
+    if isinstance(value, dict):
+        mapping = OneShotMapping(
+            {
+                key: one_shot_json_mappings(item, observed)
+                for key, item in value.items()
+            }
+        )
+        observed.append(mapping)
+        return mapping
+    if isinstance(value, list):
+        return [one_shot_json_mappings(item, observed) for item in value]
+    return value
+
+
 def parse_openai_model_identity(identity: str) -> dict[str, str]:
     assert identity.startswith(_OPENAI_MODEL_IDENTITY_PREFIX)
     encoded = identity.removeprefix(_OPENAI_MODEL_IDENTITY_PREFIX)
@@ -409,6 +466,24 @@ def make_execution_brief(
     )
 
 
+def make_direct_execution_brief(
+    *,
+    task_frame,
+    metadata=None,
+) -> ProbeExecutionBrief:
+    template = make_execution_brief()
+    return ProbeExecutionBrief(
+        run_id=template.run_id,
+        cycle_id=template.cycle_id,
+        problem=template.problem,
+        task_context=template.task_context,
+        task_frame=task_frame,
+        provider_schema_version=template.provider_schema_version,
+        hypotheses=template.hypotheses,
+        metadata={} if metadata is None else metadata,
+    )
+
+
 def test_executor_turns_probe_set_into_active_signals():
     probe_set = make_probe_set(
         [
@@ -550,7 +625,7 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
         problem="Which answer choice is correct?",
         task_context="Use graph-chain irreducibility and aperiodicity.",
         metadata={
-            "initial_context": "SUPPORTS: This initial signal must remain outside model execution.",
+            "sample_id": "sample_context_guard",
         },
     )
 
@@ -572,8 +647,8 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
     assert request.input["task_context"] == (
         "Use graph-chain irreducibility and aperiodicity."
     )
-    assert "initial_context" not in request.input
-    assert "SUPPORTS: This initial signal" not in json.dumps(request.input)
+    assert "sample_id" not in request.input
+    assert "sample_context_guard" not in json.dumps(request.input)
     assert request.input["probe"]["target_hypotheses"] == ["H1", "H2"]
     assert request.input["hypotheses"][0]["statement"] == (
         "The fixture's H1 condition holds."
@@ -601,9 +676,7 @@ def test_model_backed_probe_gateway_turns_model_result_into_active_signal():
 
 
 def test_probe_execution_brief_is_recursively_immutable():
-    brief = make_execution_brief(
-        metadata={"audit": {"labels": ["blind", "execution"]}}
-    )
+    brief = make_execution_brief(metadata={"round_id": "round_1"})
 
     assert isinstance(brief.hypotheses[0], ProbeExecutionHypothesisView)
     with pytest.raises(FrozenInstanceError):
@@ -611,9 +684,176 @@ def test_probe_execution_brief_is_recursively_immutable():
     with pytest.raises(FrozenInstanceError):
         brief.hypotheses[0].statement = "changed"
     with pytest.raises(TypeError):
-        brief.metadata["audit"] = "changed"
+        brief.metadata["round_id"] = "changed"
     with pytest.raises(TypeError):
-        brief.metadata["audit"]["labels"] = ("changed",)
+        brief.task_frame["answer_contract"]["objective"] = "changed"
+
+
+def test_execution_metadata_accepts_only_the_exact_supported_string_schema():
+    metadata = {
+        "round_id": "round_1",
+        "experiment_id": "experiment_1",
+        "arm": "bayesprobe",
+        "sample_id": "sample_1",
+    }
+
+    brief = make_execution_brief(metadata=metadata)
+
+    assert dict(brief.metadata) == metadata
+
+
+@pytest.mark.parametrize(
+    "unsupported_key",
+    [
+        "winner",
+        "best_hypothesis",
+        "incumbent_estimate",
+        "confidence_interval_method",
+        "audit",
+    ],
+)
+def test_execution_metadata_rejects_every_unknown_key_with_fixed_error(
+    unsupported_key,
+):
+    with pytest.raises(ValueError) as exc_info:
+        make_execution_brief(metadata={unsupported_key: "opaque"})
+
+    assert str(exc_info.value) == "probe execution metadata is unsupported"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+
+
+@pytest.mark.parametrize("unsupported_value", [None, True, 1, ["sample_1"]])
+def test_execution_metadata_rejects_non_string_values_with_fixed_error(
+    unsupported_value,
+):
+    with pytest.raises(ValueError) as exc_info:
+        make_execution_brief(metadata={"sample_id": unsupported_value})
+
+    assert str(exc_info.value) == "probe execution metadata is unsupported"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+
+
+def test_direct_brief_snapshots_each_caller_mapping_exactly_once():
+    task_frame_mappings = []
+    task_frame = one_shot_json_mappings(
+        plain_json(make_execution_brief().task_frame),
+        task_frame_mappings,
+    )
+    metadata = OneShotMapping(
+        {
+            "round_id": "round_1",
+            "experiment_id": "experiment_1",
+            "arm": "bayesprobe",
+            "sample_id": "sample_1",
+        }
+    )
+
+    brief = make_direct_execution_brief(
+        task_frame=task_frame,
+        metadata=metadata,
+    )
+
+    assert dict(brief.metadata) == {
+        "round_id": "round_1",
+        "experiment_id": "experiment_1",
+        "arm": "bayesprobe",
+        "sample_id": "sample_1",
+    }
+    assert metadata.traversal_count == 1
+    assert task_frame_mappings
+    assert all(mapping.traversal_count == 1 for mapping in task_frame_mappings)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "expected_error"),
+    [
+        ("metadata", "probe execution metadata snapshot failed"),
+        ("task_frame", "probe execution task frame snapshot failed"),
+    ],
+)
+def test_direct_brief_sanitizes_throwing_mapping_errors(
+    field_name,
+    expected_error,
+):
+    secret = "sk-" + "x" * 32
+    task_frame = plain_json(make_execution_brief().task_frame)
+    kwargs = {
+        "task_frame": task_frame,
+        "metadata": {"round_id": "round_1"},
+    }
+    kwargs[field_name] = ThrowingMapping(secret)
+
+    with pytest.raises(ValueError) as exc_info:
+        make_direct_execution_brief(**kwargs)
+
+    error = exc_info.value
+    rendered_surfaces = (
+        str(error),
+        repr(error),
+        repr(error.args),
+        repr(vars(error)),
+        repr(error.__cause__),
+        repr(error.__context__),
+    )
+    assert str(error) == expected_error
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert vars(error) == {}
+    assert all(secret not in rendered for rendered in rendered_surfaces)
+    assert all("api_key" not in rendered for rendered in rendered_surfaces)
+
+
+@pytest.mark.parametrize(
+    ("section", "unsupported_key", "unsupported_value"),
+    [
+        (None, "winner", "H1"),
+        ("answer_contract", "posterior", 0.99),
+        ("hypothesis_frame", "rank", ["H1", "H2"]),
+    ],
+)
+def test_direct_brief_rejects_extra_fields_in_closed_task_frame_schema(
+    section,
+    unsupported_key,
+    unsupported_value,
+):
+    task_frame = plain_json(make_execution_brief().task_frame)
+    target = task_frame if section is None else task_frame[section]
+    target[unsupported_key] = unsupported_value
+
+    with pytest.raises(ValueError) as exc_info:
+        make_direct_execution_brief(task_frame=task_frame)
+
+    assert str(exc_info.value) == "probe execution task frame is invalid"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert unsupported_key not in repr(exc_info.value.args)
+
+
+def test_brief_hypotheses_use_canonical_id_order_across_belief_rankings():
+    first_state = make_native_belief_state()
+    payload = first_state.model_dump(mode="python")
+    hypotheses_by_id = {
+        hypothesis["id"]: hypothesis for hypothesis in payload["hypotheses"]
+    }
+    hypotheses_by_id["H1"]["posterior"] = 0.1
+    hypotheses_by_id["H2"]["posterior"] = 0.9
+    payload["hypotheses"] = [hypotheses_by_id["H2"], hypotheses_by_id["H1"]]
+    payload["posterior_summary"] = {"H2": 0.9, "H1": 0.1}
+    second_state = BeliefState.model_validate(payload)
+
+    first_brief = make_execution_brief(belief_state=first_state)
+    second_brief = make_execution_brief(belief_state=second_state)
+
+    assert [hypothesis.id for hypothesis in first_brief.hypotheses] == [
+        "H1",
+        "H2",
+    ]
+    assert [hypothesis.id for hypothesis in second_brief.hypotheses] == [
+        "H1",
+        "H2",
+    ]
 
 
 def test_deterministic_and_python_gateways_receive_the_same_blind_brief():
@@ -697,7 +937,7 @@ def test_autonomous_and_synchronized_runners_build_equivalent_blind_briefs():
     )
 
 
-def test_nested_secret_metadata_fails_atomically_before_provider_or_ledger_access(
+def test_unsupported_secret_metadata_fails_atomically_before_provider_or_ledger_access(
     tmp_path: Path,
 ):
     secret = "sk-" + "z" * 32
@@ -712,7 +952,7 @@ def test_nested_secret_metadata_fails_atomically_before_provider_or_ledger_acces
 
     with pytest.raises(
         ValueError,
-        match="probe execution metadata must not contain secret material",
+        match="probe execution metadata is unsupported",
     ) as exc_info:
         executor.execute_probe_set(
             probe_set=make_probe_set([make_probe("P_secret_metadata", ["H1"])]),
@@ -721,7 +961,7 @@ def test_nested_secret_metadata_fails_atomically_before_provider_or_ledger_acces
                 cycle_id="run_exec_cycle_1",
                 belief_state=make_native_belief_state(),
                 problem="Which claim survives testing?",
-                metadata={"audit": [{"nested": {"api_key": secret}}]},
+                metadata={"audit": f"api_key={secret}"},
             ),
         )
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -36,49 +35,47 @@ from bayesprobe.schemas import (
 
 _DETERMINISTIC_PROBE_TOOL_IDENTITY = "deterministic_probe_gateway:v1"
 _BLIND_BELIEF_CONTEXT_POLICY = "blind_no_scores_v1"
-_FORBIDDEN_EXECUTION_BELIEF_KEYS = frozenset(
+_SUPPORTED_EXECUTION_METADATA_KEYS = frozenset(
+    {"round_id", "experiment_id", "arm", "sample_id"}
+)
+_TASK_FRAME_KEYS = frozenset(
     {
-        "ad_hoc_penalty",
-        "applied_ad_hoc_penalty",
-        "applied_complexity_penalty",
-        "belief_state",
-        "complexity_penalty",
-        "correlation_credit",
-        "current_best_hypothesis",
-        "effective_update_weight",
-        "evidence_credit",
-        "gap",
-        "initial_prior",
-        "posterior",
-        "posterior_summary",
-        "prior",
-        "rank",
-        "ranking",
-        "score",
-        "scores",
-        "top_hypothesis",
-        "uncertainty_summary",
-        "unresolved_alternative_mass",
+        "schema_version",
+        "task_frame_id",
+        "admission_decision_id",
+        "task_kind",
+        "answer_relationship",
+        "normalized_question",
+        "task_context",
+        "answer_contract",
+        "hypothesis_frame",
+        "framing_method",
     }
 )
-_FORBIDDEN_EXECUTION_BELIEF_KEY_PARTS = frozenset(
+_ANSWER_CONTRACT_KEYS = frozenset(
     {
-        "confidence",
-        "credit",
-        "gap",
-        "likelihood",
-        "odds",
-        "penalty",
-        "posterior",
-        "prior",
-        "probability",
-        "rank",
-        "ranking",
-        "score",
-        "scores",
-        "uncertainty",
+        "objective",
+        "answer_value_type",
+        "answer_format",
+        "required_sections",
+        "decision_form",
+        "permits_synthesis",
     }
 )
+_HYPOTHESIS_FRAME_KEYS = frozenset(
+    {
+        "frame_id",
+        "competition",
+        "coverage",
+        "rival_sets",
+        "coverage_statement",
+        "coverage_limitation",
+    }
+)
+_UNSUPPORTED_METADATA_ERROR = "probe execution metadata is unsupported"
+_METADATA_SNAPSHOT_ERROR = "probe execution metadata snapshot failed"
+_TASK_FRAME_SNAPSHOT_ERROR = "probe execution task frame snapshot failed"
+_INVALID_TASK_FRAME_ERROR = "probe execution task frame is invalid"
 
 
 @dataclass(frozen=True)
@@ -133,6 +130,14 @@ class ProbeExecutionBrief:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        metadata = _snapshot_json_mapping(
+            self.metadata,
+            error_message=_METADATA_SNAPSHOT_ERROR,
+        )
+        task_frame = _snapshot_json_mapping(
+            self.task_frame,
+            error_message=_TASK_FRAME_SNAPSHOT_ERROR,
+        )
         run_id = _clean_required(self.run_id, "run_id")
         cycle_id = _clean_required(self.cycle_id, "cycle_id")
         problem = _clean_required(self.problem, "problem")
@@ -147,22 +152,21 @@ class ProbeExecutionBrief:
             for hypothesis in hypotheses
         ):
             raise ValueError("probe execution brief hypotheses must use blind views")
-        if contains_secret_material(self.metadata):
+        hypotheses = tuple(sorted(hypotheses, key=lambda hypothesis: hypothesis.id))
+        if not _is_supported_execution_metadata(metadata):
+            _raise_fixed_error(_UNSUPPORTED_METADATA_ERROR)
+        if not _is_closed_task_frame(task_frame):
+            _raise_fixed_error(_INVALID_TASK_FRAME_ERROR)
+        if contains_secret_material(metadata):
             raise ValueError(
                 "probe execution metadata must not contain secret material"
             )
-        if _contains_forbidden_belief_key(self.metadata):
-            raise ValueError(
-                "probe execution metadata must not contain belief scores or ranking"
-            )
-        if _contains_forbidden_belief_key(self.task_frame):
-            raise ValueError("probe execution task frame must be blind to belief scores")
         safe_brief_content = {
             "run_id": run_id,
             "cycle_id": cycle_id,
             "problem": problem,
             "task_context": task_context,
-            "task_frame": self.task_frame,
+            "task_frame": task_frame,
             "hypotheses": [
                 {
                     "id": hypothesis.id,
@@ -180,9 +184,9 @@ class ProbeExecutionBrief:
         object.__setattr__(self, "cycle_id", cycle_id)
         object.__setattr__(self, "problem", problem)
         object.__setattr__(self, "task_context", task_context)
-        object.__setattr__(self, "task_frame", _freeze_mapping(self.task_frame))
+        object.__setattr__(self, "task_frame", _freeze_mapping(task_frame))
         object.__setattr__(self, "hypotheses", hypotheses)
-        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+        object.__setattr__(self, "metadata", _freeze_mapping(metadata))
 
 
 def build_probe_execution_brief(
@@ -217,7 +221,10 @@ def build_probe_execution_brief(
                 predictions=tuple(hypothesis.predictions),
                 falsifiers=tuple(hypothesis.falsifiers),
             )
-            for hypothesis in belief_state.hypotheses
+            for hypothesis in sorted(
+                belief_state.hypotheses,
+                key=lambda hypothesis: hypothesis.id,
+            )
         ),
         metadata={} if metadata is None else metadata,
     )
@@ -494,72 +501,151 @@ def _deterministic_content_cue(method: str) -> str:
     return "NEUTRAL"
 
 
-def _contains_forbidden_belief_key(value: Any) -> bool:
+def _snapshot_json_mapping(
+    value: Any,
+    *,
+    error_message: str,
+) -> dict[str, Any]:
+    snapshot: Any = None
+    snapshot_failed = False
+    try:
+        snapshot = _snapshot_json_value(value)
+        if not isinstance(snapshot, dict):
+            raise TypeError
+    except Exception:
+        snapshot_failed = True
+    if snapshot_failed:
+        _raise_fixed_error(error_message)
+    return snapshot
+
+
+def _snapshot_json_value(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return any(
-            _is_forbidden_belief_key(str(key))
-            or _contains_forbidden_belief_key(item)
-            for key, item in value.items()
+        snapshot: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError
+            snapshot[key] = _snapshot_json_value(item)
+        return snapshot
+    if type(value) is list:
+        return [_snapshot_json_value(item) for item in value]
+    if value is None or type(value) in {str, bool, int}:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise TypeError
+
+
+def _raise_fixed_error(message: str) -> None:
+    error = ValueError(message)
+    error.__cause__ = None
+    error.__context__ = None
+    raise error from None
+
+
+def _is_supported_execution_metadata(metadata: dict[str, Any]) -> bool:
+    return set(metadata).issubset(_SUPPORTED_EXECUTION_METADATA_KEYS) and all(
+        type(value) is str for value in metadata.values()
+    )
+
+
+def _is_closed_task_frame(task_frame: dict[str, Any]) -> bool:
+    if set(task_frame) != _TASK_FRAME_KEYS:
+        return False
+    if not all(
+        type(task_frame[key]) is str
+        for key in (
+            "schema_version",
+            "task_frame_id",
+            "admission_decision_id",
+            "task_kind",
+            "normalized_question",
+            "task_context",
+            "framing_method",
         )
-    if isinstance(value, list | tuple):
-        return any(_contains_forbidden_belief_key(item) for item in value)
-    return False
+    ):
+        return False
+    if task_frame["answer_relationship"] is not None and type(
+        task_frame["answer_relationship"]
+    ) is not str:
+        return False
+
+    answer_contract = task_frame["answer_contract"]
+    if (
+        not isinstance(answer_contract, dict)
+        or set(answer_contract) != _ANSWER_CONTRACT_KEYS
+    ):
+        return False
+    if not all(
+        type(answer_contract[key]) is str
+        for key in (
+            "objective",
+            "answer_value_type",
+            "answer_format",
+            "decision_form",
+        )
+    ):
+        return False
+    if type(answer_contract["permits_synthesis"]) is not bool:
+        return False
+    if not _is_string_list(answer_contract["required_sections"]):
+        return False
+
+    hypothesis_frame = task_frame["hypothesis_frame"]
+    if not isinstance(hypothesis_frame, dict) or set(
+        hypothesis_frame
+    ) != _HYPOTHESIS_FRAME_KEYS:
+        return False
+    if not all(
+        type(hypothesis_frame[key]) is str
+        for key in (
+            "frame_id",
+            "competition",
+            "coverage",
+            "coverage_statement",
+        )
+    ):
+        return False
+    if hypothesis_frame["coverage_limitation"] is not None and type(
+        hypothesis_frame["coverage_limitation"]
+    ) is not str:
+        return False
+    rival_sets = hypothesis_frame["rival_sets"]
+    return isinstance(rival_sets, dict) and all(
+        type(key) is str and _is_string_list(value)
+        for key, value in rival_sets.items()
+    )
 
 
-def _without_belief_context(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            str(key): _without_belief_context(item)
-            for key, item in value.items()
-            if not _is_forbidden_belief_key(str(key))
-        }
-    if isinstance(value, list | tuple):
-        return [_without_belief_context(item) for item in value]
-    return value
+def _is_string_list(value: Any) -> bool:
+    return type(value) is list and all(type(item) is str for item in value)
 
 
 def _blind_task_frame(task_frame: TaskFrame) -> dict[str, Any]:
     hypothesis_frame = task_frame.hypothesis_frame
-    return _without_belief_context(
-        {
-            "schema_version": task_frame.schema_version,
-            "task_frame_id": task_frame.task_frame_id,
-            "admission_decision_id": task_frame.admission_decision_id,
-            "task_kind": task_frame.task_kind.value,
-            "answer_relationship": (
-                None
-                if task_frame.answer_relationship is None
-                else task_frame.answer_relationship.value
-            ),
-            "normalized_question": task_frame.normalized_question,
-            "task_context": task_frame.task_context,
-            "answer_contract": task_frame.answer_contract.model_dump(mode="json"),
-            "hypothesis_frame": {
-                "frame_id": hypothesis_frame.frame_id,
-                "competition": hypothesis_frame.competition.value,
-                "coverage": hypothesis_frame.coverage.value,
-                "rival_sets": hypothesis_frame.rival_sets,
-                "coverage_statement": hypothesis_frame.coverage_statement,
-                "coverage_limitation": hypothesis_frame.coverage_limitation,
-            },
-            "framing_method": task_frame.framing_method.value,
-        }
-    )
-
-
-def _is_forbidden_belief_key(value: str) -> bool:
-    normalized = value.casefold()
-    if normalized in _FORBIDDEN_EXECUTION_BELIEF_KEYS:
-        return True
-    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
-    parts = set(re.findall(r"[a-z0-9]+", separated.casefold()))
-    if parts.intersection(_FORBIDDEN_EXECUTION_BELIEF_KEY_PARTS):
-        return True
-    return (
-        {"belief", "score"}.issubset(parts)
-        or {"current", "best"}.issubset(parts)
-        or {"top", "hypothesis"}.issubset(parts)
-    )
+    return {
+        "schema_version": task_frame.schema_version,
+        "task_frame_id": task_frame.task_frame_id,
+        "admission_decision_id": task_frame.admission_decision_id,
+        "task_kind": task_frame.task_kind.value,
+        "answer_relationship": (
+            None
+            if task_frame.answer_relationship is None
+            else task_frame.answer_relationship.value
+        ),
+        "normalized_question": task_frame.normalized_question,
+        "task_context": task_frame.task_context,
+        "answer_contract": task_frame.answer_contract.model_dump(mode="json"),
+        "hypothesis_frame": {
+            "frame_id": hypothesis_frame.frame_id,
+            "competition": hypothesis_frame.competition.value,
+            "coverage": hypothesis_frame.coverage.value,
+            "rival_sets": hypothesis_frame.rival_sets,
+            "coverage_statement": hypothesis_frame.coverage_statement,
+            "coverage_limitation": hypothesis_frame.coverage_limitation,
+        },
+        "framing_method": task_frame.framing_method.value,
+    }
 
 
 def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:

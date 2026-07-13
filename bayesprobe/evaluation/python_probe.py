@@ -642,9 +642,8 @@ class PythonAugmentedProbeToolGateway:
     ) -> PythonProbePlan:
         request_input = _probe_request_input(probe=probe, context=context)
         metadata = _probe_request_metadata(probe=probe, context=context)
-        invalid_payload: Any = None
         try:
-            invalid_payload = self._model_gateway.complete_structured(
+            payload = self._model_gateway.complete_structured(
                 StructuredModelRequest(
                     task="plan_python_probe",
                     input=request_input,
@@ -656,21 +655,23 @@ class PythonAugmentedProbeToolGateway:
                 )
             )
             return python_probe_plan_from_mapping(
-                invalid_payload,
+                payload,
                 allowed_hypothesis_ids={
                     hypothesis.id for hypothesis in context.hypotheses
                 },
             )
-        except (ModelGatewayValidationError, TypeError, ValueError) as error:
-            validation_error = str(error)
+        except (ModelGatewayValidationError, TypeError, ValueError):
+            pass
         self._process_counts["python_plan_repairs"] += 1
         repaired_payload = self._model_gateway.complete_structured(
             StructuredModelRequest(
                 task="repair_python_probe_plan",
                 input={
                     **request_input,
-                    "invalid_payload": invalid_payload,
-                    "validation_error": validation_error,
+                    "invalid_payload": {"status": "schema_invalid"},
+                    "validation_error": (
+                        "Python probe plan failed schema validation"
+                    ),
                 },
                 prompt_id="python_probe_plan_repair",
                 prompt_version=context.provider_schema_version,
