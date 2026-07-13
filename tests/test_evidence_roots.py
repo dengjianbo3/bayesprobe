@@ -487,6 +487,38 @@ def test_root_signal_basis_is_not_split_by_origin_label(
     assert resolve_contribution_root_id(first) == resolve_contribution_root_id(second)
 
 
+def test_parentless_derived_summary_fails_closed():
+    summary = signal_with_provenance(
+        "S_summary",
+        origin=EpistemicOrigin.DERIVED_SUMMARY,
+        correlation_group="group:must-not-mint-root",
+        derivation_root_id="derivation:must-not-mint-root",
+    )
+
+    with pytest.raises(ValueError, match="derived summary requires parent signals"):
+        resolve_contribution_root_id(summary)
+
+
+def test_identical_basis_text_across_root_policies_resolves_distinctly():
+    shared_basis = "canonical:shared-basis-text"
+    correlation_rooted = signal_with_provenance(
+        "S_correlation",
+        origin=EpistemicOrigin.MODEL_REASONING,
+        correlation_group=shared_basis,
+        derivation_root_id="unused:correlation-policy",
+    )
+    derivation_rooted = signal_with_provenance(
+        "S_derivation",
+        origin=EpistemicOrigin.TOOL_RESULT,
+        correlation_group="unused:derivation-policy",
+        derivation_root_id=shared_basis,
+    )
+
+    assert resolve_contribution_root_id(correlation_rooted) != (
+        resolve_contribution_root_id(derivation_rooted)
+    )
+
+
 def test_child_without_parent_root_mapping_fails_closed():
     child = signal_with_provenance(
         "S_child",

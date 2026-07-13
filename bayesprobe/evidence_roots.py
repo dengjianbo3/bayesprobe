@@ -87,13 +87,16 @@ def resolve_contribution_root_id(
             )
         return unique_parent_roots.pop()
 
-    basis = (
-        provenance.correlation_group
-        if provenance.epistemic_origin in _CORRELATION_ROOTED_ORIGINS
-        else provenance.derivation_root_id
-    )
+    if provenance.epistemic_origin is EpistemicOrigin.DERIVED_SUMMARY:
+        raise ValueError("derived summary requires parent signals")
+    if provenance.epistemic_origin in _CORRELATION_ROOTED_ORIGINS:
+        basis_kind = "correlation_group"
+        basis = provenance.correlation_group
+    else:
+        basis_kind = "derivation_root_id"
+        basis = provenance.derivation_root_id
     encoded = json.dumps(
-        {"basis": basis},
+        {"basis": basis, "basis_kind": basis_kind},
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
