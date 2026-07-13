@@ -248,24 +248,27 @@ def test_controllers_append_projection_records_when_ledger_available(tmp_path: P
 
     record_types = [record["record_type"] for record in ledger.read_all()]
 
-    assert record_types[:8] == [
+    assert record_types[:10] == [
         "cycle",
         "external_signal",
         "probe_set",
         "evidence_event",
+        "evidence_contribution_delta",
+        "epistemic_progress",
         "belief_update",
         "belief_update",
         "belief_state",
         "answer_projection",
     ]
-    assert record_types[8:] == [
+    assert record_types[10:] == [
         "cycle",
         "external_signal",
         "probe_set",
         "evidence_event",
         "evidence_event",
-        "belief_update",
-        "belief_update",
+        "evidence_contribution_delta",
+        "evidence_contribution_delta",
+        "epistemic_progress",
         "belief_update",
         "belief_update",
         "probe_candidate",

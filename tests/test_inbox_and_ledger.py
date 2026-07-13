@@ -132,6 +132,8 @@ def test_core_appends_ledger_records_in_stable_order(tmp_path: Path):
         "external_signal",
         "probe_set",
         "evidence_event",
+        "evidence_contribution_delta",
+        "epistemic_progress",
         "belief_update",
         "belief_update",
         "hypothesis_evolution",
@@ -141,7 +143,7 @@ def test_core_appends_ledger_records_in_stable_order(tmp_path: Path):
     assert records[0]["payload"]["cycle_id"] == "cycle_1"
     assert records[1]["payload"]["id"] == "S_ledger"
     assert records[3]["payload"]["id"] == "run_1_cycle_1_E1"
-    assert records[6]["payload"]["evolution_id"] == "run_1_cycle_1_E1_HE"
-    assert records[7]["payload"]["source"] == "anomaly"
+    assert records[8]["payload"]["evolution_id"] == "run_1_cycle_1_E1_HE"
+    assert records[9]["payload"]["source"] == "anomaly"
     assert records[-1]["payload"]["hypotheses"][-1]["id"] == "H_run_1_cycle_1_E1_spawned"
     assert result.belief_state.ledger_refs["evidence_events"] == ["run_1_cycle_1_E1"]
