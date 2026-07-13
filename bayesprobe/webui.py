@@ -248,6 +248,8 @@ def serialize_autonomous_cycle_result(
         "signals": _dump_domain(cycle.signals),
         "belief_state": _dump_domain(cycle.belief_state),
         "evidence_events": _serialize_evidence_events(cycle.evidence_events),
+        "contribution_deltas": _dump_domain(cycle.contribution_deltas),
+        "epistemic_progress": _dump_domain(cycle.epistemic_progress),
         "belief_updates": _dump_domain(cycle.belief_updates),
         "hypothesis_evolutions": _dump_domain(cycle.hypothesis_evolutions),
         "answer_projection": _dump_domain(cycle.answer_projection),

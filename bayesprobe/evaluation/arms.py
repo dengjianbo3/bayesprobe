@@ -28,6 +28,7 @@ from bayesprobe.question_runner import (
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunResult,
     AutonomousQuestionRunner,
+    AutonomousQuestionStopReason,
 )
 from bayesprobe.schemas import SignalKind
 
@@ -303,11 +304,12 @@ def _run_process_metrics(
     result: AutonomousQuestionRunResult,
     *,
     python_metrics: Mapping[str, int],
-) -> dict[str, int | str]:
+) -> dict[str, int | float | str | bool]:
     cycles = result.cycle_results
     probes = sum(len(cycle.execution_result.executed_probe_ids) for cycle in cycles)
     signals = [signal for cycle in cycles for signal in cycle.signals]
     evidence_events = [event for cycle in cycles for event in cycle.evidence_events]
+    progress = [cycle.epistemic_progress for cycle in cycles]
     top_sequence = [
         _top_hypothesis_id(result.initial_belief_state),
         *(_top_hypothesis_id(cycle.belief_state) for cycle in cycles),
@@ -325,7 +327,7 @@ def _run_process_metrics(
         ),
         len(cycles),
     )
-    metrics: dict[str, int | str] = {
+    metrics: dict[str, int | float | str | bool] = {
         "cycles": len(cycles),
         "probes": probes,
         "active_signals": sum(
@@ -347,6 +349,21 @@ def _run_process_metrics(
         ),
         "final_answer_first_top_cycle": first_top_cycle,
         "stop_reason": result.stop_reason.value,
+        "new_evidence_roots": sum(item.new_root_count for item in progress),
+        "revised_evidence_roots": sum(item.revised_root_count for item in progress),
+        "retracted_evidence_roots": sum(
+            item.retracted_root_count for item in progress
+        ),
+        "unchanged_evidence_roots": sum(item.no_change_count for item in progress),
+        "falsification_cycles": sum(
+            item.falsification_probe_executed for item in progress
+        ),
+        "max_absolute_contribution_delta": max(
+            (item.max_absolute_contribution_delta for item in progress),
+            default=0.0,
+        ),
+        "epistemic_stagnation": result.stop_reason
+        == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION,
     }
     metrics.update(python_metrics)
     return metrics

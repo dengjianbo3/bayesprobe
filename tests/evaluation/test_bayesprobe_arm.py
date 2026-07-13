@@ -136,6 +136,13 @@ def test_bayesprobe_arm_freezes_autonomous_policy_and_process_metrics():
     assert result.process_metrics["python_executions"] == 0
     assert isinstance(result.process_metrics["top_answer_reversals"], int)
     assert isinstance(result.process_metrics["final_answer_first_top_cycle"], int)
+    assert result.process_metrics["new_evidence_roots"] >= 1
+    assert result.process_metrics["revised_evidence_roots"] >= 0
+    assert result.process_metrics["retracted_evidence_roots"] >= 0
+    assert result.process_metrics["unchanged_evidence_roots"] >= 0
+    assert 0 <= result.process_metrics["falsification_cycles"] <= 4
+    assert result.process_metrics["max_absolute_contribution_delta"] > 0.0
+    assert result.process_metrics["epistemic_stagnation"] is False
 
 
 def test_bayesprobe_arm_adds_case_context_to_every_provider_request_without_gold():

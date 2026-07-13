@@ -530,6 +530,8 @@ function renderCycle(cycle) {
   stack.appendChild(block("Probes", cycle.probes));
   stack.appendChild(block("Signals", cycle.signals));
   stack.appendChild(block("Evidence", cycle.evidence_events));
+  stack.appendChild(block("Evidence root deltas", cycle.contribution_deltas));
+  stack.appendChild(block("Epistemic progress", cycle.epistemic_progress));
   stack.appendChild(block("Belief updates", cycle.belief_updates));
   stack.appendChild(block("Hypothesis evolution", cycle.hypothesis_evolutions));
   stack.appendChild(block("Answer projection", cycle.answer_projection));

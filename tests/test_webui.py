@@ -247,6 +247,18 @@ def test_webui_deterministic_autonomous_run_returns_trace():
     assert cycle["probes"]
     assert cycle["signals"]
     assert cycle["evidence_events"]
+    assert cycle["contribution_deltas"]
+    assert cycle["contribution_deltas"][0]["contribution_root_id"].startswith(
+        "evidence-root:sha256:"
+    )
+    assert set(cycle["epistemic_progress"]) == {
+        "new_root_count",
+        "revised_root_count",
+        "retracted_root_count",
+        "no_change_count",
+        "max_absolute_contribution_delta",
+        "falsification_probe_executed",
+    }
     assert cycle["belief_updates"]
     assert cycle["answer_projection"]["current_best_hypothesis"] == "H1"
 
@@ -352,6 +364,8 @@ def test_webui_stream_phase_payloads_match_bounded_contract():
         "signals",
         "belief_state",
         "evidence_events",
+        "contribution_deltas",
+        "epistemic_progress",
         "belief_updates",
         "hypothesis_evolutions",
         "answer_projection",

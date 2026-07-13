@@ -212,6 +212,22 @@ function integratedCycleEvent() {
       probes: [],
       signals: [],
       evidence_events: [],
+      contribution_deltas: [
+        {
+          contribution_root_id: "evidence-root:sha256:fixture",
+          mode: "new_root",
+          per_hypothesis_delta: { H1: 0.4 },
+          caused_by_event_ids: ["E1"],
+        },
+      ],
+      epistemic_progress: {
+        new_root_count: 1,
+        revised_root_count: 0,
+        retracted_root_count: 0,
+        no_change_count: 0,
+        max_absolute_contribution_delta: 0.4,
+        falsification_probe_executed: true,
+      },
       belief_updates: [],
       hypothesis_evolutions: [],
       belief_state: {
@@ -338,6 +354,31 @@ test("preserves an integrated cycle when a sanitized terminal failure arrives", 
   assert.ok(elements.get("belief-panel").children.length > 0);
   assert.equal(elements.get("trace-pane").children.length, 1);
   assert.equal(elements.get("progress-list").children.at(-1).dataset.state, "failed");
+});
+
+test("renders evidence root deltas and epistemic progress in cycle order", () => {
+  const { api, elements } = loadApp();
+
+  api.handleProgressEvent(integratedCycleEvent());
+
+  const details = elements.get("trace-pane").children[0];
+  const sections = details.children[1].children;
+  assert.deepEqual(
+    sections.map((section) => section.children[0].textContent),
+    [
+      "Cycle lifecycle",
+      "Probes",
+      "Signals",
+      "Evidence",
+      "Evidence root deltas",
+      "Epistemic progress",
+      "Belief updates",
+      "Hypothesis evolution",
+      "Answer projection",
+    ]
+  );
+  assert.match(sections[4].children[1].textContent, /evidence-root:sha256:fixture/);
+  assert.match(sections[5].children[1].textContent, /falsification_probe_executed/);
 });
 
 test("keeps beliefs pending until task framing completes initialization", () => {
