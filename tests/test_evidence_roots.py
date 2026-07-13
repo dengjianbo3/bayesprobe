@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -415,6 +416,31 @@ def test_correlation_root_uses_explicit_canonical_correlation_group():
         signal,
         canonical_correlation_group="group:canonical",
     ) == resolve_contribution_root_id(canonical_signal)
+
+
+def test_correlation_root_rejects_secret_canonical_group_without_leaking_it():
+    signal = signal_with_provenance(
+        "S_secret_override",
+        origin=EpistemicOrigin.RETRIEVED_SOURCE,
+        correlation_group="group:raw-declaration",
+        derivation_root_id="derivation:unused",
+    )
+    secret_group = "sk-abcdefghijklmnop"
+
+    with pytest.raises(ValueError) as captured:
+        resolve_contribution_root_id(
+            signal,
+            canonical_correlation_group=secret_group,
+        )
+
+    rendered_error = json.dumps(
+        {
+            "message": str(captured.value),
+            "representation": repr(captured.value),
+        }
+    )
+    assert "secret material" in str(captured.value)
+    assert secret_group not in rendered_error
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ from bayesprobe.schemas import (
     EvidenceRootContribution,
     ExternalSignal,
     LikelihoodBand,
+    is_secret_like_value,
 )
 
 
@@ -104,6 +105,10 @@ def resolve_contribution_root_id(
             or basis.strip() != basis
         ):
             raise ValueError("canonical correlation group must be canonical text")
+        if is_secret_like_value(basis):
+            raise ValueError(
+                "canonical correlation group contains secret material"
+            )
     else:
         basis_kind = "derivation_root_id"
         basis = provenance.derivation_root_id
