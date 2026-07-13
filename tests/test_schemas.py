@@ -5,6 +5,7 @@ from types import MappingProxyType
 import unicodedata
 
 import pytest
+from pydantic import ValidationError
 
 import bayesprobe.schemas as schemas
 import bayesprobe
@@ -62,6 +63,7 @@ _NFKC_SECRET_VALUE = (
     "provider-secret-value-123"
 )
 _NFKC_SECRET_KEY = "\uff41\uff50\uff49\uff3f\uff4b\uff45\uff59"
+_FAKE_SECRET_LIKE_ROOT_ID = "Authorization: Bearer fake-provider-credential-123"
 
 
 class _MemoryVersionEnum(IntEnum):
@@ -205,6 +207,12 @@ def make_native_evidence_event(**overrides) -> EvidenceEvent:
     }
     payload.update(overrides)
     return EvidenceEvent(**payload)
+
+
+def assert_validation_error_excludes_fake_secret(error: ValidationError) -> None:
+    assert _FAKE_SECRET_LIKE_ROOT_ID not in str(error)
+    assert _FAKE_SECRET_LIKE_ROOT_ID not in error.json()
+    assert _FAKE_SECRET_LIKE_ROOT_ID not in repr(error.errors())
 
 
 def test_probe_design_carries_server_typed_semantics():
@@ -771,6 +779,79 @@ def test_root_contribution_requires_canonical_ids_and_finite_likelihoods():
             epistemic_origin=EpistemicOrigin.MODEL_REASONING,
             per_hypothesis_log_likelihood={"H1": float("nan")},
         )
+
+
+def test_root_contribution_secret_root_id_never_enters_validation_error():
+    with pytest.raises(ValidationError) as exc_info:
+        EvidenceRootContribution(
+            contribution_root_id=_FAKE_SECRET_LIKE_ROOT_ID,
+            revision=1,
+            assessment_event_ids=["E1"],
+            epistemic_origin=EpistemicOrigin.MODEL_REASONING,
+        )
+
+    assert_validation_error_excludes_fake_secret(exc_info.value)
+
+
+def test_contribution_delta_secret_root_fields_never_enter_validation_error():
+    previous = {
+        "contribution_root_id": _FAKE_SECRET_LIKE_ROOT_ID,
+        "revision": 1,
+        "assessment_event_ids": ["E1"],
+        "epistemic_origin": EpistemicOrigin.MODEL_REASONING,
+        "per_hypothesis_log_likelihood": {"H1": 0.1},
+    }
+    current = {
+        **previous,
+        "revision": 2,
+        "assessment_event_ids": ["E1", "E2"],
+        "per_hypothesis_log_likelihood": {"H1": 0.2},
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        EvidenceContributionDelta.model_validate(
+            {
+                "contribution_root_id": _FAKE_SECRET_LIKE_ROOT_ID,
+                "mode": EvidenceContributionMode.REVISE_ROOT,
+                "previous_contribution": previous,
+                "current_contribution": current,
+                "per_hypothesis_delta": {"H1": 0.1},
+                "caused_by_event_ids": ["E2"],
+            }
+        )
+
+    assert_validation_error_excludes_fake_secret(exc_info.value)
+
+
+def test_memory_secret_root_map_key_and_nested_id_never_enter_validation_error():
+    contribution = {
+        "contribution_root_id": _FAKE_SECRET_LIKE_ROOT_ID,
+        "revision": 1,
+        "assessment_event_ids": ["E1"],
+        "epistemic_origin": EpistemicOrigin.MODEL_REASONING,
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        EvidenceMemorySnapshot.model_validate(
+            {
+                "memory_version": 3,
+                "root_contributions": {
+                    _FAKE_SECRET_LIKE_ROOT_ID: contribution,
+                },
+            }
+        )
+
+    assert_validation_error_excludes_fake_secret(exc_info.value)
+
+
+def test_evidence_event_secret_contribution_root_never_enters_validation_error():
+    with pytest.raises(ValidationError) as exc_info:
+        make_native_evidence_event(
+            contribution_root_id=_FAKE_SECRET_LIKE_ROOT_ID,
+            effective_update_weight=None,
+        )
+
+    assert_validation_error_excludes_fake_secret(exc_info.value)
 
 
 def test_memory_root_contribution_keys_match_contribution_root_ids():

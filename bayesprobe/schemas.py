@@ -410,6 +410,70 @@ def _contains_secret_material(value: Any) -> bool:
     return contains_secret_material(value)
 
 
+_INVALID_REDACTED_CONTRIBUTION_ROOT_ID = 0
+_REDACTED_CONTRIBUTION_ROOT_MAP_KEY = "[REDACTED]"
+
+
+def _is_secret_like_contribution_root_id(value: Any) -> bool:
+    return isinstance(value, str) and contains_secret_material({value: None})
+
+
+def _has_secret_like_contribution_root_id(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        root_id = value.get("contribution_root_id")
+    elif isinstance(value, BaseModel):
+        root_id = getattr(value, "contribution_root_id", None)
+    else:
+        return False
+    return _is_secret_like_contribution_root_id(root_id)
+
+
+def _sanitize_secret_contribution_root_ids(
+    value: Any,
+    *,
+    nested_fields: tuple[str, ...] = (),
+) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    sanitized = dict(value)
+    changed = False
+    if _is_secret_like_contribution_root_id(value.get("contribution_root_id")):
+        sanitized["contribution_root_id"] = (
+            _INVALID_REDACTED_CONTRIBUTION_ROOT_ID
+        )
+        changed = True
+    for field_name in nested_fields:
+        if _has_secret_like_contribution_root_id(value.get(field_name)):
+            sanitized[field_name] = {
+                "contribution_root_id": _INVALID_REDACTED_CONTRIBUTION_ROOT_ID
+            }
+            changed = True
+    return sanitized if changed else value
+
+
+def _sanitize_secret_root_contributions(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    root_contributions = value.get("root_contributions")
+    if not isinstance(root_contributions, Mapping):
+        return value
+    contains_secret_root = any(
+        _is_secret_like_contribution_root_id(root_id)
+        or _has_secret_like_contribution_root_id(contribution)
+        for root_id, contribution in root_contributions.items()
+    )
+    if not contains_secret_root:
+        return value
+    return {
+        **value,
+        "root_contributions": {
+            _REDACTED_CONTRIBUTION_ROOT_MAP_KEY: {
+                "contribution_root_id": _INVALID_REDACTED_CONTRIBUTION_ROOT_ID
+            }
+        },
+    }
+
+
 def validate_canonical_event_binding_id(value: str) -> str:
     if (
         not isinstance(value, str)
@@ -726,6 +790,11 @@ class EvidenceRootContribution(StrictTaskModel):
     unresolved_log_likelihood: float | None = None
     active: bool = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_secret_contribution_root_id(cls, value: Any) -> Any:
+        return _sanitize_secret_contribution_root_ids(value)
+
     @field_validator("contribution_root_id")
     @classmethod
     def clean_contribution_root_id(cls, value: str) -> str:
@@ -808,6 +877,14 @@ class EvidenceContributionDelta(StrictTaskModel):
     per_hypothesis_delta: dict[str, float] = Field(default_factory=dict)
     unresolved_delta: float | None = None
     caused_by_event_ids: list[str]
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_secret_contribution_root_ids(cls, value: Any) -> Any:
+        return _sanitize_secret_contribution_root_ids(
+            value,
+            nested_fields=("previous_contribution", "current_contribution"),
+        )
 
     @field_validator("contribution_root_id")
     @classmethod
@@ -951,6 +1028,11 @@ class EvidenceMemorySnapshot(StrictTaskModel):
     discovery_evidence_ids: list[str] = Field(default_factory=list)
     counterevidence_ids_by_hypothesis: dict[str, list[str]] = Field(default_factory=dict)
     discard_and_schema_history: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_secret_root_contributions(cls, value: Any) -> Any:
+        return _sanitize_secret_root_contributions(value)
 
     @field_validator("memory_version", mode="before")
     @classmethod
@@ -1791,6 +1873,11 @@ class EvidenceEvent(BaseModel):
     interpretation: str = ""
     discard_reason: str | None = None
     model_trace: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_secret_contribution_root_id(cls, value: Any) -> Any:
+        return _sanitize_secret_contribution_root_ids(value)
 
     @field_validator("derivation_root_id", "contribution_root_id")
     @classmethod
