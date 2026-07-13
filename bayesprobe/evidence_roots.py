@@ -53,6 +53,8 @@ class RootReconciliationResult:
 def resolve_contribution_root_id(
     signal: ExternalSignal,
     parent_contribution_roots: Mapping[str, str] | None = None,
+    *,
+    canonical_correlation_group: str | None = None,
 ) -> str:
     provenance = signal.provenance
     if provenance is None:
@@ -91,7 +93,17 @@ def resolve_contribution_root_id(
         raise ValueError("derived summary requires parent signals")
     if provenance.epistemic_origin in _CORRELATION_ROOTED_ORIGINS:
         basis_kind = "correlation_group"
-        basis = provenance.correlation_group
+        basis = (
+            provenance.correlation_group
+            if canonical_correlation_group is None
+            else canonical_correlation_group
+        )
+        if (
+            not isinstance(basis, str)
+            or not basis
+            or basis.strip() != basis
+        ):
+            raise ValueError("canonical correlation group must be canonical text")
     else:
         basis_kind = "derivation_root_id"
         basis = provenance.derivation_root_id

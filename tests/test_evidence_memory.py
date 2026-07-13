@@ -28,6 +28,7 @@ from bayesprobe.schemas import (
     EpistemicOrigin,
     EvidenceEvent,
     EvidenceMemorySnapshot,
+    EvidenceRootContribution,
     EvidenceType,
     ExternalSignal,
     FramingMethod,
@@ -3666,6 +3667,240 @@ def test_v3_classification_never_allocates_correlation_credit():
     assert decision.effective_update_weight == 0.0
     assert decision.remaining_credit == {}
     assert decision.discard_reason is None
+
+
+def _v3_root_bound_event(
+    signal: ExternalSignal,
+    *,
+    event_id: str,
+    root_id: str,
+    correlation_status: str,
+    likelihood: LikelihoodBand = LikelihoodBand.MODERATELY_CONFIRMING,
+) -> EvidenceEvent:
+    return EvidenceEvent(
+        schema_version="v0.2",
+        id=event_id,
+        derived_from_signal=signal.id,
+        epistemic_origin=signal.provenance.epistemic_origin,
+        derivation_root_id=signal.provenance.derivation_root_id,
+        contribution_root_id=root_id,
+        target_hypotheses=["A"],
+        evidence_type=(
+            EvidenceType.COUNTEREVIDENCE
+            if likelihood
+            in {
+                LikelihoodBand.WEAKLY_DISCONFIRMING,
+                LikelihoodBand.MODERATELY_DISCONFIRMING,
+                LikelihoodBand.STRONGLY_DISCONFIRMING,
+            }
+            else EvidenceType.SUPPORTING
+        ),
+        content=signal.raw_content,
+        reliability=0.8,
+        independence=0.8,
+        relevance=0.9,
+        novelty=0.8,
+        specificity=0.7,
+        verifiability=0.7,
+        likelihoods={"A": likelihood},
+        correlation_status=correlation_status,
+        effective_update_weight=None,
+    )
+
+
+def _normalized_same_source_signal(
+    signal_id: str,
+    content: str,
+    *,
+    correlation_group: str,
+    derivation_root_id: str,
+) -> ExternalSignal:
+    raw = _signal(signal_id, content, root=derivation_root_id)
+    raw = raw.model_copy(
+        update={
+            "provenance": raw.provenance.model_copy(
+                update={"correlation_group": correlation_group}
+            )
+        }
+    )
+    return SignalProvenanceNormalizer().normalize(raw, run_id="run_memory")
+
+
+def test_v3_same_cycle_same_source_uses_one_canonical_root_in_either_order():
+    first = _normalized_same_source_signal(
+        "S_canonical_a",
+        "The first independently worded observation.",
+        correlation_group="group:canonical-first",
+        derivation_root_id="root:canonical-first",
+    )
+    second = _normalized_same_source_signal(
+        "S_canonical_b",
+        "The later independently worded observation.",
+        correlation_group="group:raw-second",
+        derivation_root_id="root:raw-second",
+    )
+    prior = EvidenceMemorySnapshot(memory_version=3)
+
+    forward = resolve_signal_contribution_roots(prior, [first, second])
+    reverse = resolve_signal_contribution_roots(prior, [second, first])
+
+    expected_root = resolve_contribution_root_id(
+        first,
+        canonical_correlation_group="group:canonical-first",
+    )
+    assert forward == reverse
+    assert forward.ordered_signal_ids == (first.id, second.id)
+    assert forward.canonical_correlation_groups == {
+        first.id: "group:canonical-first",
+        second.id: "group:canonical-first",
+    }
+    assert set(forward.signal_contribution_roots.values()) == {expected_root}
+
+    manager = EvidenceMemoryManager()
+    memory = prior
+    events = []
+    for signal_id in forward.ordered_signal_ids:
+        signal = {first.id: first, second.id: second}[signal_id]
+        decision = manager.classify(memory, signal)
+        assert decision.canonical_correlation_group == (
+            forward.canonical_correlation_groups[signal_id]
+        )
+        assert decision.effective_update_weight == 0.0
+        assert decision.remaining_credit == {}
+        event = _v3_root_bound_event(
+            signal,
+            event_id=f"E_{signal_id}",
+            root_id=forward.signal_contribution_roots[signal_id],
+            correlation_status=decision.correlation_status,
+        )
+        memory = manager.commit_identity(memory, signal=signal, event=event)
+        events.append(event)
+
+    reconciled = EvidenceRootReconciler().reconcile_cycle(
+        memory,
+        events,
+        falsification_probe_executed=False,
+    )
+
+    assert set(reconciled.evidence_memory.signal_contribution_roots.values()) == {
+        expected_root
+    }
+    assert list(reconciled.evidence_memory.root_contributions) == [expected_root]
+    assert reconciled.evidence_memory.correlation_credit == {}
+
+
+def test_v3_transition_reconstructs_nonzero_root_create_and_revision():
+    manager = EvidenceMemoryManager()
+    prior = EvidenceMemorySnapshot(memory_version=3)
+    first = _normalized_same_source_signal(
+        "S_transition_active_first",
+        "The first active transition observation.",
+        correlation_group="group:persisted-canonical",
+        derivation_root_id="root:transition-first",
+    )
+    first_resolution = resolve_signal_contribution_roots(prior, [first])
+    root_id = first_resolution.signal_contribution_roots[first.id]
+    first_decision = manager.classify(prior, first)
+    first_event = _v3_root_bound_event(
+        first,
+        event_id="E_transition_active_first",
+        root_id=root_id,
+        correlation_status=first_decision.correlation_status,
+    )
+    first_identity = manager.commit_identity(
+        prior,
+        signal=first,
+        event=first_event,
+    )
+    quality = 0.8 * 0.8 * 0.9 * 0.8
+    first_contribution = EvidenceRootContribution(
+        contribution_root_id=root_id,
+        revision=1,
+        assessment_event_ids=[first_event.id],
+        epistemic_origin=first.provenance.epistemic_origin,
+        per_hypothesis_log_likelihood={"A": quality * math.log(3.0)},
+        active=True,
+    )
+    first_payload = first_identity.model_dump(mode="python")
+    first_payload["root_contributions"] = {root_id: first_contribution}
+    first_candidate = EvidenceMemorySnapshot.model_validate(first_payload)
+
+    assert manager.validate_transition(
+        prior,
+        first_candidate,
+        evidence_events=[first_event],
+        normalized_signals=[first],
+        existing_evidence_ids=[],
+        frame_version=1,
+    ) == first_candidate
+    assert first_candidate.root_contributions[root_id].active is True
+    assert first_candidate.root_contributions[
+        root_id
+    ].per_hypothesis_log_likelihood["A"] != 0.0
+
+    second = _normalized_same_source_signal(
+        "S_transition_active_second",
+        "The revised active transition observation.",
+        correlation_group="group:later-raw-declaration",
+        derivation_root_id="root:transition-second",
+    )
+    second_resolution = resolve_signal_contribution_roots(
+        first_candidate,
+        [second],
+    )
+    assert second_resolution.signal_contribution_roots[second.id] == root_id
+    assert second_resolution.canonical_correlation_groups[second.id] == (
+        "group:persisted-canonical"
+    )
+    second_decision = manager.classify(first_candidate, second)
+    second_event = _v3_root_bound_event(
+        second,
+        event_id="E_transition_active_second",
+        root_id=root_id,
+        correlation_status=second_decision.correlation_status,
+        likelihood=LikelihoodBand.WEAKLY_DISCONFIRMING,
+    )
+    second_identity = manager.commit_identity(
+        first_candidate,
+        signal=second,
+        event=second_event,
+    )
+    revised_contribution = EvidenceRootContribution(
+        contribution_root_id=root_id,
+        revision=2,
+        assessment_event_ids=[second_event.id],
+        epistemic_origin=second.provenance.epistemic_origin,
+        per_hypothesis_log_likelihood={"A": quality * math.log(0.7)},
+        active=True,
+    )
+    revised_payload = second_identity.model_dump(mode="python")
+    revised_payload["root_contributions"] = {root_id: revised_contribution}
+    revised_candidate = EvidenceMemorySnapshot.model_validate(revised_payload)
+
+    assert manager.validate_transition(
+        first_candidate,
+        revised_candidate,
+        evidence_events=[second_event],
+        normalized_signals=[second],
+        existing_evidence_ids=[first_event.id],
+        frame_version=1,
+    ) == revised_candidate
+
+    forged_payload = revised_candidate.model_dump(mode="python")
+    forged_payload["root_contributions"][root_id][
+        "per_hypothesis_log_likelihood"
+    ]["A"] += 0.1
+    forged_candidate = EvidenceMemorySnapshot.model_validate(forged_payload)
+
+    with pytest.raises(ValueError, match="evidence memory transition is invalid"):
+        manager.validate_transition(
+            first_candidate,
+            forged_candidate,
+            evidence_events=[second_event],
+            normalized_signals=[second],
+            existing_evidence_ids=[first_event.id],
+            frame_version=1,
+        )
 
 
 def test_v3_commit_identity_rejects_changed_root_for_repeated_signal_id():

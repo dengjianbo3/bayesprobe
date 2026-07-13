@@ -396,6 +396,27 @@ def test_model_signals_from_same_provider_session_share_root_across_cycles():
     assert resolve_contribution_root_id(first) == resolve_contribution_root_id(second)
 
 
+def test_correlation_root_uses_explicit_canonical_correlation_group():
+    signal = signal_with_provenance(
+        "S_raw_group",
+        origin=EpistemicOrigin.RETRIEVED_SOURCE,
+        correlation_group="group:raw-declaration",
+        derivation_root_id="derivation:unused",
+    )
+    canonical_signal = signal.model_copy(
+        update={
+            "provenance": signal.provenance.model_copy(
+                update={"correlation_group": "group:canonical"}
+            )
+        }
+    )
+
+    assert resolve_contribution_root_id(
+        signal,
+        canonical_correlation_group="group:canonical",
+    ) == resolve_contribution_root_id(canonical_signal)
+
+
 @pytest.mark.parametrize(
     ("parent_origin", "child_origin"),
     [

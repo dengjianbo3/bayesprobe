@@ -204,13 +204,16 @@ def test_legacy_lifecycle_accepts_memory_v2():
 
 def test_legacy_lifecycle_rejects_native_memory_semantics():
     migrated = migrate_belief_state_v0_1(legacy_belief_state_payload())
-    migrated.evidence_memory = EvidenceMemorySnapshot(memory_version=3)
+    native_memory = migrated.model_copy(
+        update={"evidence_memory": EvidenceMemorySnapshot(memory_version=3)}
+    )
+    native_memory = _carry_v01_migration_receipt(migrated, native_memory)
 
     with pytest.raises(
         ValueError,
-        match="invalid belief lifecycle",
+        match="legacy migration requires evidence memory version 1 or 2",
     ):
-        resolve_belief_lifecycle(migrated)
+        resolve_belief_lifecycle(native_memory)
 
 
 @pytest.mark.parametrize(

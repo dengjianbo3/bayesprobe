@@ -223,6 +223,7 @@ class ModelProvenanceKeys:
 @dataclass(frozen=True)
 class SignalContributionRootResolution:
     signal_contribution_roots: dict[str, str]
+    canonical_correlation_groups: dict[str, str]
     ordered_signal_ids: tuple[str, ...]
 
 
@@ -240,6 +241,9 @@ def resolve_signal_contribution_roots(
         signals_by_id[signal.id] = signal
 
     bindings = dict(snapshot.signal_contribution_roots)
+    canonical_groups: dict[str, str] = {}
+    identity_shadow = snapshot
+    memory_manager = EvidenceMemoryManager()
     same_cycle_ids = set(signals_by_id)
     for signal in signals_by_id.values():
         provenance = _required_provenance(signal)
@@ -255,32 +259,45 @@ def resolve_signal_contribution_roots(
     unresolved = set(signals_by_id)
     ordered_signal_ids: list[str] = []
     while unresolved:
-        resolved_this_pass: list[str] = []
-        for signal_id in sorted(unresolved):
-            signal = signals_by_id[signal_id]
-            provenance = _required_provenance(signal)
-            if any(
+        ready_signal_ids = [
+            signal_id
+            for signal_id in sorted(unresolved)
+            if not any(
                 parent_id in unresolved
-                for parent_id in provenance.parent_signal_ids
-            ):
-                continue
-            root_id = resolve_contribution_root_id(
-                signal,
-                parent_contribution_roots=bindings,
+                for parent_id in _required_provenance(
+                    signals_by_id[signal_id]
+                ).parent_signal_ids
             )
-            prior_root_id = bindings.get(signal_id)
-            if prior_root_id is not None and prior_root_id != root_id:
-                raise ValueError("signal contribution root conflict")
-            bindings[signal_id] = root_id
-            resolved_this_pass.append(signal_id)
-        if not resolved_this_pass:
+        ]
+        if not ready_signal_ids:
             raise ValueError("signal contribution root resolution contains a cycle")
-        for signal_id in resolved_this_pass:
-            unresolved.remove(signal_id)
-            ordered_signal_ids.append(signal_id)
+        signal_id = ready_signal_ids[0]
+        signal = signals_by_id[signal_id]
+        canonical_group = _canonical_correlation_group_for_signal(
+            identity_shadow,
+            signal,
+        )
+        root_id = resolve_contribution_root_id(
+            signal,
+            parent_contribution_roots=bindings,
+            canonical_correlation_group=canonical_group,
+        )
+        prior_root_id = bindings.get(signal_id)
+        if prior_root_id is not None and prior_root_id != root_id:
+            raise ValueError("signal contribution root conflict")
+        bindings[signal_id] = root_id
+        canonical_groups[signal_id] = canonical_group
+        identity_shadow = memory_manager.remember_signal_identity(
+            identity_shadow,
+            signal,
+            canonical_correlation_group=canonical_group,
+        )
+        unresolved.remove(signal_id)
+        ordered_signal_ids.append(signal_id)
 
     return SignalContributionRootResolution(
         signal_contribution_roots=bindings,
+        canonical_correlation_groups=canonical_groups,
         ordered_signal_ids=tuple(ordered_signal_ids),
     )
 
@@ -521,15 +538,8 @@ class EvidenceMemoryManager:
     ) -> EvidenceMemorySnapshot:
         self.validate_policy_snapshot(snapshot)
         provenance = _required_provenance(signal)
-        prior_identities = {
-            signal_id: parts
-            for signal_id, value in snapshot.source_content_fingerprints.items()
-            if (parts := _source_content_identity_parts(value)) is not None
-        }
-        canonical_group = canonical_correlation_group or _canonical_correlation_group(
-            snapshot=snapshot,
-            provenance=provenance,
-            prior_identities=prior_identities,
+        canonical_group = canonical_correlation_group or (
+            _canonical_correlation_group_for_signal(snapshot, signal)
         )
         self.validate_signal_lineage(
             snapshot,
@@ -716,6 +726,8 @@ class EvidenceMemoryManager:
                         or event.effective_update_weight is not None
                         or event.correlation_status
                         != decision.correlation_status
+                        or decision.canonical_correlation_group
+                        != resolution.canonical_correlation_groups[signal.id]
                         or not _matches_required_discard_semantics(
                             event.discard_reason,
                             decision.discard_reason,
@@ -849,10 +861,9 @@ class EvidenceMemoryManager:
             for signal_id, value in snapshot.source_content_fingerprints.items()
             if (parts := _source_content_identity_parts(value)) is not None
         }
-        canonical_group = _canonical_correlation_group(
-            snapshot=snapshot,
-            provenance=provenance,
-            prior_identities=prior_identities,
+        canonical_group = _canonical_correlation_group_for_signal(
+            snapshot,
+            signal,
         )
         self.validate_signal_lineage(
             snapshot,
@@ -1006,6 +1017,10 @@ class EvidenceMemoryManager:
         self.validate_policy_snapshot(snapshot)
         if snapshot.memory_version == 3:
             provenance = _required_provenance(signal)
+            canonical_group = _canonical_correlation_group_for_signal(
+                snapshot,
+                signal,
+            )
             if (
                 event.schema_version != "v0.2"
                 or event.contribution_root_id is None
@@ -1026,6 +1041,7 @@ class EvidenceMemoryManager:
             resolved_root_id = resolve_contribution_root_id(
                 signal,
                 parent_contribution_roots=snapshot.signal_contribution_roots,
+                canonical_correlation_group=canonical_group,
             )
             if event.contribution_root_id != resolved_root_id:
                 raise ValueError("signal contribution root conflict")
@@ -1040,6 +1056,9 @@ class EvidenceMemoryManager:
         snapshot = self.remember_signal_identity(
             snapshot,
             signal,
+            canonical_correlation_group=(
+                canonical_group if snapshot.memory_version == 3 else None
+            ),
         )
 
         signal_contribution_roots = dict(snapshot.signal_contribution_roots)
@@ -1357,6 +1376,23 @@ def _canonical_correlation_group(
     if known_groups:
         return known_groups.pop()
     return provenance.correlation_group
+
+
+def _canonical_correlation_group_for_signal(
+    snapshot: EvidenceMemorySnapshot,
+    signal: ExternalSignal,
+) -> str:
+    provenance = _required_provenance(signal)
+    prior_identities = {
+        signal_id: parts
+        for signal_id, value in snapshot.source_content_fingerprints.items()
+        if (parts := _source_content_identity_parts(value)) is not None
+    }
+    return _canonical_correlation_group(
+        snapshot=snapshot,
+        provenance=provenance,
+        prior_identities=prior_identities,
+    )
 
 
 def _direction_for(band: LikelihoodBand) -> Literal["confirming", "disconfirming"] | None:
