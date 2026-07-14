@@ -27,6 +27,7 @@ from harbor.models.trial.result import TrialResult
 
 from bayesprobe_terminal_bench.config import TerminalBenchConfig
 from bayesprobe_terminal_bench.runner_factory import (
+    collect_repository_git_identity,
     terminal_bench_lock_schema_mismatches,
 )
 
@@ -122,22 +123,17 @@ def collect_runtime_identity(
             f"Harbor version must be {HARBOR_VERSION}; found {installed_harbor}"
         )
     root = Path(repository_root).resolve()
+    git_identity = collect_repository_git_identity(root)
+    if git_identity.adapter_dirty:
+        raise ValueError("benchmark adapter worktree is dirty")
     container_image = discover_container_image(
         job_dir=job_dir,
         package_cache_dir=package_cache_dir,
     )
     return RuntimeIdentity(
         harbor_version=installed_harbor,
-        root_git_sha=_run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            error="could not resolve repository Git identity",
-        ),
-        adapter_tree_sha=_run(
-            ["git", "rev-parse", "HEAD:benchmarks/terminal_bench"],
-            cwd=root,
-            error="could not resolve committed adapter tree identity",
-        ),
+        root_git_sha=git_identity.root_git_sha,
+        adapter_tree_sha=git_identity.adapter_tree_sha,
         container_image=container_image,
         image_digest=_docker_image_digest(container_image),
     )

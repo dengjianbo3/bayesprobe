@@ -11,7 +11,10 @@ import pytest
 from bayesprobe import ProbeDesign, ProbeExecutionBrief
 from bayesprobe_terminal_bench.actions import ActionObservation, ShellAction
 from bayesprobe_terminal_bench.config import TerminalBenchConfig
-from bayesprobe_terminal_bench.runner_factory import load_and_validate_lock
+from bayesprobe_terminal_bench.runner_factory import (
+    RepositoryGitIdentity,
+    load_and_validate_lock,
+)
 from bayesprobe_terminal_bench.signals import signal_from_observation
 from conftest import (
     FIXED_CONTAINER_IMAGE,
@@ -45,6 +48,19 @@ RUNTIME_IDENTITY = RuntimeIdentity(
     container_image=FIXED_CONTAINER_IMAGE,
     image_digest="sha256:" + "4" * 64,
 )
+
+
+def _classify(
+    *,
+    job_dir: Path,
+    lock_path: Path,
+    runtime_identity: RuntimeIdentity = RUNTIME_IDENTITY,
+) -> str:
+    return classify_smoke_run(
+        job_dir=job_dir,
+        lock_path=lock_path,
+        runtime_identity=runtime_identity,
+    )
 
 
 def test_runtime_identity_owns_container_image() -> None:
@@ -109,7 +125,15 @@ def test_lock_extracts_official_identity_and_matches_runtime_validator(
     }
     output = tmp_path / "benchmark.lock.json"
     write_lock_atomic(output, lock)
-    assert load_and_validate_lock(output, config) == lock
+    assert load_and_validate_lock(
+        output,
+        config,
+        runtime_git_identity=RepositoryGitIdentity(
+            root_git_sha=RUNTIME_IDENTITY.root_git_sha,
+            adapter_tree_sha=RUNTIME_IDENTITY.adapter_tree_sha,
+            adapter_dirty=False,
+        ),
+    ) == lock
 
 
 def test_real_harbor_model_dumps_build_lock_without_persisted_image_fields(
@@ -363,6 +387,15 @@ def test_runtime_discovery_selects_digest_for_the_exact_cached_task_image(
         return SimpleNamespace(stdout=stdout)
 
     monkeypatch.setattr(write_benchmark_lock, "version", lambda name: "0.18.0")
+    monkeypatch.setattr(
+        write_benchmark_lock,
+        "collect_repository_git_identity",
+        lambda root: RepositoryGitIdentity(
+            root_git_sha="root-sha",
+            adapter_tree_sha="adapter-sha",
+            adapter_dirty=False,
+        ),
+    )
     monkeypatch.setattr(write_benchmark_lock.subprocess, "run", fake_run)
 
     identity = collect_runtime_identity(
@@ -379,10 +412,41 @@ def test_runtime_discovery_selects_digest_for_the_exact_cached_task_image(
         image_digest=matching_digest,
     )
     assert calls == [
-        (["git", "rev-parse", "HEAD"], tmp_path),
-        (["git", "rev-parse", "HEAD:benchmarks/terminal_bench"], tmp_path),
         (["docker", "image", "inspect", "registry.example/task:locked"], None),
     ]
+
+
+def test_lock_writer_runtime_identity_rejects_dirty_adapter_source(
+    synthetic_oracle_job: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(write_benchmark_lock, "version", lambda name: "0.18.0")
+    monkeypatch.setattr(
+        write_benchmark_lock,
+        "collect_repository_git_identity",
+        lambda root: RepositoryGitIdentity(
+            root_git_sha="root-sha",
+            adapter_tree_sha="adapter-sha",
+            adapter_dirty=True,
+        ),
+    )
+    monkeypatch.setattr(
+        write_benchmark_lock,
+        "discover_container_image",
+        lambda **kwargs: pytest.fail("dirty source must fail before image discovery"),
+    )
+    monkeypatch.setattr(
+        write_benchmark_lock,
+        "_docker_image_digest",
+        lambda image: pytest.fail("dirty source must fail before Docker inspection"),
+    )
+
+    with pytest.raises(ValueError, match="dirty"):
+        collect_runtime_identity(
+            repository_root=tmp_path,
+            job_dir=synthetic_oracle_job,
+        )
 
 
 @pytest.mark.parametrize("image_id_matches", [False, True])
@@ -658,8 +722,11 @@ def test_smoke_classifier_and_cli_exit_codes(
         oracle_job=synthetic_oracle_job,
     )
 
-    assert classify_smoke_run(job_dir=job_dir, lock_path=lock_path) == classification
-    assert validate_main(["--job", str(job_dir), "--lock", str(lock_path)]) == exit_code
+    assert _classify(job_dir=job_dir, lock_path=lock_path) == classification
+    assert validate_main(
+        ["--job", str(job_dir), "--lock", str(lock_path)],
+        runtime_identity_loader=lambda **kwargs: RUNTIME_IDENTITY,
+    ) == exit_code
     assert capsys.readouterr().out == classification + "\n"
 
 
@@ -682,7 +749,7 @@ def test_smoke_classifier_rejects_partial_lock(
     )
 
     assert (
-        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        _classify(job_dir=job_dir, lock_path=lock_path)
         == "conformance_error"
     )
 
@@ -728,7 +795,7 @@ def test_smoke_classifier_allows_linked_evidence_without_directional_update(
     _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
 
     assert (
-        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        _classify(job_dir=job_dir, lock_path=lock_path)
         == "engineering_pass"
     )
 
@@ -786,7 +853,7 @@ def test_smoke_classifier_allows_a_completed_no_signal_no_update_cycle(
     _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
 
     assert (
-        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        _classify(job_dir=job_dir, lock_path=lock_path)
         == "engineering_pass"
     )
 
@@ -825,7 +892,7 @@ def test_policy_denied_reserved_action_is_reconciled_without_an_observation(
     _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
 
     assert (
-        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        _classify(job_dir=job_dir, lock_path=lock_path)
         == "engineering_pass"
     )
 
@@ -886,7 +953,7 @@ def test_smoke_classifier_rejects_orphan_epistemic_rows(
     _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
 
     assert (
-        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        _classify(job_dir=job_dir, lock_path=lock_path)
         == "conformance_error"
     )
 
@@ -937,7 +1004,7 @@ def test_smoke_classifier_rejects_missing_or_conflicting_result_identity(
     _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
 
     assert (
-        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        _classify(job_dir=job_dir, lock_path=lock_path)
         == "conformance_error"
     )
 
@@ -966,7 +1033,45 @@ def test_smoke_classifier_rejects_stale_complete_lock_identity(
     write_lock_atomic(lock_path, lock)
 
     assert (
-        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        _classify(job_dir=job_dir, lock_path=lock_path)
+        == "conformance_error"
+    )
+
+
+@pytest.mark.parametrize(
+    ("stale_field", "stale_value"),
+    [
+        ("root_git_sha", "9" * 40),
+        ("adapter_tree_sha", "8" * 40),
+        ("container_image", "registry.example/terminal-bench/stale:locked"),
+        ("image_digest", "sha256:" + "7" * 64),
+    ],
+)
+def test_smoke_classifier_rejects_well_formed_stale_runtime_lock(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+    stale_field: str,
+    stale_value: str,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    lock_path = tmp_path / "benchmark.lock.json"
+    lock = _write_complete_benchmark_lock(
+        lock_path,
+        oracle_job=synthetic_oracle_job,
+    )
+    lock[stale_field] = stale_value
+    write_lock_atomic(lock_path, lock)
+
+    assert (
+        _classify(job_dir=job_dir, lock_path=lock_path)
         == "conformance_error"
     )
 
@@ -1077,6 +1182,6 @@ def test_smoke_classifier_rejects_false_action_provenance_links(
     _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
 
     assert (
-        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        _classify(job_dir=job_dir, lock_path=lock_path)
         == "conformance_error"
     )

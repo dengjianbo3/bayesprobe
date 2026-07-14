@@ -17,6 +17,8 @@ from bayesprobe_terminal_bench.runner_factory import (
 )
 from bayesprobe_terminal_bench.signals import executed_request_from_action
 from write_benchmark_lock import (
+    RuntimeIdentity,
+    collect_runtime_identity,
     extract_job_identity,
 )
 
@@ -39,9 +41,12 @@ def classify_smoke_run(
     *,
     job_dir: Path,
     lock_path: Path,
+    runtime_identity: RuntimeIdentity,
 ) -> SmokeClassification:
     lock = _read_object(Path(lock_path))
     if not _valid_lock_identity(lock):
+        return "conformance_error"
+    if not _runtime_matches_lock(runtime_identity, lock):
         return "conformance_error"
 
     trial_dirs = _trial_dirs(Path(job_dir))
@@ -76,7 +81,11 @@ def classify_smoke_run(
     return "engineering_pass"
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    runtime_identity_loader: Any = collect_runtime_identity,
+) -> int:
     parser = argparse.ArgumentParser(
         description="Classify one locked Terminal-Bench engineering smoke run."
     )
@@ -84,9 +93,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--lock", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
+        runtime_identity = runtime_identity_loader(
+            repository_root=Path(__file__).resolve().parents[3],
+            job_dir=args.job,
+        )
         classification = classify_smoke_run(
             job_dir=args.job,
             lock_path=args.lock,
+            runtime_identity=runtime_identity,
         )
     except Exception:
         classification = "infrastructure_error"
@@ -106,6 +120,22 @@ def _trial_dirs(job_dir: Path) -> list[Path]:
 
 def _valid_lock_identity(lock: Mapping[str, Any]) -> bool:
     return not terminal_bench_lock_schema_mismatches(lock)
+
+
+def _runtime_matches_lock(
+    runtime_identity: RuntimeIdentity,
+    lock: Mapping[str, Any],
+) -> bool:
+    return all(
+        lock.get(key) == value
+        for key, value in {
+            "harbor_version": runtime_identity.harbor_version,
+            "root_git_sha": runtime_identity.root_git_sha,
+            "adapter_tree_sha": runtime_identity.adapter_tree_sha,
+            "container_image": runtime_identity.container_image,
+            "image_digest": runtime_identity.image_digest,
+        }.items()
+    )
 
 
 def _result_matches_lock(job_dir: Path, lock: Mapping[str, Any]) -> bool:

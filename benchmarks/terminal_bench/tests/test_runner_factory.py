@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,8 +26,10 @@ from bayesprobe_terminal_bench.config import (
 from bayesprobe_terminal_bench.runner_factory import (
     ArtifactInvocationObserver,
     BudgetedModelGateway,
+    RepositoryGitIdentity,
     build_live_session,
     build_runner,
+    collect_repository_git_identity,
     load_and_validate_lock,
     safe_run_id,
 )
@@ -144,6 +147,18 @@ def _write_lock(path: Path, config: TerminalBenchConfig) -> dict[str, object]:
     return payload
 
 
+def _runtime_git_identity(
+    payload: dict[str, object],
+    *,
+    dirty: bool = False,
+) -> RepositoryGitIdentity:
+    return RepositoryGitIdentity(
+        root_git_sha=str(payload["root_git_sha"]),
+        adapter_tree_sha=str(payload["adapter_tree_sha"]),
+        adapter_dirty=dirty,
+    )
+
+
 def _different(value: object) -> object:
     if value is None:
         return "unexpected"
@@ -244,6 +259,37 @@ def test_safe_run_id_normalizes_prefixes_and_caps_harbor_ids() -> None:
     assert re.fullmatch(r"[A-Za-z0-9_.-]+", capped)
 
 
+def test_repository_identity_ignores_runs_but_detects_adapter_edits(
+    tmp_path: Path,
+) -> None:
+    adapter = tmp_path / "benchmarks" / "terminal_bench"
+    adapter.mkdir(parents=True)
+    (adapter / ".gitignore").write_text(".runs/\n", encoding="utf-8")
+    tracked = adapter / "tracked.txt"
+    tracked.write_text("committed\n", encoding="utf-8")
+    commands = [
+        ["git", "init", "-q"],
+        ["git", "config", "user.name", "Terminal Bench Test"],
+        ["git", "config", "user.email", "terminal-bench@example.invalid"],
+        ["git", "add", "benchmarks/terminal_bench"],
+        ["git", "commit", "-qm", "fixture"],
+    ]
+    for command in commands:
+        subprocess.run(command, cwd=tmp_path, check=True, capture_output=True)
+    generated = adapter / ".runs" / "harbor" / "result.json"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("{}\n", encoding="utf-8")
+
+    clean = collect_repository_git_identity(tmp_path)
+    tracked.write_text("dirty\n", encoding="utf-8")
+    dirty = collect_repository_git_identity(tmp_path)
+
+    assert clean.adapter_dirty is False
+    assert dirty.adapter_dirty is True
+    assert clean.root_git_sha == dirty.root_git_sha
+    assert clean.adapter_tree_sha == dirty.adapter_tree_sha
+
+
 def test_lock_is_required_and_must_contain_an_object(tmp_path: Path) -> None:
     config = TerminalBenchConfig(model="locked-model")
     missing = tmp_path / "missing.json"
@@ -320,8 +366,66 @@ def test_valid_lock_is_returned_without_rewriting_it(tmp_path: Path) -> None:
     payload = _write_lock(path, config)
     original = path.read_bytes()
 
-    assert load_and_validate_lock(path, config) == payload
+    assert load_and_validate_lock(
+        path,
+        config,
+        runtime_git_identity=_runtime_git_identity(payload),
+    ) == payload
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("stale_field", ["root_git_sha", "adapter_tree_sha"])
+def test_live_loader_rejects_a_well_formed_stale_git_lock(
+    tmp_path: Path,
+    stale_field: str,
+) -> None:
+    config = TerminalBenchConfig(model="locked-model")
+    path = tmp_path / "benchmark.lock.json"
+    payload = _write_lock(path, config)
+    runtime_identity = RepositoryGitIdentity(
+        root_git_sha=str(payload["root_git_sha"]),
+        adapter_tree_sha=str(payload["adapter_tree_sha"]),
+        adapter_dirty=False,
+    )
+    runtime_identity = RepositoryGitIdentity(
+        root_git_sha=(
+            "9" * 40
+            if stale_field == "root_git_sha"
+            else runtime_identity.root_git_sha
+        ),
+        adapter_tree_sha=(
+            "8" * 40
+            if stale_field == "adapter_tree_sha"
+            else runtime_identity.adapter_tree_sha
+        ),
+        adapter_dirty=False,
+    )
+
+    with pytest.raises(ValueError, match=stale_field):
+        load_and_validate_lock(
+            path,
+            config,
+            runtime_git_identity=runtime_identity,
+        )
+
+
+def test_live_loader_rejects_dirty_adapter_even_when_committed_ids_match(
+    tmp_path: Path,
+) -> None:
+    config = TerminalBenchConfig(model="locked-model")
+    path = tmp_path / "benchmark.lock.json"
+    payload = _write_lock(path, config)
+
+    with pytest.raises(ValueError, match="dirty"):
+        load_and_validate_lock(
+            path,
+            config,
+            runtime_git_identity=RepositoryGitIdentity(
+                root_git_sha=str(payload["root_git_sha"]),
+                adapter_tree_sha=str(payload["adapter_tree_sha"]),
+                adapter_dirty=True,
+            ),
+        )
 
 
 def test_partial_pre_task9_lock_is_rejected_before_agent_construction(
@@ -388,7 +492,11 @@ def test_loader_accepts_complete_build_lock_output(
     path = tmp_path / "complete.lock.json"
     path.write_text(json.dumps(lock), encoding="utf-8")
 
-    assert load_and_validate_lock(path, config) == lock
+    assert load_and_validate_lock(
+        path,
+        config,
+        runtime_git_identity=_runtime_git_identity(lock),
+    ) == lock
 
 
 @pytest.mark.asyncio
@@ -402,7 +510,7 @@ async def test_build_live_session_composes_shared_budget_and_active_loop_without
         max_cycles=1,
         lock_path=lock_path,
     )
-    _write_lock(lock_path, config)
+    lock = _write_lock(lock_path, config)
     environment = NeverExecutedEnvironment()
     active_loop = asyncio.get_running_loop()
     api_key = "one-time-live-provider-secret"
@@ -416,6 +524,7 @@ async def test_build_live_session_composes_shared_budget_and_active_loop_without
         logs_dir=tmp_path / "logs",
         session_id="session/id",
         context_id="context:id",
+        runtime_git_identity=_runtime_git_identity(lock),
     )
 
     assert type(session.runner) is AutonomousQuestionRunner

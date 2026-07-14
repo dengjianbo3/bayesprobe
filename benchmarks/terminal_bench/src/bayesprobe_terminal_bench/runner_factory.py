@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,64 @@ _LOCK_EXACT_VALUES: dict[str, object] = {
 }
 _LOCK_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _LOCK_GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+@dataclass(frozen=True)
+class RepositoryGitIdentity:
+    root_git_sha: str
+    adapter_tree_sha: str
+    adapter_dirty: bool
+
+
+def collect_repository_git_identity(
+    repository_root: Path,
+) -> RepositoryGitIdentity:
+    root = Path(repository_root).resolve()
+    root_git_sha = _git_output(["git", "rev-parse", "HEAD"], cwd=root)
+    adapter_tree_sha = _git_output(
+        ["git", "rev-parse", "HEAD:benchmarks/terminal_bench"],
+        cwd=root,
+    )
+    adapter_status = _git_output(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            "benchmarks/terminal_bench",
+        ],
+        cwd=root,
+        allow_empty=True,
+    )
+    return RepositoryGitIdentity(
+        root_git_sha=root_git_sha,
+        adapter_tree_sha=adapter_tree_sha,
+        adapter_dirty=bool(adapter_status),
+    )
+
+
+def _git_output(
+    command: list[str],
+    *,
+    cwd: Path,
+    allow_empty: bool = False,
+) -> str:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        raise ValueError("could not resolve repository Git identity") from None
+    output = completed.stdout.strip()
+    if not output and not allow_empty:
+        raise ValueError("could not resolve repository Git identity")
+    return output
 
 
 def terminal_bench_lock_schema_mismatches(
@@ -267,6 +326,9 @@ def safe_run_id(value: str) -> str:
 def load_and_validate_lock(
     path: Path,
     config: TerminalBenchConfig,
+    *,
+    runtime_git_identity: RepositoryGitIdentity | None = None,
+    repository_root: Path | None = None,
 ) -> dict[str, object]:
     lock_path = Path(path)
     if not lock_path.is_file():
@@ -307,6 +369,23 @@ def load_and_validate_lock(
     }
     if mismatches:
         raise ValueError(f"Terminal-Bench lock mismatch: {sorted(mismatches)}")
+    runtime = runtime_git_identity or collect_repository_git_identity(
+        repository_root or Path(__file__).resolve().parents[4]
+    )
+    runtime_mismatches = {
+        key
+        for key, actual in {
+            "root_git_sha": runtime.root_git_sha,
+            "adapter_tree_sha": runtime.adapter_tree_sha,
+        }.items()
+        if payload.get(key) != actual
+    }
+    if runtime.adapter_dirty:
+        runtime_mismatches.add("dirty_adapter_worktree")
+    if runtime_mismatches:
+        raise ValueError(
+            f"Terminal-Bench lock runtime mismatch: {sorted(runtime_mismatches)}"
+        )
     return dict(payload)
 
 
@@ -320,8 +399,13 @@ def build_live_session(
     logs_dir: str | Path,
     session_id: str | None,
     context_id: str | None,
+    runtime_git_identity: RepositoryGitIdentity | None = None,
 ) -> LiveSession:
-    load_and_validate_lock(config.lock_path, config)
+    load_and_validate_lock(
+        config.lock_path,
+        config,
+        runtime_git_identity=runtime_git_identity,
+    )
     artifacts = TrialArtifactStore(
         Path(logs_dir) / "bayesprobe",
         restricted_values=(api_key,),
