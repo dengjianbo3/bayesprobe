@@ -1,0 +1,21 @@
+[project]
+name = "bayesprobe-terminal-bench"
+version = "0.1.0"
+description = "Harbor adapter for evaluating BayesProbe on Terminal-Bench 2.0"
+requires-python = ">=3.12"
+dependencies = [
+  "bayesprobe[openai]",
+  "harbor==0.18.0",
+  "pydantic>=2.7,<3",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<2"]
+
+[tool.uv.sources]
+bayesprobe = { path = "../..", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "scripts"]
+asyncio_mode = "auto"
