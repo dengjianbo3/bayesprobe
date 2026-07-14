@@ -61,6 +61,10 @@ class TavilyProbeToolGateway:
             "search_budget_exhausted": self._search_budget_exhausted,
         }
 
+    @property
+    def search_budget_remaining(self) -> int:
+        return self._max_search_calls - self._search_calls
+
     def execute_probe(
         self,
         *,
