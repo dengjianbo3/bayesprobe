@@ -190,7 +190,7 @@ provides-extras = ["dev", "openai", "hle"]
 [[package]]
 name = "bayesprobe-terminal-bench"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "bayesprobe", extra = ["openai"] },
     { name = "harbor" },

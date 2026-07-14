@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,10 @@ from uuid import UUID
 import pytest
 from harbor.models.agent.context import AgentContext
 
-from bayesprobe_terminal_bench.agent import BayesProbeHarborAgent
+from bayesprobe_terminal_bench.agent import (
+    BayesProbeHarborAgent,
+    BayesProbeHarborAgentError,
+)
 
 
 _API_KEY = "one-time-agent-secret"
@@ -25,6 +29,7 @@ _BAYESPROBE_METADATA = {
     "terminal_actions",
     "model_calls",
 }
+WORKTREE_DIR = Path(__file__).resolve().parents[3]
 
 
 class SpyArtifacts:
@@ -49,6 +54,16 @@ class SpyRunner:
         )
 
 
+class HostileFailure(RuntimeError):
+    def __init__(self, secret: str) -> None:
+        super().__init__(f"hostile failure with {secret}")
+        self.secret = secret
+        self.payload = {"api_key": secret}
+
+    def __repr__(self) -> str:
+        return f"HostileFailure(secret={self.secret!r})"
+
+
 def _session(*, runner: object, artifacts: SpyArtifacts) -> object:
     return SimpleNamespace(
         runner=runner,
@@ -64,6 +79,60 @@ def _agent(tmp_path: Path) -> BayesProbeHarborAgent:
         model_name="deepseek-v4-flash",
         extra_env=_EXTRA_ENV,
     )
+
+
+def _raise_hostile_failure() -> None:
+    try:
+        raise RuntimeError(f"hostile cause with {_API_KEY}")
+    except RuntimeError as cause:
+        failure = HostileFailure(_API_KEY)
+        failure.linked_exception = cause
+        raise failure from cause
+
+
+def _assert_stable_failure(
+    failure: BayesProbeHarborAgentError,
+    expected_message: str,
+) -> None:
+    assert type(failure) is BayesProbeHarborAgentError
+    assert str(failure) == expected_message
+    assert failure.__cause__ is None
+    assert failure.__context__ is None
+    for value in (
+        repr(failure),
+        repr(vars(failure)),
+        repr(failure.__cause__),
+        repr(failure.__context__),
+    ):
+        assert _API_KEY not in value
+
+
+def test_exact_uv_project_command_imports_the_agent() -> None:
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--project",
+            "benchmarks/terminal_bench",
+            "python",
+            "-c",
+            (
+                "from bayesprobe_terminal_bench.agent import BayesProbeHarborAgent; "
+                "print(BayesProbeHarborAgent.import_path())"
+            ),
+        ],
+        capture_output=True,
+        check=False,
+        cwd=WORKTREE_DIR,
+        env=environment,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "bayesprobe_terminal_bench.agent:BayesProbeHarborAgent"
 
 
 @pytest.mark.asyncio
@@ -182,7 +251,7 @@ async def test_agent_propagates_runner_failure_without_writing_or_leaking_secret
 ) -> None:
     class FailingRunner:
         def run_question(self, input: object) -> object:
-            raise RuntimeError(f"provider rejected {_API_KEY}")
+            _raise_hostile_failure()
 
     artifacts = SpyArtifacts()
     monkeypatch.setattr(
@@ -191,16 +260,16 @@ async def test_agent_propagates_runner_failure_without_writing_or_leaking_secret
     )
     context = AgentContext(metadata={"harbor_owned": "preserved"})
 
-    with pytest.raises(RuntimeError, match="provider rejected") as failure:
+    with pytest.raises(BayesProbeHarborAgentError) as failure:
         await _agent(tmp_path).run("solve the task", object(), context)
 
-    assert _API_KEY not in str(failure.value)
+    _assert_stable_failure(failure.value, "BayesProbe Harbor agent execution failed")
     assert context.metadata == {"harbor_owned": "preserved"}
     assert artifacts.summaries == []
 
 
 @pytest.mark.asyncio
-async def test_agent_propagates_config_error_without_starting_a_session(
+async def test_agent_raises_stable_error_for_hostile_config_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -215,13 +284,39 @@ async def test_agent_propagates_config_error_without_starting_a_session(
         "bayesprobe_terminal_bench.agent.build_live_session",
         build_session,
     )
-    agent = BayesProbeHarborAgent(logs_dir=tmp_path, extra_env={})
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.agent.TerminalBenchConfig",
+        SimpleNamespace(from_sources=lambda extra_env: _raise_hostile_failure()),
+    )
+    agent = _agent(tmp_path)
     context = AgentContext(metadata={"harbor_owned": "preserved"})
 
-    with pytest.raises(ValueError, match="BAYESPROBE_BENCH_MODEL is required"):
+    with pytest.raises(BayesProbeHarborAgentError) as failure:
         await agent.run("solve the task", object(), context)
 
+    _assert_stable_failure(failure.value, "BayesProbe Harbor agent configuration failed")
     assert not started
+    assert context.metadata == {"harbor_owned": "preserved"}
+
+
+@pytest.mark.asyncio
+async def test_agent_raises_stable_error_for_hostile_session_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def build_session(**kwargs: object) -> object:
+        _raise_hostile_failure()
+
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.agent.build_live_session",
+        build_session,
+    )
+    context = AgentContext(metadata={"harbor_owned": "preserved"})
+
+    with pytest.raises(BayesProbeHarborAgentError) as failure:
+        await _agent(tmp_path).run("solve the task", object(), context)
+
+    _assert_stable_failure(failure.value, "BayesProbe Harbor agent execution failed")
     assert context.metadata == {"harbor_owned": "preserved"}
 
 
