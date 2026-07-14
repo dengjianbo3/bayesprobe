@@ -68,6 +68,16 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=FakeCompletions(responses))
 
 
+class RetryControlledClient:
+    def __init__(self, responses: list[object]) -> None:
+        self.with_options_calls: list[dict[str, object]] = []
+        self.derived_client = FakeClient(responses)
+
+    def with_options(self, **kwargs: object) -> FakeClient:
+        self.with_options_calls.append(kwargs)
+        return self.derived_client
+
+
 class ExplodingContentResponse:
     @property
     def choices(self) -> object:
@@ -387,6 +397,71 @@ def test_terminal_plan_input_preserves_benign_security_related_identifiers(probe
     }
 
 
+def test_terminal_plan_input_redacts_relative_and_absolute_evaluator_paths(probe) -> None:
+    protected_paths = (
+        "solution/answer.txt",
+        "./solution/answer.txt",
+        "../solution/answer.txt",
+        "//solution//answer.txt",
+        "tests/hidden.py",
+        "./tests/hidden.py",
+        "../../tests/hidden.py",
+        "logs/verifier/reward.txt",
+        "./logs/verifier/reward.txt",
+        "../logs/verifier/reward.txt",
+        "//logs//verifier//reward.txt",
+        "/var/run/docker.sock",
+        "//run//docker.sock",
+        "./docker.sock",
+        "../docker.sock",
+        "var/run/docker.sock",
+    )
+    context = SimpleNamespace(
+        problem="The solution is ordinary prose; tests are ordinary prose too.",
+        task_context="The docker socket phrase is ordinary documentation.",
+        task_frame={"paths": list(protected_paths)},
+        hypotheses=(
+            SimpleNamespace(
+                id="H_workspace",
+                statement="The workspace needs inspection.",
+                scope="workspace",
+                predictions=("A file reveals the issue.",),
+                falsifiers=("The workspace is empty.",),
+            ),
+        ),
+    )
+
+    payload = terminal_plan_input(probe=probe, context=context, history=())
+    serialized = json.dumps(payload, sort_keys=True)
+
+    assert all(path not in serialized for path in protected_paths)
+    assert payload["task"]["task_frame"]["paths"] == ["[REDACTED]"] * len(protected_paths)
+    assert "The solution is ordinary prose" in serialized
+    assert "tests are ordinary prose too" in serialized
+    assert "docker socket phrase is ordinary documentation" in serialized
+
+
+def test_history_output_is_byte_capped_after_redaction_expands_it(probe, execution_context) -> None:
+    history = (
+        ActionObservation(
+            action_index=1,
+            action=ShellAction(command="pwd"),
+            duration_ms=0,
+            pre_environment_state_id="env:0",
+            post_environment_state_id="env:0",
+            full_output_sha256="e" * 64,
+            model_facing_output="a" * 4_089 + " tests/",
+        ),
+    )
+
+    output = terminal_plan_input(probe=probe, context=execution_context, history=history)[
+        "recent_observations"
+    ][0]["observation"]
+
+    assert "tests/" not in output
+    assert len(output.encode("utf-8")) <= 4_096
+
+
 def test_history_output_truncation_is_utf8_byte_bounded(probe, execution_context) -> None:
     history = (
         ActionObservation(
@@ -459,6 +534,26 @@ def test_telemetry_redacts_secret_like_provider_error_class_names(probe, executi
     serialized = json.dumps(telemetry)
     assert "sk-abcdefghijklmno123456789" not in serialized
     assert "[REDACTED]" in serialized
+
+
+def test_injected_sdk_client_is_derived_with_no_retries_and_used_once(probe, execution_context) -> None:
+    telemetry: list[dict[str, object]] = []
+    budget = RunBudget(max_actions=24, max_model_calls=2)
+    client = RetryControlledClient([VALID_PLAN])
+    planner = OpenAICompatibleTerminalProbePlanner(
+        config=TerminalBenchConfig(model="test-model"),
+        budget=budget,
+        client=client,
+        invocation_observer=telemetry.append,
+    )
+
+    plan = planner.plan(probe=probe, context=execution_context, history=())
+
+    assert plan.actions[0].command == "pwd"
+    assert client.with_options_calls == [{"max_retries": 0}]
+    assert len(client.derived_client.chat.completions.calls) == 1
+    assert budget.model_calls_used == 1
+    assert len(telemetry) == 1
 
 
 def test_exploding_response_accessors_use_one_repair_and_emit_one_record_per_return(

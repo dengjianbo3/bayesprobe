@@ -107,8 +107,14 @@ _EPISTEMIC_FIELD_WORDS = {
 _BENIGN_EPISTEMIC_FIELD_SEQUENCES = {("credential", "score"), ("credentials", "score")}
 _EVALUATOR_PATH_SUFFIXES = {"path", "dir", "directory", "file", "files", "root"}
 _EVALUATOR_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_])/{1,}(?:logs/verifier|solution|tests)(?:/[^\s'\"<>]*)?",
-    re.IGNORECASE,
+    r"""(?ix)
+    (?<![A-Za-z0-9_])
+    (?:
+        /+(?:logs/+verifier|solution|tests)(?:/+[^\s'\"<>]*)?
+        |(?:(?:\./|\.\./))*(?:logs/+verifier|solution|tests)/+[^\s'\"<>]*
+        |(?:/+|(?:(?:\./|\.\./)*))?(?:[^\s/'\"<>]+/+)*docker\.sock\b
+    )
+    """,
 )
 _ASSIGNMENT_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_-]*)\s*(?:=|:)\s*"
@@ -167,7 +173,13 @@ def terminal_plan_input(
             for item in history[-12:]
         ],
     }
-    return _sanitize_outbound(payload)
+    sanitized = _sanitize_outbound(payload)
+    for observation in sanitized["recent_observations"]:
+        observation["observation"] = _bounded_text(
+            observation["observation"],
+            _HISTORY_MODEL_FACING_OUTPUT_LIMIT,
+        )
+    return sanitized
 
 
 class OpenAICompatibleTerminalProbePlanner:
@@ -192,6 +204,8 @@ class OpenAICompatibleTerminalProbePlanner:
                 timeout=config.provider_timeout_seconds,
                 max_retries=0,
             )
+        else:
+            client = _single_attempt_client(client)
         self._client = client
 
     def plan(
@@ -363,7 +377,30 @@ def _bounded_text(value: str, limit: int) -> str:
     encoded = value.encode("utf-8")
     if len(encoded) <= limit:
         return value
-    return encoded[:limit].decode("utf-8", errors="ignore")
+    pieces: list[str] = []
+    used = 0
+    index = 0
+    while index < len(value):
+        piece = (
+            _REDACTION_MARKER
+            if value.startswith(_REDACTION_MARKER, index)
+            else value[index]
+        )
+        piece_size = len(piece.encode("utf-8"))
+        if used + piece_size > limit:
+            break
+        pieces.append(piece)
+        used += piece_size
+        index += len(piece)
+    return "".join(pieces)
+
+
+def _single_attempt_client(client: Any) -> Any:
+    """Disable SDK retries; clients without controls are single-attempt transports."""
+    with_options = getattr(client, "with_options", None)
+    if not callable(with_options):
+        return client
+    return with_options(max_retries=0)
 
 
 def _sanitize_outbound(value: Any) -> Any:
