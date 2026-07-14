@@ -85,6 +85,26 @@ def test_capability_config_rejects_changes_to_frozen_v01_policy():
         capability_config_from_mapping(payload)
 
 
+def test_capability_config_accepts_explicit_positive_execution_concurrency():
+    payload = minimal_mapping()
+    payload["concurrency"] = {"direct": 1, "bayesprobe": 1, "docker": 2}
+
+    config = capability_config_from_mapping(payload)
+
+    assert config.direct_concurrency == 1
+    assert config.bayesprobe_concurrency == 1
+    assert config.docker_concurrency == 2
+
+
+@pytest.mark.parametrize("value", [True, 0, -1])
+def test_capability_config_rejects_invalid_execution_concurrency(value):
+    payload = minimal_mapping()
+    payload["concurrency"] = {"direct": value}
+
+    with pytest.raises(ValueError, match="concurrency direct must be a positive integer"):
+        capability_config_from_mapping(payload)
+
+
 def test_capability_config_hash_is_stable_for_mapping_key_order():
     first = capability_config_from_mapping(minimal_mapping())
     reversed_payload = dict(reversed(list(minimal_mapping().items())))

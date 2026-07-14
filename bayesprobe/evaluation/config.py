@@ -206,11 +206,19 @@ def capability_config_from_mapping(
     if autonomy != expected_autonomy:
         raise ValueError("capability config must use the frozen v0.1 autonomy policy")
 
-    concurrency = dict(payload.get("concurrency", {}))
+    supplied_concurrency = payload.get("concurrency", {})
+    if not isinstance(supplied_concurrency, Mapping):
+        raise ValueError("capability config concurrency must be an object")
     expected_concurrency = {"direct": 8, "bayesprobe": 4, "docker": 4}
-    concurrency = {**expected_concurrency, **concurrency}
-    if concurrency != expected_concurrency:
-        raise ValueError("capability config must use the frozen v0.1 concurrency policy")
+    unknown_concurrency = set(supplied_concurrency).difference(expected_concurrency)
+    if unknown_concurrency:
+        raise ValueError("capability config concurrency contains unknown keys")
+    concurrency = {**expected_concurrency, **dict(supplied_concurrency)}
+    for name, value in concurrency.items():
+        if type(value) is not int or value < 1:
+            raise ValueError(
+                f"capability config concurrency {name} must be a positive integer"
+            )
 
     python_payload = _required_mapping(payload, "python")
     python_sandbox = DockerPythonSandboxConfig(
