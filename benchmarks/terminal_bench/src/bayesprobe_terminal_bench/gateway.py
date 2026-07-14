@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from threading import Lock
 from typing import Any
 
 from bayesprobe import ExternalSignal, ProbeDesign, ProbeExecutionBrief
@@ -19,7 +20,8 @@ class HarborProbeToolGateway:
         self._bridge = bridge
         self._artifacts = artifacts
         self._budget = budget
-        self._history: list[ActionObservation] = []
+        self._histories: dict[str, list[ActionObservation]] = {}
+        self._execute_lock = Lock()
 
     def execute_probe(
         self,
@@ -27,11 +29,23 @@ class HarborProbeToolGateway:
         probe: ProbeDesign,
         context: ProbeExecutionBrief,
     ) -> list[ExternalSignal]:
+        # Serialize planning through artifact/history updates so a later probe
+        # cannot observe a stale same-run history or overtake an earlier plan.
+        with self._execute_lock:
+            return self._execute_probe(probe=probe, context=context)
+
+    def _execute_probe(
+        self,
+        *,
+        probe: ProbeDesign,
+        context: ProbeExecutionBrief,
+    ) -> list[ExternalSignal]:
+        history = self._histories.setdefault(context.run_id, [])
         try:
             plan = self._planner.plan(
                 probe=probe,
                 context=context,
-                history=tuple(self._history[-12:]),
+                history=tuple(history[-12:]),
             )
         except BudgetExhausted:
             self._artifacts.append_error(
@@ -77,7 +91,7 @@ class HarborProbeToolGateway:
                 )
                 continue
 
-            self._history.append(observation)
+            history.append(observation)
             self._artifacts.append_observation(observation)
             signals.append(
                 signal_from_observation(

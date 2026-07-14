@@ -69,11 +69,9 @@ def signal_from_observation(
 
 def _observation_payload(observation: ActionObservation) -> dict[str, Any]:
     return {
-        "action": observation.action.model_dump(mode="json"),
         "action_index": observation.action_index,
-        "duration_ms": observation.duration_ms,
+        "action_type": observation.action.type,
         "error_category": observation.error_category,
-        "full_output_sha256": observation.full_output_sha256,
         "model_facing_output": observation.model_facing_output,
         "output_truncated": observation.output_truncated,
         "post_environment_state_id": observation.post_environment_state_id,

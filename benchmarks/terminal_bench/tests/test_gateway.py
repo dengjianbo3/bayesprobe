@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from threading import Event, Lock, Thread
+from types import SimpleNamespace
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
@@ -12,9 +14,11 @@ import pytest
 from bayesprobe import EpistemicOrigin, ProbeToolGateway, SignalKind
 from bayesprobe_terminal_bench.actions import (
     ActionObservation,
+    ApplyPatchAction,
     ShellAction,
     TerminalAction,
     TerminalProbePlan,
+    WriteFileAction,
 )
 from bayesprobe_terminal_bench.config import BudgetExhausted, RunBudget
 from bayesprobe_terminal_bench.environment import PolicyViolation
@@ -84,11 +88,45 @@ class CountingBudget:
         return outcome
 
 
+class BlockingPlanner:
+    def __init__(self, *, release_first_plan: Event) -> None:
+        self._release_first_plan = release_first_plan
+        self._lock = Lock()
+        self.first_plan_started = Event()
+        self.later_plan_started = Event()
+        self.histories: list[tuple[ActionObservation, ...]] = []
+
+    def plan(
+        self,
+        *,
+        probe: object,
+        context: object,
+        history: tuple[ActionObservation, ...],
+    ) -> TerminalProbePlan:
+        with self._lock:
+            invocation_index = len(self.histories)
+            self.histories.append(history)
+        if invocation_index == 0:
+            self.first_plan_started.set()
+            assert self._release_first_plan.wait(timeout=2)
+        else:
+            self.later_plan_started.set()
+        return _plan("pwd")
+
+
 def _plan(*commands: str) -> TerminalProbePlan:
     return TerminalProbePlan(
         mode="inspect",
         actions=tuple(ShellAction(command=command) for command in commands),
         expected_observation="The task workspace state is observed.",
+    )
+
+
+def _intervention_plan(action: TerminalAction) -> TerminalProbePlan:
+    return TerminalProbePlan(
+        mode="intervene",
+        actions=(action,),
+        expected_observation="The requested workspace mutation is observed.",
     )
 
 
@@ -142,6 +180,10 @@ def _gateway(
     )
 
 
+def _large_action_text(marker: str) -> str:
+    return marker + "x" * (1_000_000 - len(marker))
+
+
 def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, execution_context) -> None:
     observation = _observation(
         action=ShellAction(command="pwd"),
@@ -163,11 +205,9 @@ def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, exe
     assert signal.provenance is not None
     assert signal.provenance.epistemic_origin is EpistemicOrigin.TOOL_RESULT
     assert payload == {
-        "action": observation.action.model_dump(mode="json"),
         "action_index": 4,
-        "duration_ms": 17,
+        "action_type": "shell",
         "error_category": None,
-        "full_output_sha256": "b" * 64,
         "model_facing_output": '{"stdout":"only this capped view"}',
         "output_truncated": True,
         "post_environment_state_id": "env:8",
@@ -177,6 +217,7 @@ def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, exe
     }
     assert "full stdout" not in signal.raw_content
     assert "full stderr" not in signal.raw_content
+    assert "pwd" not in signal.raw_content
     assert signal.provenance.canonical_content_fingerprint == _canonical_fingerprint(
         signal.provenance.source_identity,
         signal.raw_content,
@@ -185,6 +226,59 @@ def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, exe
     assert signal.provenance.correlation_group.startswith("harbor-env:sha256:")
     assert signal.provenance.environment_state_id == "env:8"
     assert signal.provenance.artifact_refs == ["environment_actions.jsonl#4"]
+
+
+@pytest.mark.parametrize(
+    ("action", "marker", "path"),
+    [
+        (
+            WriteFileAction(
+                path="/workspace/model-authored-write.txt",
+                content=_large_action_text("WRITE_ACTION_BODY_MUST_NOT_LEAK"),
+            ),
+            "WRITE_ACTION_BODY_MUST_NOT_LEAK",
+            "/workspace/model-authored-write.txt",
+        ),
+        (
+            ApplyPatchAction(
+                patch=_large_action_text("PATCH_ACTION_BODY_MUST_NOT_LEAK"),
+            ),
+            "PATCH_ACTION_BODY_MUST_NOT_LEAK",
+            None,
+        ),
+    ],
+)
+def test_gateway_keeps_large_write_and_patch_inputs_out_of_signal_payloads(
+    probe,
+    execution_context,
+    action: TerminalAction,
+    marker: str,
+    path: str | None,
+) -> None:
+    observation = _observation(
+        action=action,
+        model_facing_output='{"stdout":"mutation completed"}',
+        full_output_sha256="c" * 64,
+    )
+    artifacts = _artifacts()
+    gateway = _gateway(
+        planner=ScriptedPlanner(plan=_intervention_plan(action)),
+        bridge=ScriptedBridge([observation]),
+        artifacts=artifacts,
+        budget=RunBudget(max_actions=1),
+    )
+
+    signals = gateway.execute_probe(probe=probe, context=execution_context)
+    payload = json.loads(signals[0].raw_content)
+
+    assert payload["action_type"] == action.type
+    assert "action" not in payload
+    assert marker not in signals[0].raw_content
+    if path is not None:
+        assert path not in signals[0].raw_content
+    assert len(signals[0].raw_content) < 1_024
+    assert artifacts.observations == [observation]
+    assert marker in json.dumps(artifacts.observations[0].model_dump(mode="json"))
 
 
 def test_signal_identity_and_roots_are_deterministic_and_distinct_across_lineages(probe, execution_context) -> None:
@@ -401,6 +495,92 @@ def test_gateway_preserves_only_actual_observations_in_later_planner_history(pro
 
     assert planner.histories == [(), (artifacts.observations[0],)]
     assert [item.action_index for item in artifacts.observations] == [2, 3, 4]
+
+
+def test_gateway_scopes_history_to_each_run_id(probe, execution_context) -> None:
+    artifacts = _artifacts()
+    planner = ScriptedPlanner(plan=_plan("pwd"))
+    first_run_observation = _observation(action_index=1)
+    second_run_observation = _observation(action_index=2)
+    gateway = _gateway(
+        planner=planner,
+        bridge=ScriptedBridge(
+            [
+                first_run_observation,
+                second_run_observation,
+                _observation(action_index=3),
+            ]
+        ),
+        artifacts=artifacts,
+        budget=CountingBudget(outcomes=[1, 2, 3]),
+    )
+    other_run_context = SimpleNamespace(
+        run_id="run_2",
+        cycle_id=execution_context.cycle_id,
+    )
+
+    gateway.execute_probe(probe=probe, context=execution_context)
+    gateway.execute_probe(probe=probe, context=other_run_context)
+    gateway.execute_probe(probe=probe, context=execution_context)
+
+    assert planner.histories == [(), (), (first_run_observation,)]
+
+
+@pytest.mark.parametrize("same_run", [True, False])
+def test_gateway_serializes_concurrent_probe_execution(
+    probe,
+    execution_context,
+    same_run: bool,
+) -> None:
+    release_first_plan = Event()
+    planner = BlockingPlanner(release_first_plan=release_first_plan)
+    artifacts = _artifacts()
+    first_observation = _observation(action_index=1)
+    gateway = _gateway(
+        planner=planner,
+        bridge=ScriptedBridge([first_observation, _observation(action_index=2)]),
+        artifacts=artifacts,
+        budget=RunBudget(max_actions=2),
+    )
+    second_context = (
+        execution_context
+        if same_run
+        else SimpleNamespace(
+            run_id="run_2",
+            cycle_id=execution_context.cycle_id,
+        )
+    )
+    errors: list[BaseException] = []
+    second_attempted = Event()
+
+    def execute(context: object, *, is_second: bool) -> None:
+        if is_second:
+            second_attempted.set()
+        try:
+            gateway.execute_probe(probe=probe, context=context)
+        except BaseException as error:
+            errors.append(error)
+
+    first_thread = Thread(target=execute, args=(execution_context,), kwargs={"is_second": False})
+    second_thread = Thread(target=execute, args=(second_context,), kwargs={"is_second": True})
+    first_thread.start()
+    assert planner.first_plan_started.wait(timeout=1)
+    second_thread.start()
+    assert second_attempted.wait(timeout=1)
+    try:
+        assert not planner.later_plan_started.wait(timeout=0.2)
+    finally:
+        release_first_plan.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert errors == []
+    if same_run:
+        assert planner.histories == [(), (first_observation,)]
+    else:
+        assert planner.histories == [(), ()]
 
 
 def test_gateway_propagates_unexpected_programmer_errors(probe, execution_context) -> None:
