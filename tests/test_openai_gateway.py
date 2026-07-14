@@ -184,6 +184,23 @@ def make_multiple_choice_request(
     )
 
 
+def make_web_search_plan_request() -> StructuredModelRequest:
+    return StructuredModelRequest(
+        task="plan_web_search",
+        input={
+            "problem": "Which answer choice is correct?",
+            "choices": {"A": "First", "B": "Second"},
+            "inquiry_goal": "Find an authoritative source that discriminates A and B.",
+            "prior_search_packets": [],
+            "remaining_search_calls": 2,
+        },
+        prompt_id="web_search_query",
+        prompt_version="v0.1",
+        schema_name="WebSearchQuery",
+        schema_version="v0.1",
+    )
+
+
 def make_answer_projection_request(
     *, task: str = "project_answer"
 ) -> StructuredModelRequest:
@@ -919,6 +936,57 @@ def test_build_openai_request_payload_for_execute_probe():
     user_payload = json.loads(payload["input"][1]["content"])
     assert user_payload["task"] == "execute_probe"
     assert user_payload["input"]["problem"] == "Which answer choice is correct?"
+
+
+def test_build_openai_request_payload_for_plan_web_search():
+    payload = build_openai_request_payload(
+        make_web_search_plan_request(),
+        model="gpt-5.5",
+    )
+
+    assert payload["text"]["format"]["name"] == "WebSearchQuery"
+    assert payload["text"]["format"]["schema"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["query"],
+        "properties": {"query": {"type": "string"}},
+    }
+    assert "search query planner" in payload["input"][0]["content"]
+
+
+def test_search_aware_answer_uses_multiple_choice_schema_and_instruction():
+    request = StructuredModelRequest(
+        task="answer_multiple_choice_with_search",
+        input={
+            **make_multiple_choice_request().input,
+            "search_packets": [
+                {
+                    "query": "relevant query",
+                    "results": [
+                        {
+                            "url": "https://source.test/a",
+                            "title": "Source",
+                            "content": "Relevant material.",
+                        }
+                    ],
+                }
+            ],
+        },
+        prompt_id="direct_multiple_choice_with_search",
+        prompt_version="v0.1",
+        schema_name="MultipleChoiceAnswer",
+        schema_version="v0.1",
+    )
+
+    payload = build_openai_chat_completions_payload(
+        request,
+        model="provider-model",
+    )
+
+    assert payload["response_format"] == {"type": "json_object"}
+    assert "supplied search packets" in payload["messages"][0]["content"]
+    required_output = json.loads(payload["messages"][1]["content"])["required_output"]
+    assert required_output["type"] == "MultipleChoiceAnswer"
 
 
 def test_build_openai_request_payload_for_repair_evidence_judgment():
