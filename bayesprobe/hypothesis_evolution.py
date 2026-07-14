@@ -16,6 +16,7 @@ from bayesprobe.schemas import (
     HypothesisStatus,
     ProbeCandidate,
     ProbeDesign,
+    TaskKind,
     UpdateDirection,
 )
 
@@ -83,9 +84,12 @@ class HypothesisEvolutionEngine:
         hypotheses = list(updated_hypotheses)
         evolutions: list[HypothesisEvolution] = []
         probe_candidates: list[ProbeCandidate] = []
+        fixed_answer_space = (
+            previous_belief_state.task_frame.task_kind == TaskKind.MULTIPLE_CHOICE
+        )
 
         for event in evidence_events:
-            if event.evidence_type == EvidenceType.ANOMALY:
+            if event.evidence_type == EvidenceType.ANOMALY and not fixed_answer_space:
                 spawn = self._spawn_from_anomaly(
                     cycle=cycle,
                     previous_belief_state=previous_belief_state,

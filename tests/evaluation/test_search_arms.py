@@ -69,6 +69,25 @@ class BayesProbeSearchGateway:
         raise AssertionError(f"unexpected task: {request.task}")
 
 
+class AnomalousBayesProbeSearchGateway(BayesProbeSearchGateway):
+    def complete_structured(self, request):
+        if request.task != "judge_evidence":
+            return super().complete_structured(request)
+        self.requests.append(request)
+        targets = request.input["target_hypotheses"]
+        return {
+            "evidence_type": "anomaly",
+            "likelihoods": {
+                target: "moderately_disconfirming" for target in targets
+            },
+            "unresolved_likelihood": None,
+            "frame_fit": "explained_by_named",
+            "unexplained_observation": "The source does not fit any answer choice.",
+            "interpretation": "The retrieved source is anomalous for the choices.",
+            "quality_overrides": {},
+        }
+
+
 def _case() -> EvaluationCase:
     return EvaluationCase(
         sample_id="search_synthetic_1",
@@ -139,3 +158,27 @@ def test_all_operational_search_failures_are_treatment_not_delivered():
 
     assert result.state == "terminal_failed"
     assert result.error_category == "search_treatment_not_delivered"
+
+
+def test_multiple_choice_search_anomaly_cannot_spawn_an_out_of_contract_answer():
+    runs = []
+    result = BayesProbeSearchArm(
+        AnomalousBayesProbeSearchGateway(),
+        SearchClient(
+            [
+                _response("https://source.test/anomaly-one"),
+                _response("https://source.test/anomaly-two"),
+            ]
+        ),
+        run_result_observer=runs.append,
+    ).run_case(_case())
+
+    assert result.state == "completed"
+    assert set(runs[0].final_belief_state.hypotheses_by_id()) == set(
+        _case().choice_labels
+    )
+    assert all(
+        evolution.operation.value != "spawn"
+        for cycle in runs[0].cycle_results
+        for evolution in cycle.hypothesis_evolutions
+    )
