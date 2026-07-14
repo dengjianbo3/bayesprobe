@@ -441,6 +441,41 @@ def test_terminal_plan_input_redacts_relative_and_absolute_evaluator_paths(probe
     assert "docker socket phrase is ordinary documentation" in serialized
 
 
+def test_terminal_plan_input_redacts_evaluator_directories_and_windows_paths(probe) -> None:
+    protected_paths = (
+        "solution",
+        "./solution",
+        "../solution",
+        "//solution",
+        "tests",
+        "./tests",
+        "../tests",
+        "//tests",
+        "logs/verifier",
+        "./logs/verifier",
+        "../logs/verifier",
+        "//logs//verifier",
+        r"\solution\answer.txt",
+        r".\solution",
+        r"..\tests",
+        r"logs\verifier",
+    )
+    context = SimpleNamespace(
+        problem="The solution is ordinary prose; tests are ordinary prose too.",
+        task_context="The logs verifier words are ordinary documentation.",
+        task_frame={"paths": list(protected_paths)},
+        hypotheses=(),
+    )
+
+    payload = terminal_plan_input(probe=probe, context=context, history=())
+    serialized = json.dumps(payload, sort_keys=True)
+
+    assert payload["task"]["task_frame"]["paths"] == ["[REDACTED]"] * len(protected_paths)
+    assert "The solution is ordinary prose" in serialized
+    assert "tests are ordinary prose too" in serialized
+    assert "logs verifier words are ordinary documentation" in serialized
+
+
 def test_history_output_is_byte_capped_after_redaction_expands_it(probe, execution_context) -> None:
     history = (
         ActionObservation(

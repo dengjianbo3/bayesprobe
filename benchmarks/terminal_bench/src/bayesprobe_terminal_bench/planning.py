@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 import time
 import unicodedata
@@ -106,13 +107,23 @@ _EPISTEMIC_FIELD_WORDS = {
 }
 _BENIGN_EPISTEMIC_FIELD_SEQUENCES = {("credential", "score"), ("credentials", "score")}
 _EVALUATOR_PATH_SUFFIXES = {"path", "dir", "directory", "file", "files", "root"}
+_PROTECTED_ABSOLUTE_EVALUATOR_PATHS = (
+    "/logs/verifier",
+    "/solution",
+    "/tests",
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+)
+_PROTECTED_RELATIVE_EVALUATOR_PATHS = ("logs/verifier", "solution", "tests")
 _EVALUATOR_PATH_PATTERN = re.compile(
     r"""(?ix)
     (?<![A-Za-z0-9_])
     (?:
-        /+(?:logs/+verifier|solution|tests)(?:/+[^\s'\"<>]*)?
-        |(?:(?:\./|\.\./))*(?:logs/+verifier|solution|tests)/+[^\s'\"<>]*
-        |(?:/+|(?:(?:\./|\.\./)*))?(?:[^\s/'\"<>]+/+)*docker\.sock\b
+        [/\\]+(?:logs[/\\]+verifier|solution|tests)(?:[/\\]+[^\s'\"<>]*)?
+        |(?:(?:\.[/\\]+|\.\.[/\\]+))+(?:logs[/\\]+verifier|solution|tests)(?:[/\\]+[^\s'\"<>]*)?
+        |logs[/\\]+verifier(?:[/\\]+[^\s'\"<>]*)?
+        |(?:solution|tests)[/\\]+[^\s'\"<>]*
+        |(?:[/\\]+|(?:(?:\.[/\\]+|\.\.[/\\]+)*))?(?:[^\s/'\"<>\\]+[/\\]+)*docker\.sock\b
     )
     """,
 )
@@ -491,7 +502,29 @@ def _redact_sensitive_text(value: str) -> str:
     for pattern in _SECRET_VALUE_PATTERNS:
         text = pattern.sub(_REDACTION_MARKER, text)
     text = _ASSIGNMENT_PATTERN.sub(_redact_sensitive_assignment, text)
+    if _is_protected_evaluator_path(text):
+        return _REDACTION_MARKER
     return _EVALUATOR_PATH_PATTERN.sub(_REDACTION_MARKER, text)
+
+
+def _is_protected_evaluator_path(value: str) -> bool:
+    normalized = posixpath.normpath(re.sub(r"[/\\]+", "/", value))
+    if normalized in (".", ""):
+        return False
+    if normalized == "docker.sock" or normalized.endswith("/docker.sock"):
+        return True
+    if normalized.startswith("/"):
+        return any(
+            normalized == path or normalized.startswith(f"{path}/")
+            for path in _PROTECTED_ABSOLUTE_EVALUATOR_PATHS
+        )
+    relative = normalized
+    while relative == ".." or relative.startswith("../"):
+        relative = relative[3:] if relative.startswith("../") else ""
+    return any(
+        relative == path or relative.startswith(f"{path}/")
+        for path in _PROTECTED_RELATIVE_EVALUATOR_PATHS
+    )
 
 
 def _redact_sensitive_assignment(match: re.Match[str]) -> str:
