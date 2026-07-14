@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
 from bayesprobe import ProbeDesign, ProbeExecutionBrief, ProbeExecutionHypothesisView
+from harbor.models.job.config import DatasetConfig, JobConfig, RetryConfig
+from harbor.models.job.lock import HarborLockInfo, JobLock, TaskLock, TrialLock
+from harbor.models.task.id import PackageTaskId
+from harbor.models.trial.config import (
+    AgentConfig,
+    EnvironmentConfig,
+    TaskConfig,
+    TrialConfig,
+    VerifierConfig,
+)
+from harbor.models.trial.result import (
+    AgentInfo,
+    ExceptionInfo,
+    TrialResult,
+    VerifierResult,
+)
 
 
 FIXED_DATASET = "terminal-bench/terminal-bench-2"
@@ -15,6 +33,116 @@ FIXED_TASK_CHECKSUM = "sha256:" + "2" * 64
 FIXED_CONTAINER_IMAGE = (
     "ghcr.io/laude-institute/break-filter-js-from-html@sha256:" + "3" * 64
 )
+FIXED_TIME = datetime(2026, 7, 14, tzinfo=timezone.utc)
+
+
+def write_harbor_job_artifacts(
+    job_dir: Path,
+    trial_dir: Path,
+    *,
+    agent_name: str,
+    reward: float | None,
+    exception_type: str | None = None,
+    exception_message: str | None = None,
+) -> None:
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    agent = AgentConfig(name=agent_name)
+    environment = EnvironmentConfig(type="docker", delete=True)
+    verifier = VerifierConfig()
+    task = TaskConfig(
+        name=FIXED_TASK,
+        ref=FIXED_TASK_CHECKSUM,
+        source=FIXED_DATASET,
+    )
+    trial_config = TrialConfig(
+        task=task,
+        trial_name=trial_dir.name,
+        trials_dir=job_dir,
+        agent=agent,
+        environment=environment,
+        verifier=verifier,
+    )
+    trial_lock = TrialLock(
+        task=TaskLock(
+            name=FIXED_TASK,
+            type="package",
+            digest=FIXED_TASK_CHECKSUM,
+            source=FIXED_DATASET,
+        ),
+        agent=agent,
+        environment=environment,
+        verifier=verifier,
+    )
+    job_config = JobConfig(
+        job_name="bayesprobe-terminal-bench-smoke",
+        jobs_dir=job_dir.parent,
+        n_attempts=1,
+        n_concurrent_trials=1,
+        agents=[agent],
+        datasets=[
+            DatasetConfig(
+                name=FIXED_DATASET,
+                ref=FIXED_DATASET_REVISION,
+                task_names=[FIXED_TASK],
+            )
+        ],
+        environment=environment,
+        verifier=verifier,
+    )
+    job_lock = JobLock(
+        created_at=FIXED_TIME,
+        harbor=HarborLockInfo(version="0.18.0"),
+        n_concurrent_trials=1,
+        retry=RetryConfig(),
+        trials=[trial_lock],
+    )
+    exception = None
+    if exception_type is not None:
+        exception = ExceptionInfo(
+            exception_type=exception_type,
+            exception_message=exception_message or "trial failed",
+            exception_traceback="synthetic offline traceback",
+            occurred_at=FIXED_TIME,
+        )
+    result = TrialResult(
+        id=UUID("00000000-0000-0000-0000-000000000009"),
+        task_name="break-filter-js-from-html",
+        trial_name=trial_dir.name,
+        trial_uri=trial_dir.resolve().as_uri(),
+        task_id=PackageTaskId(
+            org="terminal-bench",
+            name="break-filter-js-from-html",
+            ref=FIXED_TASK_CHECKSUM,
+        ),
+        source=FIXED_DATASET,
+        task_checksum=FIXED_TASK_CHECKSUM,
+        config=trial_config,
+        agent_info=AgentInfo(name=agent_name, version="0.18.0"),
+        verifier_result=(
+            VerifierResult(rewards={"reward": reward})
+            if reward is not None
+            else None
+        ),
+        exception_info=exception,
+        started_at=FIXED_TIME,
+        finished_at=FIXED_TIME,
+    )
+
+    artifacts = {
+        job_dir / "config.json": job_config.model_dump(
+            mode="json", exclude_none=True
+        ),
+        job_dir / "lock.json": job_lock.model_dump(mode="json", exclude_none=True),
+        trial_dir / "config.json": trial_config.model_dump(
+            mode="json", exclude_none=True
+        ),
+        trial_dir / "lock.json": trial_lock.model_dump(
+            mode="json", exclude_none=True
+        ),
+        trial_dir / "result.json": result.model_dump(mode="json"),
+    }
+    for path, payload in artifacts.items():
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 @pytest.fixture
@@ -82,61 +210,10 @@ def execution_context() -> ProbeExecutionBrief:
 def synthetic_oracle_job(tmp_path: Path) -> Path:
     job_dir = tmp_path / "oracle-job"
     trial_dir = job_dir / "break-filter-js-from-html__oracle"
-    trial_dir.mkdir(parents=True)
-
-    job_config = {
-        "job_name": "bayesprobe-terminal-bench-oracle-smoke",
-        "jobs_dir": ".runs/harbor/oracle",
-        "n_attempts": 1,
-        "n_concurrent_trials": 1,
-        "datasets": [
-            {
-                "name": FIXED_DATASET,
-                "ref": FIXED_DATASET_REVISION,
-                "task_names": [FIXED_TASK],
-            }
-        ],
-        "agents": [{"name": "oracle"}],
-        "environment": {"type": "docker", "delete": True},
-    }
-    trial_config = {
-        "task": {
-            "name": FIXED_TASK,
-            "ref": FIXED_DATASET_REVISION,
-            "source": FIXED_DATASET,
-        },
-        "trial_name": trial_dir.name,
-        "trials_dir": str(job_dir),
-        "agent": {"name": "oracle"},
-        "environment": {"type": "docker", "delete": True},
-        # Harbor's downloaded task environment supplies this value. The
-        # fixture keeps it explicit so lock parsing remains fully offline.
-        "task_environment": {"docker_image": FIXED_CONTAINER_IMAGE},
-    }
-    trial_result = {
-        "task_name": "break-filter-js-from-html",
-        "trial_name": trial_dir.name,
-        "task_id": {
-            "org": "terminal-bench",
-            "name": "break-filter-js-from-html",
-            "ref": FIXED_DATASET_REVISION,
-        },
-        "source": FIXED_DATASET,
-        "task_checksum": FIXED_TASK_CHECKSUM,
-        "config": trial_config,
-        "agent_info": {"name": "oracle", "version": "0.18.0"},
-        "verifier_result": {"rewards": {"reward": 1.0}},
-        "started_at": "2026-07-14T00:00:00Z",
-        "finished_at": "2026-07-14T00:01:00Z",
-    }
-
-    (job_dir / "config.json").write_text(
-        json.dumps(job_config), encoding="utf-8"
-    )
-    (trial_dir / "config.json").write_text(
-        json.dumps(trial_config), encoding="utf-8"
-    )
-    (trial_dir / "result.json").write_text(
-        json.dumps(trial_result), encoding="utf-8"
+    write_harbor_job_artifacts(
+        job_dir,
+        trial_dir,
+        agent_name="oracle",
+        reward=1.0,
     )
     return job_dir

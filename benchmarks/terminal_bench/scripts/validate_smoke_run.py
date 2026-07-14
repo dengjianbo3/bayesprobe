@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
+
+from write_benchmark_lock import (
+    DATASET_NAME,
+    HARBOR_VERSION,
+    LOCK_SCHEMA_VERSION,
+    TASK_ID,
+    TERMINAL_PLAN_VERSION,
+    extract_job_identity,
+)
 
 
 SmokeClassification = Literal[
@@ -15,6 +26,35 @@ SmokeClassification = Literal[
     "conformance_error",
 ]
 _SUCCESS = frozenset({"engineering_pass", "task_failure"})
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_LOCK_FIELDS: dict[str, type] = {
+    "schema_version": str,
+    "harbor_version": str,
+    "dataset_name": str,
+    "dataset_revision": str,
+    "task_id": str,
+    "task_checksum": str,
+    "container_image": str,
+    "image_digest": str,
+    "root_git_sha": str,
+    "adapter_tree_sha": str,
+    "n_attempts": int,
+    "model": str,
+    "provider_protocol": str,
+    "api_key_env": str,
+    "temperature": int,
+    "max_cycles": int,
+    "max_probes_per_cycle": int,
+    "max_actions_per_probe": int,
+    "max_total_actions": int,
+    "max_model_calls": int,
+    "command_timeout_seconds": int,
+    "provider_timeout_seconds": int,
+    "max_output_tokens": int,
+    "signal_output_bytes": int,
+    "terminal_plan_version": str,
+}
 
 
 def classify_smoke_run(
@@ -37,6 +77,8 @@ def classify_smoke_run(
         result = _read_object(result_path)
     except ValueError:
         return "infrastructure_error"
+    if not _result_matches_lock(Path(job_dir), lock):
+        return "conformance_error"
 
     bayesprobe_dir = trial_dir / "agent" / "bayesprobe"
     verifier_completed, reward = _verifier_result(result)
@@ -85,12 +127,59 @@ def _trial_dirs(job_dir: Path) -> list[Path]:
 
 
 def _valid_lock_identity(lock: Mapping[str, Any]) -> bool:
-    task_id = lock.get("task_id")
-    task_checksum = lock.get("task_checksum")
+    if any(
+        key not in lock or type(lock[key]) is not expected_type
+        for key, expected_type in _LOCK_FIELDS.items()
+    ):
+        return False
+    if "base_url" not in lock or (
+        lock["base_url"] is not None
+        and (not isinstance(lock["base_url"], str) or not lock["base_url"].strip())
+    ):
+        return False
+    expected = {
+        "schema_version": LOCK_SCHEMA_VERSION,
+        "harbor_version": HARBOR_VERSION,
+        "dataset_name": DATASET_NAME,
+        "task_id": TASK_ID,
+        "provider_protocol": "openai_chat_completions",
+        "api_key_env": "BAYESPROBE_BENCH_API_KEY",
+        "temperature": 0,
+        "n_attempts": 1,
+        "terminal_plan_version": TERMINAL_PLAN_VERSION,
+    }
+    if any(lock.get(key) != value for key, value in expected.items()):
+        return False
+    if any(
+        not isinstance(lock[key], str) or not lock[key].strip()
+        for key, expected_type in _LOCK_FIELDS.items()
+        if expected_type is str
+    ):
+        return False
+    if any(
+        not _DIGEST.fullmatch(str(lock[key]))
+        for key in ("dataset_revision", "task_checksum", "image_digest")
+    ):
+        return False
+    positive_integer_fields = {
+        key
+        for key, expected_type in _LOCK_FIELDS.items()
+        if expected_type is int
+    } - {"temperature"}
+    return all(int(lock[key]) > 0 for key in positive_integer_fields)
+
+
+def _result_matches_lock(job_dir: Path, lock: Mapping[str, Any]) -> bool:
+    try:
+        identity = extract_job_identity(job_dir, required_reward=None)
+    except ValueError:
+        return False
     return (
-        task_id == "terminal-bench/break-filter-js-from-html"
-        and isinstance(task_checksum, str)
-        and bool(task_checksum.strip())
+        identity.dataset_name == lock.get("dataset_name")
+        and identity.dataset_revision == lock.get("dataset_revision")
+        and identity.task_id == lock.get("task_id")
+        and identity.task_checksum == lock.get("task_checksum")
+        and identity.n_attempts == lock.get("n_attempts")
     )
 
 
@@ -156,6 +245,11 @@ def _complete_trace(bayesprobe_dir: Path) -> bool:
     records = _read_jsonl(bayesprobe_dir / "bayesprobe_ledger.jsonl")
     if not actions or not records:
         return False
+    actions_by_index = _actions_by_index(actions)
+    if actions_by_index is None:
+        return False
+    if len(actions_by_index) != summary.get("terminal_actions"):
+        return False
 
     by_type: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
@@ -166,7 +260,17 @@ def _complete_trace(bayesprobe_dir: Path) -> bool:
         by_type.setdefault(record_type, []).append(payload)
 
     runs = by_type.get("run", [])
-    if not any(run.get("status") == "completed" for run in runs):
+    run_ids = {
+        run.get("run_id")
+        for run in runs
+        if isinstance(run.get("run_id"), str) and run.get("run_id")
+    }
+    if len(run_ids) != 1 or not any(
+        run.get("status") == "completed" for run in runs
+    ):
+        return False
+    run_id = run_ids.pop()
+    if any(run.get("run_id") != run_id for run in runs):
         return False
     cycles = [
         cycle
@@ -178,89 +282,242 @@ def _complete_trace(bayesprobe_dir: Path) -> bool:
         return False
     if len(cycles) != summary.get("bayesprobe_cycles"):
         return False
+    cycle_indices = {cycle.get("cycle_index") for cycle in cycles}
+    if cycle_indices != set(range(1, len(cycles) + 1)):
+        return False
     if not by_type.get("belief_state"):
         return False
 
+    used_action_indices: set[int] = set()
     for cycle in cycles:
         cycle_id = cycle.get("cycle_id")
-        if not isinstance(cycle_id, str):
+        if not isinstance(cycle_id, str) or cycle.get("run_id") != run_id:
             return False
-        if not _cycle_is_linked(cycle_id, by_type):
+        linked_actions = _cycle_linked_actions(
+            cycle_id=cycle_id,
+            run_id=run_id,
+            actions_by_index=actions_by_index,
+            by_type=by_type,
+        )
+        if linked_actions is None or used_action_indices & linked_actions:
             return False
-    return True
+        used_action_indices.update(linked_actions)
+    return used_action_indices == set(actions_by_index)
 
 
-def _cycle_is_linked(
+def _actions_by_index(
+    actions: Sequence[Mapping[str, Any]],
+) -> dict[int, Mapping[str, Any]] | None:
+    by_index: dict[int, Mapping[str, Any]] = {}
+    for action in actions:
+        action_index = action.get("action_index")
+        nested_action = action.get("action")
+        if (
+            type(action_index) is not int
+            or action_index < 1
+            or action_index in by_index
+            or not isinstance(nested_action, Mapping)
+            or not isinstance(nested_action.get("type"), str)
+            or not isinstance(action.get("pre_environment_state_id"), str)
+            or not isinstance(action.get("post_environment_state_id"), str)
+            or not isinstance(action.get("full_output_sha256"), str)
+            or not _HEX_DIGEST.fullmatch(action["full_output_sha256"])
+        ):
+            return None
+        by_index[action_index] = action
+    return by_index
+
+
+def _cycle_linked_actions(
+    *,
     cycle_id: str,
+    run_id: str,
+    actions_by_index: Mapping[int, Mapping[str, Any]],
     by_type: Mapping[str, list[Mapping[str, Any]]],
-) -> bool:
+) -> set[int] | None:
     probe_sets = [
         item for item in by_type.get("probe_set", []) if item.get("cycle_id") == cycle_id
     ]
     if len(probe_sets) != 1:
-        return False
+        return None
     probes = probe_sets[0].get("probes")
     if not isinstance(probes, list):
-        return False
+        return None
     probe_ids = {
         item.get("id")
         for item in probes
-        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        if isinstance(item, Mapping)
+        and item.get("cycle_id") == cycle_id
+        and isinstance(item.get("id"), str)
     }
     if not probe_ids:
-        return False
+        return None
 
     signals = [
-        item for item in by_type.get("external_signal", []) if item.get("cycle_id") == cycle_id
+        item
+        for item in by_type.get("external_signal", [])
+        if item.get("cycle_id") == cycle_id
+        and item.get("inbox_status", "accepted") == "accepted"
     ]
-    signal_ids: set[str] = set()
+    if not signals:
+        return None
+    used_action_indices: set[int] = set()
     for signal in signals:
-        provenance = signal.get("provenance")
-        signal_id = signal.get("id")
-        if (
-            not isinstance(signal_id, str)
-            or signal.get("generated_by_probe") not in probe_ids
-            or not isinstance(provenance, Mapping)
-            or provenance.get("epistemic_origin") != "tool_result"
-            or not isinstance(provenance.get("derivation_root_id"), str)
-        ):
-            return False
-        signal_ids.add(signal_id)
-    if not signal_ids:
-        return False
+        action_index = _signal_action_index(
+            signal=signal,
+            cycle_id=cycle_id,
+            run_id=run_id,
+            probe_ids=probe_ids,
+            actions_by_index=actions_by_index,
+        )
+        if action_index is None or action_index in used_action_indices:
+            return None
+        if not _signal_has_directional_evidence(signal, cycle_id, by_type):
+            return None
+        used_action_indices.add(action_index)
+    return used_action_indices
 
-    evidence_by_id: dict[str, Mapping[str, Any]] = {}
+
+def _signal_action_index(
+    *,
+    signal: Mapping[str, Any],
+    cycle_id: str,
+    run_id: str,
+    probe_ids: set[object],
+    actions_by_index: Mapping[int, Mapping[str, Any]],
+) -> int | None:
+    signal_id = signal.get("id")
+    probe_id = signal.get("generated_by_probe")
+    provenance = signal.get("provenance")
+    if (
+        not isinstance(signal_id, str)
+        or probe_id not in probe_ids
+        or not isinstance(probe_id, str)
+        or not isinstance(provenance, Mapping)
+        or provenance.get("epistemic_origin") != "tool_result"
+    ):
+        return None
+    artifact_refs = provenance.get("artifact_refs")
+    if not isinstance(artifact_refs, list) or len(artifact_refs) != 1:
+        return None
+    prefix = "environment_actions.jsonl#"
+    artifact_ref = artifact_refs[0]
+    if not isinstance(artifact_ref, str) or not artifact_ref.startswith(prefix):
+        return None
+    index_text = artifact_ref.removeprefix(prefix)
+    if not index_text.isdigit():
+        return None
+    action_index = int(index_text)
+    action = actions_by_index.get(action_index)
+    if action is None:
+        return None
+    if provenance.get("environment_state_id") != action.get(
+        "post_environment_state_id"
+    ):
+        return None
+    if not _signal_content_matches_action(signal, action):
+        return None
+
+    full_output_sha256 = action["full_output_sha256"]
+    direct_root = f"harbor-action:sha256:{full_output_sha256}"
+    composite_root = "harbor-action:sha256:" + _canonical_digest(
+        {
+            "action": action["action"],
+            "action_index": action_index,
+            "cycle_id": cycle_id,
+            "full_output_sha256": full_output_sha256,
+            "post_environment_state_id": action["post_environment_state_id"],
+            "pre_environment_state_id": action["pre_environment_state_id"],
+            "probe_id": probe_id,
+            "run_id": run_id,
+            "schema_version": "harbor-observation:v1",
+        }
+    )
+    if provenance.get("derivation_root_id") not in {direct_root, composite_root}:
+        return None
+    return action_index
+
+
+def _signal_content_matches_action(
+    signal: Mapping[str, Any],
+    action: Mapping[str, Any],
+) -> bool:
+    raw_content = signal.get("raw_content")
+    if not isinstance(raw_content, str):
+        return False
+    try:
+        payload = json.loads(raw_content)
+    except json.JSONDecodeError:
+        return False
+    nested_action = action.get("action")
+    if not isinstance(payload, Mapping) or not isinstance(nested_action, Mapping):
+        return False
+    expected = {
+        "action_index": action.get("action_index"),
+        "action_type": nested_action.get("type"),
+        "error_category": action.get("error_category"),
+        "model_facing_output": action.get("model_facing_output"),
+        "output_truncated": action.get("output_truncated"),
+        "post_environment_state_id": action.get("post_environment_state_id"),
+        "pre_environment_state_id": action.get("pre_environment_state_id"),
+        "return_code": action.get("return_code"),
+        "timed_out": action.get("timed_out"),
+    }
+    return dict(payload) == expected
+
+
+def _signal_has_directional_evidence(
+    signal: Mapping[str, Any],
+    cycle_id: str,
+    by_type: Mapping[str, list[Mapping[str, Any]]],
+) -> bool:
+    signal_id = signal.get("id")
+    provenance = signal.get("provenance")
+    if not isinstance(signal_id, str) or not isinstance(provenance, Mapping):
+        return False
+    derivation_root = provenance.get("derivation_root_id")
+    evidence_ids: set[str] = set()
     for evidence in by_type.get("evidence_event", []):
         evidence_id = evidence.get("id")
+        evidence_root = evidence.get("derivation_root_id")
         if (
             isinstance(evidence_id, str)
-            and evidence.get("derived_from_signal") in signal_ids
+            and evidence.get("derived_from_signal") == signal_id
             and evidence.get("epistemic_origin") == "tool_result"
             and evidence.get("discard_reason") is None
+            and evidence_root in {None, derivation_root}
         ):
-            evidence_by_id[evidence_id] = evidence
-    if not evidence_by_id:
-        return False
-
-    updates = [
-        item for item in by_type.get("belief_update", []) if item.get("cycle_id") == cycle_id
-    ]
-    linked_updates = 0
-    for update in updates:
+            evidence_ids.add(evidence_id)
+    for update in by_type.get("belief_update", []):
         evidence_id = update.get("evidence_id")
-        if evidence_id not in evidence_by_id:
-            return False
         sensitivity = update.get("sensitivity")
         caused_by = (
             sensitivity.get("caused_by_event_ids")
             if isinstance(sensitivity, Mapping)
             else None
         )
-        if not isinstance(caused_by, list) or evidence_id not in caused_by:
-            return False
-        if update.get("prior") != update.get("posterior"):
-            linked_updates += 1
-    return linked_updates > 0
+        if (
+            update.get("cycle_id") == cycle_id
+            and evidence_id in evidence_ids
+            and isinstance(caused_by, list)
+            and evidence_id in caused_by
+            and type(update.get("prior")) in (int, float)
+            and type(update.get("posterior")) in (int, float)
+            and update.get("prior") != update.get("posterior")
+        ):
+            return True
+    return False
+
+
+def _canonical_digest(payload: Mapping[str, Any]) -> str:
+    serialized = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _positive_int(value: object) -> bool:

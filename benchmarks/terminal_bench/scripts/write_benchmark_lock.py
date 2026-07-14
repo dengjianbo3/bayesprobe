@@ -12,6 +12,19 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+from harbor.constants import PACKAGE_CACHE_DIR
+from harbor.environments.definition import (
+    environment_content_hash,
+    require_agent_environment_definition,
+    should_use_prebuilt_docker_image,
+)
+from harbor.models.job.config import JobConfig
+from harbor.models.job.lock import JobLock, TrialLock
+from harbor.models.task.config import TaskConfig as TaskDefinitionConfig
+from harbor.models.task.id import PackageTaskId
+from harbor.models.trial.config import TrialConfig
+from harbor.models.trial.result import TrialResult
+
 from bayesprobe_terminal_bench.config import TerminalBenchConfig
 
 
@@ -28,6 +41,7 @@ class RuntimeIdentity:
     harbor_version: str
     root_git_sha: str
     adapter_tree_sha: str
+    container_image: str
     image_digest: str
 
 
@@ -37,8 +51,12 @@ class OracleIdentity:
     dataset_revision: str
     task_id: str
     task_checksum: str
-    container_image: str
     n_attempts: int
+    package_org: str
+    package_name: str
+    package_ref: str
+    download_dir: Path | None
+    force_build: bool
 
 
 def build_lock(
@@ -61,7 +79,7 @@ def build_lock(
         "dataset_revision": oracle.dataset_revision,
         "task_id": oracle.task_id,
         "task_checksum": oracle.task_checksum,
-        "container_image": oracle.container_image,
+        "container_image": runtime_identity.container_image,
         "image_digest": runtime_identity.image_digest,
         "root_git_sha": runtime_identity.root_git_sha,
         "adapter_tree_sha": runtime_identity.adapter_tree_sha,
@@ -89,7 +107,8 @@ def build_lock(
 def collect_runtime_identity(
     *,
     repository_root: Path,
-    container_image: str,
+    job_dir: Path,
+    package_cache_dir: Path = PACKAGE_CACHE_DIR,
 ) -> RuntimeIdentity:
     installed_harbor = version("harbor")
     if installed_harbor != HARBOR_VERSION:
@@ -97,6 +116,10 @@ def collect_runtime_identity(
             f"Harbor version must be {HARBOR_VERSION}; found {installed_harbor}"
         )
     root = Path(repository_root).resolve()
+    container_image = discover_container_image(
+        job_dir=job_dir,
+        package_cache_dir=package_cache_dir,
+    )
     return RuntimeIdentity(
         harbor_version=installed_harbor,
         root_git_sha=_run(
@@ -109,8 +132,48 @@ def collect_runtime_identity(
             cwd=root,
             error="could not resolve committed adapter tree identity",
         ),
+        container_image=container_image,
         image_digest=_docker_image_digest(container_image),
     )
+
+
+def discover_container_image(
+    *,
+    job_dir: Path,
+    package_cache_dir: Path = PACKAGE_CACHE_DIR,
+) -> str:
+    identity = extract_job_identity(Path(job_dir), required_reward=None)
+    base_dir = identity.download_dir or Path(package_cache_dir)
+    task_dir = (
+        base_dir
+        / identity.package_org
+        / identity.package_name
+        / identity.package_ref.removeprefix("sha256:")
+    )
+    task_config_path = task_dir / "task.toml"
+    try:
+        task_definition = TaskDefinitionConfig.model_validate_toml(
+            task_config_path.read_text(encoding="utf-8")
+        )
+    except Exception:
+        raise ValueError(
+            "could not resolve the exact cached Harbor package task environment"
+        ) from None
+    environment_dir = task_dir / "environment"
+    docker_image = task_definition.environment.docker_image
+    require_agent_environment_definition(
+        environment_dir,
+        docker_image=docker_image,
+    )
+    if should_use_prebuilt_docker_image(
+        environment_dir,
+        docker_image=docker_image,
+        force_build=identity.force_build,
+    ):
+        if not isinstance(docker_image, str) or not docker_image.strip():
+            raise ValueError("cached Harbor task has no usable prebuilt image")
+        return docker_image.strip()
+    return f"hb__{environment_content_hash(environment_dir, docker_image=docker_image)}"
 
 
 def write_lock_atomic(
@@ -151,11 +214,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config, api_key = TerminalBenchConfig.from_sources()
-    oracle = _extract_oracle_identity(args.oracle_job)
     repository_root = Path(__file__).resolve().parents[3]
     runtime_identity = collect_runtime_identity(
         repository_root=repository_root,
-        container_image=oracle.container_image,
+        job_dir=args.oracle_job,
     )
     lock = build_lock(
         job_dir=args.oracle_job,
@@ -168,53 +230,136 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _extract_oracle_identity(job_dir: Path) -> OracleIdentity:
-    if not job_dir.is_dir():
-        raise ValueError("Oracle job directory does not exist")
-    completed = _completed_trial_files(job_dir)
+    completed = _completed_trial_files(job_dir) if job_dir.is_dir() else []
     if not completed:
         root_result_path = job_dir / "result.json"
         if root_result_path.is_file():
             root_result = _read_object(root_result_path)
-            reward = _official_reward(root_result)
-            if reward != 1.0:
+            if _official_reward(root_result) != 1.0:
                 raise ValueError("oracle reward must be 1")
         raise ValueError("exactly one completed Oracle trial is required; found 0")
     if len(completed) != 1:
         raise ValueError(
             f"exactly one completed Oracle trial is required; found {len(completed)}"
         )
+    identity = extract_job_identity(job_dir, required_reward=1.0)
+    return identity
+
+
+def extract_job_identity(
+    job_dir: Path,
+    *,
+    required_reward: float | None,
+) -> OracleIdentity:
+    if not job_dir.is_dir():
+        raise ValueError("Harbor job directory does not exist")
+    completed = _completed_trial_files(job_dir)
+    if len(completed) != 1:
+        raise ValueError(
+            f"exactly one completed Harbor trial is required; found {len(completed)}"
+        )
 
     config_path, result_path = completed[0]
-    trial_config = _read_object(config_path)
-    trial_result = _read_object(result_path)
-    reward = _official_reward(trial_result)
-    if reward != 1.0:
-        raise ValueError("oracle reward must be 1")
+    trial_dir = result_path.parent
+    job_config_payload = _read_object(job_dir / "config.json")
+    job_lock_payload = _read_object(job_dir / "lock.json")
+    trial_config_payload = _read_object(config_path)
+    trial_lock_payload = _read_object(trial_dir / "lock.json")
+    trial_result_payload = _read_object(result_path)
+    try:
+        job_config = JobConfig.model_validate(job_config_payload)
+        job_lock = JobLock.model_validate(job_lock_payload)
+        trial_config = TrialConfig.model_validate(trial_config_payload)
+        trial_lock = TrialLock.model_validate(trial_lock_payload)
+        trial_result = TrialResult.model_validate(trial_result_payload)
+    except Exception:
+        raise ValueError("Harbor identity artifacts do not match 0.18 models") from None
 
-    job_config_path = job_dir / "config.json"
-    job_config = (
-        _read_object(job_config_path) if job_config_path.is_file() else {}
+    if required_reward is not None and _official_reward(trial_result_payload) != required_reward:
+        raise ValueError("oracle reward must be 1")
+    if job_config.n_attempts != 1:
+        raise ValueError("Oracle smoke must use exactly one attempt")
+    if len(job_config.datasets) != 1:
+        raise ValueError("Harbor job must contain exactly one fixed dataset")
+    if len(job_lock.trials) != 1:
+        raise ValueError("Harbor job lock must contain exactly one resolved trial")
+    if job_lock.harbor.version != HARBOR_VERSION:
+        raise ValueError(f"Harbor job lock version must be {HARBOR_VERSION}")
+    if job_lock.trials[0].task.type != "package" or trial_lock.task.type != "package":
+        raise ValueError("fixed Harbor task must be a package task")
+    if not isinstance(trial_result.task_id, PackageTaskId):
+        raise ValueError("completed Harbor trial must have a package task id")
+
+    dataset = job_config.datasets[0]
+    dataset_name = _single_candidate(
+        "dataset sources",
+        (
+            _required_string(dataset.name, "job dataset name"),
+            _required_string(job_lock.trials[0].task.source, "job lock task source"),
+            _required_string(trial_lock.task.source, "trial lock task source"),
+            _required_string(trial_config.task.source, "trial config task source"),
+            _required_string(trial_result.source, "trial result source"),
+            _required_string(
+                trial_result.config.task.source,
+                "trial result config task source",
+            ),
+        ),
     )
-    dataset_name, dataset_revision, n_attempts = _dataset_identity(
-        job_config=job_config,
-        trial_config=trial_config,
-        trial_result=trial_result,
+    dataset_revision = _required_string(
+        dataset.ref or dataset.version,
+        "dataset revision",
     )
-    task_id = _task_identity(trial_config, trial_result)
+    package_task_id = (
+        f"{trial_result.task_id.org}/{trial_result.task_id.name}"
+    )
+    task_id = _single_candidate(
+        "task identities",
+        (
+            _required_string(job_lock.trials[0].task.name, "job lock task name"),
+            _required_string(trial_lock.task.name, "trial lock task name"),
+            _required_string(trial_config.task.name, "trial config task name"),
+            package_task_id,
+            _required_string(
+                trial_result.config.task.name,
+                "trial result config task name",
+            ),
+        ),
+    )
+    if trial_result.task_name != trial_result.task_id.name:
+        raise ValueError("completed Harbor trial contains conflicting task identities")
+    task_checksum = _single_candidate(
+        "task checksums or refs",
+        (
+            _required_string(job_lock.trials[0].task.digest, "job lock task digest"),
+            _required_string(trial_lock.task.digest, "trial lock task digest"),
+            _required_string(trial_config.task.ref, "trial config task ref"),
+            _required_string(trial_result.task_id.ref, "trial result task ref"),
+            _required_string(trial_result.task_checksum, "trial result task checksum"),
+            _required_string(
+                trial_result.config.task.ref,
+                "trial result config task ref",
+            ),
+        ),
+    )
     if dataset_name != DATASET_NAME:
         raise ValueError(f"Oracle dataset must be {DATASET_NAME}")
     if task_id != TASK_ID:
         raise ValueError(f"Oracle task must be {TASK_ID}")
-
-    task_checksum = _required_string(trial_result.get("task_checksum"), "task checksum")
-    container_image = _container_image(trial_config, trial_result)
+    if not _DIGEST.fullmatch(dataset_revision):
+        raise ValueError("dataset revision must be a sha256 digest")
+    if not _DIGEST.fullmatch(task_checksum):
+        raise ValueError("task checksum must be a sha256 digest")
     return OracleIdentity(
         dataset_name=dataset_name,
         dataset_revision=dataset_revision,
         task_id=task_id,
         task_checksum=task_checksum,
-        container_image=container_image,
-        n_attempts=n_attempts,
+        n_attempts=job_config.n_attempts,
+        package_org=trial_result.task_id.org,
+        package_name=trial_result.task_id.name,
+        package_ref=task_checksum,
+        download_dir=trial_config.task.download_dir,
+        force_build=trial_config.environment.force_build,
     )
 
 
@@ -252,98 +397,11 @@ def _official_reward(result: Mapping[str, Any]) -> float:
     raise ValueError("completed Oracle trial has no official reward")
 
 
-def _dataset_identity(
-    *,
-    job_config: Mapping[str, Any],
-    trial_config: Mapping[str, Any],
-    trial_result: Mapping[str, Any],
-) -> tuple[str, str, int]:
-    datasets = job_config.get("datasets")
-    matching: list[Mapping[str, Any]] = []
-    if isinstance(datasets, list):
-        matching = [
-            item
-            for item in datasets
-            if isinstance(item, Mapping) and item.get("name") == DATASET_NAME
-        ]
-    if len(matching) > 1:
-        raise ValueError("Oracle job contains duplicate fixed datasets")
-
-    task_config = trial_config.get("task")
-    task_mapping = task_config if isinstance(task_config, Mapping) else {}
-    dataset_name = (
-        matching[0].get("name") if matching else trial_result.get("source")
-    )
-    if not isinstance(dataset_name, str) or not dataset_name.strip():
-        dataset_name = task_mapping.get("source")
-    dataset_revision: object = None
-    if matching:
-        dataset_revision = matching[0].get("ref") or matching[0].get("version")
-    if dataset_revision is None:
-        dataset_revision = task_mapping.get("ref")
-    n_attempts = job_config.get("n_attempts", 1)
-    if type(n_attempts) is not int or n_attempts != 1:
-        raise ValueError("Oracle smoke must use exactly one attempt")
-    return (
-        _required_string(dataset_name, "dataset name"),
-        _required_string(dataset_revision, "dataset revision"),
-        n_attempts,
-    )
-
-
-def _task_identity(
-    trial_config: Mapping[str, Any],
-    trial_result: Mapping[str, Any],
-) -> str:
-    identities: set[str] = set()
-    task_id = trial_result.get("task_id")
-    if isinstance(task_id, Mapping):
-        org = task_id.get("org")
-        name = task_id.get("name")
-        if isinstance(org, str) and isinstance(name, str):
-            identities.add(f"{org}/{name}")
-    for document in (trial_config, trial_result.get("config")):
-        if not isinstance(document, Mapping):
-            continue
-        task = document.get("task")
-        if isinstance(task, Mapping):
-            name = task.get("name")
-            if isinstance(name, str) and name.strip():
-                identities.add(name.strip())
-    if len(identities) > 1:
-        raise ValueError("completed Oracle trial contains conflicting task identities")
-    if not identities:
-        raise ValueError("completed Oracle trial has no task identity")
-    return identities.pop()
-
-
-def _container_image(
-    trial_config: Mapping[str, Any],
-    trial_result: Mapping[str, Any],
-) -> str:
-    values: set[str] = set()
-    for document in (trial_config, trial_result):
-        for key, value in _walk(document):
-            if key in {"container_image", "docker_image"} and isinstance(value, str):
-                if value.strip():
-                    values.add(value.strip())
-    if len(values) != 1:
-        raise ValueError(
-            f"completed Oracle trial must identify exactly one container image; found {len(values)}"
-        )
-    return values.pop()
-
-
-def _walk(value: Any) -> list[tuple[str, Any]]:
-    fields: list[tuple[str, Any]] = []
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            fields.append((str(key), item))
-            fields.extend(_walk(item))
-    elif isinstance(value, list):
-        for item in value:
-            fields.extend(_walk(item))
-    return fields
+def _single_candidate(label: str, values: Sequence[str]) -> str:
+    candidates = set(values)
+    if len(candidates) != 1:
+        raise ValueError(f"completed Harbor trial contains conflicting {label}")
+    return candidates.pop()
 
 
 def _docker_image_digest(container_image: str) -> str:
@@ -362,7 +420,6 @@ def _docker_image_digest(container_image: str) -> str:
     if not isinstance(document, Mapping):
         raise ValueError("Docker image inspect returned an invalid image record")
     matching_repo_digests: set[str] = set()
-    repo_digests_found: list[str] = []
     repository = _image_repository(container_image)
     repo_digests = document.get("RepoDigests")
     if isinstance(repo_digests, list):
@@ -372,21 +429,26 @@ def _docker_image_digest(container_image: str) -> str:
             repo, digest = item.rsplit("@", 1)
             if not _DIGEST.fullmatch(digest):
                 continue
-            repo_digests_found.append(digest)
             if repo == repository:
                 matching_repo_digests.add(digest)
     if len(matching_repo_digests) > 1:
         raise ValueError("Docker image resolves to conflicting repository digests")
-    if matching_repo_digests:
-        return matching_repo_digests.pop()
-
     explicit_digest = (
         container_image.rsplit("@", 1)[-1] if "@" in container_image else None
     )
     if isinstance(explicit_digest, str) and _DIGEST.fullmatch(explicit_digest):
+        image_id = document.get("Id")
+        if matching_repo_digests:
+            if matching_repo_digests != {explicit_digest}:
+                raise ValueError(
+                    "Docker image does not match the requested sha256 digest"
+                )
+            return explicit_digest
+        if image_id != explicit_digest:
+            raise ValueError("Docker image does not match the requested sha256 digest")
         return explicit_digest
-    if len(set(repo_digests_found)) == 1:
-        return repo_digests_found[0]
+    if matching_repo_digests:
+        return matching_repo_digests.pop()
     image_id = document.get("Id")
     if isinstance(image_id, str) and _DIGEST.fullmatch(image_id):
         return image_id

@@ -1,20 +1,32 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from bayesprobe import ProbeDesign, ProbeExecutionBrief
+from bayesprobe_terminal_bench.actions import ActionObservation, ShellAction
 from bayesprobe_terminal_bench.config import TerminalBenchConfig
 from bayesprobe_terminal_bench.runner_factory import load_and_validate_lock
+from bayesprobe_terminal_bench.signals import signal_from_observation
 from conftest import (
     FIXED_CONTAINER_IMAGE,
     FIXED_DATASET,
     FIXED_DATASET_REVISION,
     FIXED_TASK,
     FIXED_TASK_CHECKSUM,
+    write_harbor_job_artifacts,
 )
+from harbor.environments.definition import environment_content_hash
+from harbor.models.task.config import (
+    EnvironmentConfig as TaskEnvironmentConfig,
+    TaskConfig as TaskDefinitionConfig,
+)
+from harbor.models.trial.config import TrialConfig
+from harbor.models.trial.result import TrialResult
 from validate_smoke_run import classify_smoke_run, main as validate_main
 import write_benchmark_lock
 from write_benchmark_lock import (
@@ -29,8 +41,13 @@ RUNTIME_IDENTITY = RuntimeIdentity(
     harbor_version="0.18.0",
     root_git_sha="root-sha",
     adapter_tree_sha="adapter-sha",
+    container_image=FIXED_CONTAINER_IMAGE,
     image_digest="sha256:" + "4" * 64,
 )
+
+
+def test_runtime_identity_owns_container_image() -> None:
+    assert "container_image" in RuntimeIdentity.__dataclass_fields__
 
 
 def test_lock_requires_oracle_reward_one(tmp_path: Path) -> None:
@@ -94,6 +111,34 @@ def test_lock_extracts_official_identity_and_matches_runtime_validator(
     assert load_and_validate_lock(output, config) == lock
 
 
+def test_real_harbor_model_dumps_build_lock_without_persisted_image_fields(
+    synthetic_oracle_job: Path,
+) -> None:
+    trial_dir = next(path for path in synthetic_oracle_job.iterdir() if path.is_dir())
+    trial_config_payload = json.loads(
+        (trial_dir / "config.json").read_text(encoding="utf-8")
+    )
+    trial_result_payload = json.loads(
+        (trial_dir / "result.json").read_text(encoding="utf-8")
+    )
+
+    TrialConfig.model_validate(trial_config_payload)
+    TrialResult.model_validate(trial_result_payload)
+    serialized = json.dumps(
+        {"config": trial_config_payload, "result": trial_result_payload}
+    )
+    assert "docker_image" not in serialized
+    assert "container_image" not in serialized
+
+    lock = build_lock(
+        job_dir=synthetic_oracle_job,
+        config=TerminalBenchConfig(model="test-model"),
+        runtime_identity=RUNTIME_IDENTITY,
+    )
+
+    assert lock["container_image"] == FIXED_CONTAINER_IMAGE
+
+
 def test_lock_rejects_multiple_completed_trials(
     synthetic_oracle_job: Path,
 ) -> None:
@@ -130,6 +175,46 @@ def test_lock_rejects_conflicting_trial_task_id(
         )
 
 
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        "job-lock-source",
+        "result-source",
+        "result-config-ref",
+        "job-lock-digest",
+    ],
+)
+def test_lock_rejects_cross_artifact_identity_conflicts_without_precedence_masking(
+    synthetic_oracle_job: Path,
+    conflict: str,
+) -> None:
+    trial_dir = next(path for path in synthetic_oracle_job.iterdir() if path.is_dir())
+    if conflict == "job-lock-source":
+        path = synthetic_oracle_job / "lock.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["trials"][0]["task"]["source"] = "terminal-bench/other-dataset"
+    elif conflict == "result-source":
+        path = trial_dir / "result.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["source"] = "terminal-bench/other-dataset"
+    elif conflict == "result-config-ref":
+        path = trial_dir / "result.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["config"]["task"]["ref"] = "sha256:" + "8" * 64
+    else:
+        path = synthetic_oracle_job / "lock.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["trials"][0]["task"]["digest"] = "sha256:" + "9" * 64
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conflicting"):
+        build_lock(
+            job_dir=synthetic_oracle_job,
+            config=TerminalBenchConfig(model="test-model"),
+            runtime_identity=RUNTIME_IDENTITY,
+        )
+
+
 def test_serialized_lock_excludes_provider_key(
     synthetic_oracle_job: Path,
 ) -> None:
@@ -159,13 +244,72 @@ def test_atomic_writer_rejects_restricted_value_without_replacing_output(
     assert list(tmp_path.iterdir()) == [output]
 
 
-def test_runtime_discovery_selects_digest_for_the_locked_image(
+def _write_cached_task(
+    package_cache_dir: Path,
+    *,
+    docker_image: str | None,
+    dockerfile: str | None = None,
+) -> Path:
+    task_dir = (
+        package_cache_dir
+        / "terminal-bench"
+        / "break-filter-js-from-html"
+        / FIXED_TASK_CHECKSUM.removeprefix("sha256:")
+    )
+    environment_dir = task_dir / "environment"
+    environment_dir.mkdir(parents=True)
+    config = TaskDefinitionConfig(
+        environment=TaskEnvironmentConfig(docker_image=docker_image)
+    )
+    (task_dir / "task.toml").write_text(
+        config.model_dump_toml(), encoding="utf-8"
+    )
+    if dockerfile is not None:
+        (environment_dir / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+    return task_dir
+
+
+def test_runtime_discovery_resolves_prebuilt_image_from_cached_package_task(
+    synthetic_oracle_job: Path,
+    tmp_path: Path,
+) -> None:
+    package_cache = tmp_path / "packages"
+    _write_cached_task(package_cache, docker_image=FIXED_CONTAINER_IMAGE)
+
+    assert write_benchmark_lock.discover_container_image(
+        job_dir=synthetic_oracle_job,
+        package_cache_dir=package_cache,
+    ) == FIXED_CONTAINER_IMAGE
+
+
+def test_runtime_discovery_derives_harbor_content_addressed_build_tag(
+    synthetic_oracle_job: Path,
+    tmp_path: Path,
+) -> None:
+    package_cache = tmp_path / "packages"
+    task_dir = _write_cached_task(
+        package_cache,
+        docker_image=None,
+        dockerfile="FROM alpine:3.20\nWORKDIR /app\n",
+    )
+
+    expected_hash = environment_content_hash(task_dir / "environment")
+    assert write_benchmark_lock.discover_container_image(
+        job_dir=synthetic_oracle_job,
+        package_cache_dir=package_cache,
+    ) == f"hb__{expected_hash}"
+
+
+def test_runtime_discovery_selects_digest_for_the_exact_cached_task_image(
+    synthetic_oracle_job: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[list[str], Path | None]] = []
     matching_digest = "sha256:" + "a" * 64
     unrelated_digest = "sha256:" + "b" * 64
+    package_cache = tmp_path / "packages"
+    _write_cached_task(package_cache, docker_image="registry.example/task:locked")
 
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append((command, kwargs.get("cwd")))
@@ -192,13 +336,15 @@ def test_runtime_discovery_selects_digest_for_the_locked_image(
 
     identity = collect_runtime_identity(
         repository_root=tmp_path,
-        container_image="registry.example/task:locked",
+        job_dir=synthetic_oracle_job,
+        package_cache_dir=package_cache,
     )
 
     assert identity == RuntimeIdentity(
         harbor_version="0.18.0",
         root_git_sha="root-sha",
         adapter_tree_sha="adapter-sha",
+        container_image="registry.example/task:locked",
         image_digest=matching_digest,
     )
     assert calls == [
@@ -208,49 +354,86 @@ def test_runtime_discovery_selects_digest_for_the_locked_image(
     ]
 
 
+@pytest.mark.parametrize("image_id_matches", [False, True])
+def test_digest_pinned_image_rejects_docker_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    image_id_matches: bool,
+) -> None:
+    requested = "sha256:" + "a" * 64
+    different = "sha256:" + "b" * 64
+    image_id = requested if image_id_matches else "sha256:" + "c" * 64
+
+    monkeypatch.setattr(
+        write_benchmark_lock,
+        "_run",
+        lambda *args, **kwargs: json.dumps(
+            [
+                {
+                    "Id": image_id,
+                    "RepoDigests": [f"registry.example/task@{different}"],
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="requested sha256 digest"):
+        write_benchmark_lock._docker_image_digest(
+            f"registry.example/task@{requested}"
+        )
+
+
+def test_docker_digest_never_selects_an_unrelated_repository_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unrelated = "sha256:" + "b" * 64
+    image_id = "sha256:" + "c" * 64
+    monkeypatch.setattr(
+        write_benchmark_lock,
+        "_run",
+        lambda *args, **kwargs: json.dumps(
+            [
+                {
+                    "Id": image_id,
+                    "RepoDigests": [f"registry.example/unrelated@{unrelated}"],
+                }
+            ]
+        ),
+    )
+
+    assert (
+        write_benchmark_lock._docker_image_digest("registry.example/task:locked")
+        == image_id
+    )
+
+
 def _write_smoke_job(
     root: Path,
     *,
     reward: float | None,
     trace: str,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
 ) -> Path:
     job_dir = root / f"job-{trace}"
-    trial_dir = job_dir / "trial"
+    trial_dir = job_dir / "break-filter-js-from-html__bayesprobe"
+    exception_type = None
+    exception_message = None
+    if trace == "infrastructure":
+        exception_type = "DockerImageBuildError"
+        exception_message = "environment failed"
+    elif trace in {"provider", "agent_failure"}:
+        exception_type = "BayesProbeHarborAgentError"
+        exception_message = "agent execution failed"
+    write_harbor_job_artifacts(
+        job_dir,
+        trial_dir,
+        agent_name="bayesprobe-terminal-bench",
+        reward=reward,
+        exception_type=exception_type,
+        exception_message=exception_message,
+    )
     bayesprobe_dir = trial_dir / "agent" / "bayesprobe"
     bayesprobe_dir.mkdir(parents=True)
-    (trial_dir / "config.json").write_text("{}", encoding="utf-8")
-
-    exception_info = None
-    verifier_result = None
-    finished_at = "2026-07-14T00:01:00Z"
-    if reward is not None:
-        verifier_result = {"rewards": {"reward": reward}}
-    elif trace == "infrastructure":
-        exception_info = {
-            "exception_type": "DockerImageBuildError",
-            "exception_message": "environment failed",
-        }
-    elif trace == "provider":
-        exception_info = {
-            "exception_type": "BayesProbeHarborAgentError",
-            "exception_message": "agent execution failed",
-        }
-    elif trace == "agent_failure":
-        exception_info = {
-            "exception_type": "BayesProbeHarborAgentError",
-            "exception_message": "agent execution failed",
-        }
-
-    (trial_dir / "result.json").write_text(
-        json.dumps(
-            {
-                "finished_at": finished_at,
-                "verifier_result": verifier_result,
-                "exception_info": exception_info,
-            }
-        ),
-        encoding="utf-8",
-    )
 
     if trace == "infrastructure":
         return job_dir
@@ -269,6 +452,23 @@ def _write_smoke_job(
         )
         return job_dir
 
+    output = "/workspace\n"
+    observation = ActionObservation(
+        action_index=1,
+        action=ShellAction(command="pwd"),
+        stdout=output,
+        return_code=0,
+        duration_ms=4,
+        pre_environment_state_id="env:0",
+        post_environment_state_id="env:0",
+        full_output_sha256=hashlib.sha256(output.encode("utf-8")).hexdigest(),
+        model_facing_output=output,
+    )
+    signal = signal_from_observation(
+        observation=observation,
+        probe=probe,
+        context=execution_context,
+    )
     (bayesprobe_dir / "summary.json").write_text(
         json.dumps(
             {
@@ -280,13 +480,7 @@ def _write_smoke_job(
         encoding="utf-8",
     )
     (bayesprobe_dir / "environment_actions.jsonl").write_text(
-        json.dumps(
-            {
-                "action_index": 1,
-                "post_environment_state_id": "env:0",
-                "return_code": 0,
-            }
-        )
+        json.dumps(observation.model_dump(mode="json"))
         + "\n",
         encoding="utf-8",
     )
@@ -299,6 +493,8 @@ def _write_smoke_job(
             "record_type": "cycle",
             "payload": {
                 "cycle_id": "cycle_1",
+                "run_id": execution_context.run_id,
+                "cycle_index": 1,
                 "boundary_status": "integrated",
                 "completed_at": "2026-07-14T00:00:30Z",
             },
@@ -308,27 +504,20 @@ def _write_smoke_job(
             "payload": {
                 "cycle_id": "cycle_1",
                 "probe_set_id": "PS1",
-                "probes": [{"id": "P1", "cycle_id": "cycle_1"}],
+                "probes": [probe.model_dump(mode="json")],
             },
         },
         {
             "record_type": "external_signal",
-            "payload": {
-                "id": "S1",
-                "cycle_id": "cycle_1",
-                "generated_by_probe": "P1",
-                "provenance": {
-                    "epistemic_origin": "tool_result",
-                    "derivation_root_id": "harbor-action:sha256:abc",
-                },
-            },
+            "payload": signal.model_dump(mode="json"),
         },
         {
             "record_type": "evidence_event",
             "payload": {
                 "id": "E1",
-                "derived_from_signal": "S1",
+                "derived_from_signal": signal.id,
                 "epistemic_origin": "tool_result",
+                "derivation_root_id": signal.provenance.derivation_root_id,
                 "discard_reason": None,
             },
         },
@@ -349,7 +538,11 @@ def _write_smoke_job(
         },
         {
             "record_type": "run",
-            "payload": {"status": "completed", "current_cycle_id": "cycle_1"},
+            "payload": {
+                "run_id": execution_context.run_id,
+                "status": "completed",
+                "current_cycle_id": "cycle_1",
+            },
         },
     ]
     if trace == "incomplete":
@@ -359,6 +552,20 @@ def _write_smoke_job(
         encoding="utf-8",
     )
     return job_dir
+
+
+def _write_complete_benchmark_lock(
+    path: Path,
+    *,
+    oracle_job: Path,
+) -> dict[str, object]:
+    lock = build_lock(
+        job_dir=oracle_job,
+        config=TerminalBenchConfig(model="test-model"),
+        runtime_identity=RUNTIME_IDENTITY,
+    )
+    write_lock_atomic(path, lock)
+    return lock
 
 
 @pytest.mark.parametrize(
@@ -375,18 +582,208 @@ def _write_smoke_job(
 def test_smoke_classifier_and_cli_exit_codes(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
     reward: float | None,
     trace: str,
     classification: str,
     exit_code: int,
 ) -> None:
-    job_dir = _write_smoke_job(tmp_path, reward=reward, trace=trace)
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=reward,
+        trace=trace,
+        probe=probe,
+        execution_context=execution_context,
+    )
     lock_path = tmp_path / "benchmark.lock.json"
-    lock_path.write_text(
-        json.dumps({"task_id": FIXED_TASK, "task_checksum": FIXED_TASK_CHECKSUM}),
-        encoding="utf-8",
+    _write_complete_benchmark_lock(
+        lock_path,
+        oracle_job=synthetic_oracle_job,
     )
 
     assert classify_smoke_run(job_dir=job_dir, lock_path=lock_path) == classification
     assert validate_main(["--job", str(job_dir), "--lock", str(lock_path)]) == exit_code
     assert capsys.readouterr().out == classification + "\n"
+
+
+def test_smoke_classifier_rejects_partial_lock(
+    tmp_path: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    lock_path = tmp_path / "partial.lock.json"
+    lock_path.write_text(
+        json.dumps({"task_id": FIXED_TASK, "task_checksum": FIXED_TASK_CHECKSUM}),
+        encoding="utf-8",
+    )
+
+    assert (
+        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        == "conformance_error"
+    )
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        "missing-task-name",
+        "task-name",
+        "task-id-ref",
+        "source",
+        "task-checksum",
+        "result-config-ref",
+    ],
+)
+def test_smoke_classifier_rejects_missing_or_conflicting_result_identity(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+    conflict: str,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    trial_dir = next(path for path in job_dir.iterdir() if path.is_dir())
+    result_path = trial_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    other_digest = "sha256:" + "9" * 64
+    if conflict == "missing-task-name":
+        result.pop("task_name")
+    elif conflict == "task-name":
+        result["task_name"] = "a-different-task"
+    elif conflict == "task-id-ref":
+        result["task_id"]["ref"] = other_digest
+    elif conflict == "source":
+        result["source"] = "terminal-bench/other-dataset"
+    elif conflict == "task-checksum":
+        result["task_checksum"] = other_digest
+    else:
+        result["config"]["task"]["ref"] = other_digest
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    lock_path = tmp_path / "benchmark.lock.json"
+    _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
+
+    assert (
+        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        == "conformance_error"
+    )
+
+
+@pytest.mark.parametrize("stale_field", ["task_checksum", "dataset_revision"])
+def test_smoke_classifier_rejects_stale_complete_lock_identity(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+    stale_field: str,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    lock_path = tmp_path / "benchmark.lock.json"
+    lock = _write_complete_benchmark_lock(
+        lock_path,
+        oracle_job=synthetic_oracle_job,
+    )
+    lock[stale_field] = "sha256:" + "9" * 64
+    write_lock_atomic(lock_path, lock)
+
+    assert (
+        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        == "conformance_error"
+    )
+
+
+@pytest.mark.parametrize(
+    "broken_link",
+    [
+        "arbitrary-root",
+        "no-matching-action",
+        "environment-state",
+        "action-index",
+        "cycle-run",
+    ],
+)
+def test_smoke_classifier_rejects_false_action_provenance_links(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+    broken_link: str,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    trial_dir = next(path for path in job_dir.iterdir() if path.is_dir())
+    bayesprobe_dir = trial_dir / "agent" / "bayesprobe"
+    actions_path = bayesprobe_dir / "environment_actions.jsonl"
+    ledger_path = bayesprobe_dir / "bayesprobe_ledger.jsonl"
+    actions = [
+        json.loads(line)
+        for line in actions_path.read_text(encoding="utf-8").splitlines()
+    ]
+    records = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+    ]
+    signal = next(
+        record["payload"]
+        for record in records
+        if record["record_type"] == "external_signal"
+    )
+    if broken_link == "arbitrary-root":
+        signal["provenance"]["derivation_root_id"] = (
+            "harbor-action:sha256:" + "f" * 64
+        )
+    elif broken_link == "no-matching-action":
+        actions[0]["action_index"] = 2
+    elif broken_link == "environment-state":
+        signal["provenance"]["environment_state_id"] = "env:other"
+    elif broken_link == "action-index":
+        signal["provenance"]["artifact_refs"] = [
+            "environment_actions.jsonl#2"
+        ]
+    else:
+        cycle = next(
+            record["payload"]
+            for record in records
+            if record["record_type"] == "cycle"
+        )
+        cycle["run_id"] = "run_other"
+    actions_path.write_text(
+        "".join(json.dumps(action) + "\n" for action in actions),
+        encoding="utf-8",
+    )
+    ledger_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    lock_path = tmp_path / "benchmark.lock.json"
+    _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
+
+    assert (
+        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        == "conformance_error"
+    )
