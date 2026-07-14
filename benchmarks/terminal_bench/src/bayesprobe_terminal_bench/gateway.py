@@ -84,6 +84,7 @@ class HarborProbeToolGateway:
             except PolicyViolation as error:
                 self._artifacts.append_error(
                     {
+                        "action_index": action_index,
                         "category": "policy_error",
                         "error_type": type(error).__name__,
                         "probe_id": probe.id,

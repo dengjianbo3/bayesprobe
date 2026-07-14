@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Mapping
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ShellAction(BaseModel):
@@ -22,6 +23,13 @@ class WriteFileAction(BaseModel):
     type: Literal["write_file"] = "write_file"
     path: str = Field(min_length=1, max_length=4_096)
     content: str = Field(max_length=1_000_000)
+
+    @field_validator("path")
+    @classmethod
+    def require_absolute_posix_path(cls, value: str) -> str:
+        if not PurePosixPath(value).is_absolute():
+            raise ValueError("write_file path must be an absolute POSIX path")
+        return value
 
 
 class ApplyPatchAction(BaseModel):

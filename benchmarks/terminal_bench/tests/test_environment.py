@@ -127,6 +127,22 @@ async def test_transport_failure_advances_mutating_state_without_leaking_error_s
     assert observation.post_environment_state_id == "env:1"
 
 
+@pytest.mark.asyncio
+async def test_bridge_refuses_a_constructed_relative_write_without_guessing_cwd() -> None:
+    environment = RecordingEnvironment()
+    bridge = make_bridge(asyncio.get_running_loop(), environment)
+    relative_action = WriteFileAction.model_construct(
+        type="write_file",
+        path="workspace/value.txt",
+        content="value",
+    )
+
+    with pytest.raises(PolicyViolation, match="absolute POSIX path"):
+        await asyncio.to_thread(bridge.execute, relative_action, 1)
+
+    assert environment.uploads == []
+
+
 class RuntimeFailureEnvironment(RecordingEnvironment):
     def __init__(self, message: str) -> None:
         super().__init__()
@@ -453,6 +469,23 @@ async def test_output_hash_covers_complete_raw_observation_before_model_truncati
     assert observation.output_truncated is True
 
 
+@pytest.mark.asyncio
+async def test_model_facing_output_is_bounded_by_utf8_bytes() -> None:
+    environment = RecordingEnvironment(
+        FakeExecResult(stdout="\u6d4b" * 80, stderr="", return_code=0)
+    )
+    bridge = make_bridge(asyncio.get_running_loop(), environment, output_limit_bytes=32)
+
+    observation = await asyncio.to_thread(
+        bridge.execute,
+        ShellAction(command="pwd"),
+        1,
+    )
+
+    assert len(observation.model_facing_output.encode("utf-8")) <= 32
+    assert observation.output_truncated is True
+
+
 @pytest.mark.parametrize(
     "action",
     [
@@ -464,7 +497,11 @@ async def test_output_hash_covers_complete_raw_observation_before_model_truncati
         ShellAction(command="cat //tests/hidden.py"),
         ShellAction(command="cat /var/run/docker.so?"),
         WriteFileAction(path="/tmp/../solution/answer.txt", content="x"),
-        WriteFileAction(path=r"tests\\hidden.py", content="x"),
+        WriteFileAction.model_construct(
+            type="write_file",
+            path=r"/tests\\hidden.py",
+            content="x",
+        ),
         WriteFileAction(path="//logs/verifier/reward.txt", content="x"),
         ApplyPatchAction(
             patch="*** Begin Patch\n*** Update File: a/../tests/hidden.py\n*** End Patch\n"

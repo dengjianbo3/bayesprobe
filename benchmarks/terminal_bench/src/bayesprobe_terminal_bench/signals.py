@@ -14,11 +14,19 @@ from bayesprobe import (
     SignalProvenance,
 )
 
-from bayesprobe_terminal_bench.actions import ActionObservation
+from bayesprobe_terminal_bench.actions import (
+    ActionObservation,
+    ApplyPatchAction,
+    ShellAction,
+    TerminalAction,
+    WriteFileAction,
+    action_may_mutate,
+)
 
 
 _HARBOR_TOOL_IDENTITY = "harbor:0.18.0"
-_SIGNAL_SCHEMA_VERSION = "harbor-observation:v1"
+_SIGNAL_SCHEMA_VERSION = "harbor-observation:v2"
+_MAX_OBSERVATION_BYTES = 32_768
 
 
 def signal_from_observation(
@@ -68,12 +76,16 @@ def signal_from_observation(
 
 
 def _observation_payload(observation: ActionObservation) -> dict[str, Any]:
+    bounded_observation, additionally_truncated = _bounded_text(
+        observation.model_facing_output,
+        _MAX_OBSERVATION_BYTES,
+    )
     return {
         "action_index": observation.action_index,
-        "action_type": observation.action.type,
         "error_category": observation.error_category,
-        "model_facing_output": observation.model_facing_output,
-        "output_truncated": observation.output_truncated,
+        "executed_request": executed_request_from_action(observation.action),
+        "observation": bounded_observation,
+        "output_truncated": observation.output_truncated or additionally_truncated,
         "post_environment_state_id": observation.post_environment_state_id,
         "pre_environment_state_id": observation.pre_environment_state_id,
         "return_code": observation.return_code,
@@ -87,9 +99,9 @@ def _root_inputs(
     context: ProbeExecutionBrief,
 ) -> dict[str, Any]:
     return {
-        "action": observation.action.model_dump(mode="json"),
         "action_index": observation.action_index,
         "cycle_id": context.cycle_id,
+        "executed_request": executed_request_from_action(observation.action),
         "full_output_sha256": observation.full_output_sha256,
         "post_environment_state_id": observation.post_environment_state_id,
         "pre_environment_state_id": observation.pre_environment_state_id,
@@ -127,3 +139,37 @@ def _canonical_json(payload: dict[str, Any]) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def executed_request_from_action(action: TerminalAction) -> dict[str, Any]:
+    if isinstance(action, ShellAction):
+        return {
+            "command": action.command,
+            "mutates_environment": action_may_mutate(action),
+            "timeout_seconds": action.timeout_seconds,
+            "type": action.type,
+        }
+    if isinstance(action, WriteFileAction):
+        content = action.content.encode("utf-8")
+        return {
+            "content_bytes": len(content),
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+            "path": action.path,
+            "type": action.type,
+        }
+    if isinstance(action, ApplyPatchAction):
+        patch = action.patch.encode("utf-8")
+        return {
+            "patch_bytes": len(patch),
+            "patch_sha256": hashlib.sha256(patch).hexdigest(),
+            "strip": action.strip,
+            "type": action.type,
+        }
+    raise TypeError(f"unsupported terminal action: {type(action).__name__}")
+
+
+def _bounded_text(value: str, limit: int) -> tuple[str, bool]:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value, False
+    return encoded[:limit].decode("utf-8", errors="ignore"), True

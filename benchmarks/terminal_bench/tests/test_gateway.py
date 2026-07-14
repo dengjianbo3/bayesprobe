@@ -184,9 +184,12 @@ def _large_action_text(marker: str) -> str:
     return marker + "x" * (1_000_000 - len(marker))
 
 
-def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, execution_context) -> None:
+def test_signal_exposes_exact_executed_shell_request_separately_from_observation(
+    probe,
+    execution_context,
+) -> None:
     observation = _observation(
-        action=ShellAction(command="pwd"),
+        action=ShellAction(command="printf tests passed", timeout_seconds=37),
         action_index=4,
         model_facing_output='{"stdout":"only this capped view"}',
         full_output_sha256="b" * 64,
@@ -206,9 +209,14 @@ def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, exe
     assert signal.provenance.epistemic_origin is EpistemicOrigin.TOOL_RESULT
     assert payload == {
         "action_index": 4,
-        "action_type": "shell",
         "error_category": None,
-        "model_facing_output": '{"stdout":"only this capped view"}',
+        "executed_request": {
+            "command": "printf tests passed",
+            "mutates_environment": True,
+            "timeout_seconds": 37,
+            "type": "shell",
+        },
+        "observation": '{"stdout":"only this capped view"}',
         "output_truncated": True,
         "post_environment_state_id": "env:8",
         "pre_environment_state_id": "env:7",
@@ -217,7 +225,7 @@ def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, exe
     }
     assert "full stdout" not in signal.raw_content
     assert "full stderr" not in signal.raw_content
-    assert "pwd" not in signal.raw_content
+    assert "printf tests passed" in signal.raw_content
     assert signal.provenance.canonical_content_fingerprint == _canonical_fingerprint(
         signal.provenance.source_identity,
         signal.raw_content,
@@ -229,7 +237,7 @@ def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, exe
 
 
 @pytest.mark.parametrize(
-    ("action", "marker", "path"),
+    ("action", "marker", "expected_request"),
     [
         (
             WriteFileAction(
@@ -237,14 +245,28 @@ def test_signal_from_observation_uses_capped_content_and_full_lineage(probe, exe
                 content=_large_action_text("WRITE_ACTION_BODY_MUST_NOT_LEAK"),
             ),
             "WRITE_ACTION_BODY_MUST_NOT_LEAK",
-            "/workspace/model-authored-write.txt",
+            {
+                "type": "write_file",
+                "path": "/workspace/model-authored-write.txt",
+                "content_sha256": hashlib.sha256(
+                    _large_action_text("WRITE_ACTION_BODY_MUST_NOT_LEAK").encode("utf-8")
+                ).hexdigest(),
+                "content_bytes": 1_000_000,
+            },
         ),
         (
             ApplyPatchAction(
                 patch=_large_action_text("PATCH_ACTION_BODY_MUST_NOT_LEAK"),
             ),
             "PATCH_ACTION_BODY_MUST_NOT_LEAK",
-            None,
+            {
+                "type": "apply_patch",
+                "strip": 0,
+                "patch_sha256": hashlib.sha256(
+                    _large_action_text("PATCH_ACTION_BODY_MUST_NOT_LEAK").encode("utf-8")
+                ).hexdigest(),
+                "patch_bytes": 1_000_000,
+            },
         ),
     ],
 )
@@ -253,7 +275,7 @@ def test_gateway_keeps_large_write_and_patch_inputs_out_of_signal_payloads(
     execution_context,
     action: TerminalAction,
     marker: str,
-    path: str | None,
+    expected_request: dict[str, object],
 ) -> None:
     observation = _observation(
         action=action,
@@ -271,14 +293,34 @@ def test_gateway_keeps_large_write_and_patch_inputs_out_of_signal_payloads(
     signals = gateway.execute_probe(probe=probe, context=execution_context)
     payload = json.loads(signals[0].raw_content)
 
-    assert payload["action_type"] == action.type
+    assert payload["executed_request"] == expected_request
+    assert payload["observation"] == '{"stdout":"mutation completed"}'
     assert "action" not in payload
     assert marker not in signals[0].raw_content
-    if path is not None:
-        assert path not in signals[0].raw_content
     assert len(signals[0].raw_content) < 1_024
     assert artifacts.observations == [observation]
     assert marker in json.dumps(artifacts.observations[0].model_dump(mode="json"))
+
+
+def test_signal_caps_an_oversized_observation_independently_of_action_artifact(
+    probe,
+    execution_context,
+) -> None:
+    observation = _observation(
+        action=ShellAction(command="printf tests passed"),
+        model_facing_output="z" * 1_000_000,
+    )
+
+    signal = signal_from_observation(
+        observation=observation,
+        probe=probe,
+        context=execution_context,
+    )
+    payload = json.loads(signal.raw_content)
+
+    assert len(payload["observation"].encode("utf-8")) <= 32_768
+    assert payload["output_truncated"] is True
+    assert len(signal.raw_content.encode("utf-8")) < 66_000
 
 
 def test_signal_identity_and_roots_are_deterministic_and_distinct_across_lineages(probe, execution_context) -> None:
@@ -445,6 +487,7 @@ def test_gateway_continues_after_policy_rejection_without_fabricating_an_observa
     assert [item.action_index for item in artifacts.observations] == [2]
     assert artifacts.errors == [
         {
+            "action_index": 1,
             "category": "policy_error",
             "error_type": "PolicyViolation",
             "probe_id": probe.id,

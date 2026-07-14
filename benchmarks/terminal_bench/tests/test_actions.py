@@ -112,6 +112,15 @@ def test_verify_allows_shell_but_not_direct_file_writes() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["result.txt", "workspace/result.txt", "./result.txt", "../result.txt", r"C:\\result.txt"],
+)
+def test_write_file_requires_an_absolute_posix_path(path: str) -> None:
+    with pytest.raises(ValidationError, match="absolute POSIX path"):
+        WriteFileAction(path=path, content="result")
+
+
 def test_intervene_requires_a_potentially_mutating_action() -> None:
     with pytest.raises(ValidationError, match="intervene plans require a mutating action"):
         TerminalProbePlan(

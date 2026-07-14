@@ -11,7 +11,7 @@ import time
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Protocol
 from urllib.parse import unquote
@@ -93,6 +93,8 @@ class ActionPolicy:
         if isinstance(action, ShellAction):
             candidates = self._shell_candidates(action.command)
         elif isinstance(action, WriteFileAction):
+            if not PurePosixPath(action.path).is_absolute():
+                raise PolicyViolation("write_file path must be an absolute POSIX path")
             candidates = self._path_candidates(action.path)
         else:
             candidates = self._patch_candidates(action.patch, action.strip)
@@ -303,9 +305,7 @@ class HarborEnvironmentBridge:
             sort_keys=True,
         )
         encoded_output = raw_output.encode("utf-8")
-        model_facing_output = encoded_output[: self._output_limit_bytes].decode(
-            "utf-8", errors="replace"
-        )
+        model_facing_output = _bounded_utf8(encoded_output, self._output_limit_bytes)
 
         return ActionObservation(
             action_index=action_index,
@@ -404,3 +404,9 @@ class HarborEnvironmentBridge:
             # A cleanup result is never an observation and cannot replace the
             # patch result that triggered it.
             pass
+
+
+def _bounded_utf8(value: bytes, limit: int) -> str:
+    if len(value) <= limit:
+        return value.decode("utf-8")
+    return value[:limit].decode("utf-8", errors="ignore")
