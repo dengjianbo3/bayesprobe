@@ -89,6 +89,7 @@ from bayesprobe.tavily_search import (
     TavilySearchResponse,
     TavilySearchResult,
 )
+from bayesprobe.tavily_probe import TavilyProbeToolGateway
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
     ModelBackedProbeToolGateway,
@@ -316,6 +317,7 @@ __all__ = [
     "TavilySearchRequest",
     "TavilySearchResponse",
     "TavilySearchResult",
+    "TavilyProbeToolGateway",
     "NeedsReframingResult",
     "OutOfScopeResult",
     "SignalProvenance",
