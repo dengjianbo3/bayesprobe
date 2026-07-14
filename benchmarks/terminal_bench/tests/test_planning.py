@@ -266,7 +266,7 @@ def test_terminal_plan_input_recursively_sanitizes_every_outbound_value(probe) -
             pre_environment_state_id="env:0",
             post_environment_state_id="env:0",
             full_output_sha256="a" * 64,
-            model_facing_output="history-secret credential=history-credential" + "x" * 5_000,
+            model_facing_output="secret=history-secret credential=history-credential" + "x" * 5_000,
         ),
         ActionObservation(
             action_index=2,
@@ -294,9 +294,9 @@ def test_terminal_plan_input_recursively_sanitizes_every_outbound_value(probe) -
     unsafe_probe = probe.model_copy(
         update={
             "inquiry_goal": "Inspect /solution/answer.txt only after credential=probe-credential.",
-            "method": "reasoning chain of thought database_password=probe-secret",
+            "method": "Inspect tokenization after database_password=probe-secret.",
             "expected_observation": "confidence=0.99 must not cross the boundary.",
-            "support_condition": {"safe": "token=probe-token"},
+            "support_condition": {"reasoning": "reasoning-value", "safe": "token=probe-token"},
             "weaken_condition": {"safe": "//logs/verifier must remain hidden"},
             "reframe_condition": {"safe": "hidden tests are unavailable"},
         }
@@ -347,6 +347,66 @@ def test_terminal_plan_input_recursively_sanitizes_every_outbound_value(probe) -
     assert '"priority"' not in serialized
 
 
+def test_terminal_plan_input_preserves_benign_security_related_identifiers(probe) -> None:
+    context = SimpleNamespace(
+        problem="Run rg token src and follow the password-policy task text.",
+        task_context="Tokenization remains an ordinary implementation concern.",
+        task_frame={
+            "token_count": 3,
+            "password_policy": "required",
+            "credential_score": 0.8,
+        },
+        hypotheses=(
+            SimpleNamespace(
+                id="H_tokenization",
+                statement="Tokenization may be incomplete.",
+                scope="source tree",
+                predictions=("rg token src finds the relevant code.",),
+                falsifiers=("No tokenization code exists.",),
+            ),
+        ),
+    )
+    benign_probe = probe.model_copy(
+        update={
+            "target_hypotheses": ["H_tokenization"],
+            "method": "rg token src",
+            "inquiry_goal": "Inspect the password-policy implementation.",
+        }
+    )
+
+    payload = terminal_plan_input(probe=benign_probe, context=context, history=())
+    serialized = json.dumps(payload, sort_keys=True)
+
+    assert "rg token src" in serialized
+    assert "password-policy task text" in serialized
+    assert "H_tokenization" in serialized
+    assert payload["task"]["task_frame"] == {
+        "token_count": 3,
+        "password_policy": "required",
+        "credential_score": 0.8,
+    }
+
+
+def test_history_output_truncation_is_utf8_byte_bounded(probe, execution_context) -> None:
+    history = (
+        ActionObservation(
+            action_index=1,
+            action=ShellAction(command="pwd"),
+            duration_ms=0,
+            pre_environment_state_id="env:0",
+            post_environment_state_id="env:0",
+            full_output_sha256="d" * 64,
+            model_facing_output="a" * 4_095 + "é" + "ignored",
+        ),
+    )
+
+    payload = terminal_plan_input(probe=probe, context=execution_context, history=history)
+    output = payload["recent_observations"][0]["observation"]
+
+    assert output == "a" * 4_095
+    assert len(output.encode("utf-8")) <= 4_096
+
+
 def test_successful_response_with_exploding_metadata_still_emits_one_record(probe, execution_context) -> None:
     telemetry: list[dict[str, object]] = []
     planner, client = _planner(
@@ -361,6 +421,44 @@ def test_successful_response_with_exploding_metadata_still_emits_one_record(prob
     assert len(telemetry) == 1
     assert telemetry[0]["outcome"] == "success"
     assert "metadata-access-secret" not in json.dumps(telemetry)
+
+
+def test_telemetry_redacts_authorization_and_openai_style_response_identifiers(
+    probe,
+    execution_context,
+) -> None:
+    telemetry: list[dict[str, object]] = []
+    response = SimpleNamespace(
+        id="sk-abcdefghijklmno123456789",
+        choices=[
+            SimpleNamespace(
+                finish_reason="Authorization: Bearer abcdefghijklmnop",
+                message=SimpleNamespace(content=VALID_PLAN),
+            )
+        ],
+        usage=None,
+    )
+    planner, _ = _planner([response], telemetry=telemetry)
+
+    planner.plan(probe=probe, context=execution_context, history=())
+
+    serialized = json.dumps(telemetry)
+    assert "sk-abcdefghijklmno123456789" not in serialized
+    assert "Authorization: Bearer abcdefghijklmnop" not in serialized
+    assert "[REDACTED]" in serialized
+
+
+def test_telemetry_redacts_secret_like_provider_error_class_names(probe, execution_context) -> None:
+    secret_error_type = type("ProviderError_sk-abcdefghijklmno123456789", (RuntimeError,), {})
+    telemetry: list[dict[str, object]] = []
+    planner, _ = _planner([secret_error_type()], telemetry=telemetry)
+
+    with pytest.raises(TerminalPlanError, match="^terminal planner provider request failed$"):
+        planner.plan(probe=probe, context=execution_context, history=())
+
+    serialized = json.dumps(telemetry)
+    assert "sk-abcdefghijklmno123456789" not in serialized
+    assert "[REDACTED]" in serialized
 
 
 def test_exploding_response_accessors_use_one_repair_and_emit_one_record_per_return(

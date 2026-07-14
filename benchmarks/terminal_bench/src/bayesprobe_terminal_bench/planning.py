@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
@@ -36,31 +37,82 @@ class TerminalProbePlanner(Protocol):
 _REDACTION_MARKER = "[REDACTED]"
 _HISTORY_MODEL_FACING_OUTPUT_LIMIT = 4_096
 _HISTORY_ACTION_TEXT_LIMIT = 4_096
-_FORBIDDEN_KEY_FRAGMENTS = (
-    "apikey",
-    "chainofthought",
-    "confidence",
-    "credential",
-    "password",
-    "posterior",
-    "probability",
-    "prior",
-    "reasoning",
-    "score",
-    "secret",
-    "solution",
-    "token",
-    "verifier",
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}", re.IGNORECASE),
+    re.compile(
+        r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|"
+        r"github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])"
+    ),
+    re.compile(
+        r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{10,}\."
+        r"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_-])"
+    ),
+    re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"),
+    re.compile(
+        r"(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{10,}"
+        r"(?![A-Za-z0-9-])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:api[ _-]?key|access[ _-]?key|private[ _-]?key|password|passwd|"
+        r"credential(?:s)?|cookie|secret|token)\b\s*(?:=|:)\s*[\"']?"
+        r"(?:Bearer\s+)?[A-Za-z0-9._~+/=-]{6,}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bauthorization\b\s*(?:=|:)\s*[\"']?Bearer\s+"
+        r"[A-Za-z0-9._~+/=-]{8,}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bBearer\s+(?=[A-Za-z0-9._~+/=-]{12,}(?:\s|$))"
+        r"(?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{12,}",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bBearer\s+[A-Za-z]{16,}\b", re.IGNORECASE),
+    re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
 )
-_SENSITIVE_TEXT_PATTERN = re.compile(
-    r"""(?ix)
-    /+(?:solution|logs/verifier|tests|hidden_tests)(?:/[^\s'\"<>]*)?
-    | \b(?:database_)?password\b(?:\s*[:=]\s*[^\s,;]+)?
-    | \b(?:prior|posterior|score|confidence|probability|credential|secret|token|reasoning|verifier)\b(?:\s*[:=]\s*[^\s,;]+)?
-    | \bapi[\s_-]*key\b(?:\s*[:=]\s*[^\s,;]+)?
-    | \bchain[\s_-]*of[\s_-]*thought\b
-    | \bhidden[\s_-]*tests?\b
-    """
+_SECRET_KEY_COMPOUNDS = {"apikey", "accesskey", "privatekey", "proxyauthorization"}
+_SECRET_KEY_WORDS = {
+    "authorization",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "credentials",
+    "cookie",
+}
+_BENIGN_SECRET_KEY_FOLLOWERS = {
+    "token": {"count"},
+    "password": {"policy"},
+    "credential": {"score"},
+    "credentials": {"score"},
+    "cookie": {"policy"},
+}
+_SECRET_KEY_SEQUENCES = {("api", "key"), ("access", "key"), ("private", "key")}
+_EPISTEMIC_FIELD_WORDS = {
+    "prior",
+    "priors",
+    "posterior",
+    "posteriors",
+    "score",
+    "scores",
+    "confidence",
+    "probability",
+    "reasoning",
+    "cot",
+    "thought",
+}
+_BENIGN_EPISTEMIC_FIELD_SEQUENCES = {("credential", "score"), ("credentials", "score")}
+_EVALUATOR_PATH_SUFFIXES = {"path", "dir", "directory", "file", "files", "root"}
+_EVALUATOR_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])/{1,}(?:logs/verifier|solution|tests)(?:/[^\s'\"<>]*)?",
+    re.IGNORECASE,
+)
+_ASSIGNMENT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_-]*)\s*(?:=|:)\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 
 
@@ -254,7 +306,7 @@ class OpenAICompatibleTerminalProbePlanner:
     ) -> None:
         record: dict[str, Any] = {
             "task": "terminal_probe_plan",
-            "model": _sanitize_outbound(self._config.model),
+            "model": _redact_sensitive_text(self._config.model),
             "repair": repair,
             "logical_call_index": logical_call_index,
             "outcome": outcome,
@@ -267,7 +319,7 @@ class OpenAICompatibleTerminalProbePlanner:
             except Exception:
                 record["response_metadata"] = "unavailable"
         if error_type is not None:
-            record["error_type"] = error_type
+            record["error_type"] = _redact_sensitive_text(error_type)
         if self._invocation_observer is None:
             return
         try:
@@ -308,13 +360,16 @@ def _history_action_input(observation: ActionObservation) -> dict[str, Any]:
 
 
 def _bounded_text(value: str, limit: int) -> str:
-    return value[:limit]
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="ignore")
 
 
 def _sanitize_outbound(value: Any) -> Any:
     """Drop forbidden fields and redact sensitive string fragments recursively."""
     if isinstance(value, str):
-        return _SENSITIVE_TEXT_PATTERN.sub(_REDACTION_MARKER, value)
+        return _redact_sensitive_text(value)
     if isinstance(value, Mapping):
         return {
             key: _sanitize_outbound(item)
@@ -327,10 +382,87 @@ def _sanitize_outbound(value: Any) -> Any:
 
 
 def _is_private_field_name(value: str) -> bool:
-    compact = "".join(character for character in value.casefold() if character.isalnum())
     return (
-        any(fragment in compact for fragment in _FORBIDDEN_KEY_FRAGMENTS)
-        or ("hidden" in compact and "test" in compact)
+        _is_secret_field_name(value)
+        or _is_epistemic_field_name(value)
+        or _is_evaluator_path_field_name(value)
+    )
+
+
+def _semantic_key_parts(value: str) -> tuple[str, ...]:
+    normalized = unicodedata.normalize("NFKC", value)
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized)
+    return tuple(re.findall(r"[a-z0-9]+", separated.casefold()))
+
+
+def _is_secret_field_name(value: str) -> bool:
+    parts = _semantic_key_parts(value)
+    if not parts:
+        return False
+    compact = "".join(parts)
+    if compact in _SECRET_KEY_COMPOUNDS:
+        return True
+    if any(
+        tuple(parts[index:index + 2]) in _SECRET_KEY_SEQUENCES
+        for index in range(len(parts) - 1)
+    ):
+        return True
+    for index, part in enumerate(parts):
+        if part not in _SECRET_KEY_WORDS:
+            continue
+        follower = parts[index + 1] if index + 1 < len(parts) else None
+        if follower in _BENIGN_SECRET_KEY_FOLLOWERS.get(part, set()):
+            continue
+        return True
+    return False
+
+
+def _is_epistemic_field_name(value: str) -> bool:
+    parts = _semantic_key_parts(value)
+    if any(
+        tuple(parts[index:index + 2]) in _BENIGN_EPISTEMIC_FIELD_SEQUENCES
+        for index in range(len(parts) - 1)
+    ):
+        return False
+    return any(part in _EPISTEMIC_FIELD_WORDS for part in parts) or any(
+        tuple(parts[index:index + 3]) == ("chain", "of", "thought")
+        for index in range(len(parts) - 2)
+    )
+
+
+def _is_evaluator_path_field_name(value: str) -> bool:
+    parts = _semantic_key_parts(value)
+    if parts in {
+        ("verifier",),
+        ("solution",),
+        ("hidden", "test"),
+        ("hidden", "tests"),
+    }:
+        return True
+    has_hidden_tests = any(
+        tuple(parts[index:index + 2]) in {("hidden", "test"), ("hidden", "tests")}
+        for index in range(len(parts) - 1)
+    )
+    return (
+        bool(set(parts).intersection(_EVALUATOR_PATH_SUFFIXES))
+        and ("verifier" in parts or "solution" in parts or has_hidden_tests)
+    )
+
+
+def _redact_sensitive_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", value)
+    for pattern in _SECRET_VALUE_PATTERNS:
+        text = pattern.sub(_REDACTION_MARKER, text)
+    text = _ASSIGNMENT_PATTERN.sub(_redact_sensitive_assignment, text)
+    return _EVALUATOR_PATH_PATTERN.sub(_REDACTION_MARKER, text)
+
+
+def _redact_sensitive_assignment(match: re.Match[str]) -> str:
+    key = match.group("key")
+    return (
+        _REDACTION_MARKER
+        if _is_secret_field_name(key) or _is_epistemic_field_name(key)
+        else match.group(0)
     )
 
 
@@ -360,11 +492,11 @@ def _response_telemetry(response: Any) -> dict[str, Any]:
     }
     response_id = _response_value(response, "id")
     if isinstance(response_id, str):
-        record["response_id"] = _sanitize_outbound(response_id)
+        record["response_id"] = _redact_sensitive_text(response_id)
     choice = _first_choice(response)
     finish_reason = None if choice is None else _response_value(choice, "finish_reason")
     if isinstance(finish_reason, str):
-        record["finish_reason"] = _sanitize_outbound(finish_reason)
+        record["finish_reason"] = _redact_sensitive_text(finish_reason)
     return record
 
 
