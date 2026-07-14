@@ -10,6 +10,7 @@ import tempfile
 import time
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from threading import Lock
 from typing import Protocol
@@ -68,8 +69,25 @@ class ActionPolicy:
         "docker.sock",
     )
     _PROTECTED_RELATIVE_PATHS = ("logs/verifier", "solution", "tests")
+    _PROTECTED_GLOB_TARGETS = (
+        "/logs/verifier/reward.txt",
+        "/solution/answer.txt",
+        "/tests/hidden.py",
+        "/var/run/docker.sock",
+        "/run/docker.sock",
+        "logs/verifier/reward.txt",
+        "solution/answer.txt",
+        "tests/hidden.py",
+    )
     _TOKEN_SPLIT = re.compile(r"[\s'\"`|;&<>]+")
     _SHELL_ESCAPE = re.compile(r"\\(.)")
+    _PATCH_TARGET_PREFIXES = (
+        "--- ",
+        "+++ ",
+        "*** Update File: ",
+        "*** Add File: ",
+        "*** Delete File: ",
+    )
 
     def validate(self, action: TerminalAction) -> None:
         if isinstance(action, ShellAction):
@@ -77,7 +95,7 @@ class ActionPolicy:
         elif isinstance(action, WriteFileAction):
             candidates = self._path_candidates(action.path)
         else:
-            candidates = self._patch_candidates(action.patch)
+            candidates = self._patch_candidates(action.patch, action.strip)
 
         if any(self._is_protected_path(candidate) for candidate in candidates):
             raise PolicyViolation("terminal action targets a protected path")
@@ -94,12 +112,43 @@ class ActionPolicy:
         return cls._expand_candidates(candidates)
 
     @classmethod
-    def _patch_candidates(cls, patch: str) -> tuple[str, ...]:
-        return cls._expand_candidates(cls._TOKEN_SPLIT.split(patch))
+    def _patch_candidates(cls, patch: str, strip: int) -> tuple[str, ...]:
+        targets = cls._patch_target_paths(patch)
+        stripped_targets = [cls._strip_patch_path(target, strip) for target in targets]
+        return cls._expand_candidates([*targets, *stripped_targets])
 
     @classmethod
     def _path_candidates(cls, path: str) -> tuple[str, ...]:
         return cls._expand_candidates((path,))
+
+    @classmethod
+    def _patch_target_paths(cls, patch: str) -> tuple[str, ...]:
+        targets: list[str] = []
+        for line in patch.splitlines():
+            for prefix in cls._PATCH_TARGET_PREFIXES:
+                if line.startswith(prefix):
+                    target = line.removeprefix(prefix).split("\t", 1)[0].strip()
+                    if target:
+                        targets.append(target)
+                    break
+            else:
+                if not line.startswith("diff --git "):
+                    continue
+                try:
+                    fields = shlex.split(line, posix=True)
+                except ValueError:
+                    continue
+                targets.extend(fields[2:4])
+        return tuple(targets)
+
+    @staticmethod
+    def _strip_patch_path(path: str, strip: int) -> str:
+        parts = [
+            part
+            for part in re.sub(r"/+", "/", path.replace("\\", "/")).split("/")
+            if part and part != "."
+        ]
+        return "/".join(parts[strip:])
 
     @classmethod
     def _expand_candidates(cls, candidates: list[str] | tuple[str, ...]) -> tuple[str, ...]:
@@ -127,9 +176,16 @@ class ActionPolicy:
 
     @classmethod
     def _is_protected_path(cls, candidate: str) -> bool:
-        normalized = posixpath.normpath(candidate.replace("\\", "/"))
+        normalized = posixpath.normpath(re.sub(r"/+", "/", candidate.replace("\\", "/")))
         if normalized in (".", ""):
             return False
+        if any(marker in normalized for marker in ("*", "?", "[")):
+            literal_prefix = re.split(r"[*?[]", normalized, maxsplit=1)[0]
+            if any(
+                fnmatchcase(protected, normalized) or protected.startswith(literal_prefix)
+                for protected in cls._PROTECTED_GLOB_TARGETS
+            ):
+                return True
         if normalized == "docker.sock" or normalized.endswith("/docker.sock"):
             return True
         if normalized.startswith("/"):
@@ -166,6 +222,7 @@ class EnvironmentState:
 class HarborEnvironmentBridge:
     _NON_SHELL_TIMEOUT_SECONDS = 120
     _WAIT_GRACE_SECONDS = 5
+    _HARBOR_DOCKER_TIMEOUT = re.compile(r"Command timed out after [1-9]\d* seconds")
 
     def __init__(
         self,
@@ -204,26 +261,35 @@ class HarborEnvironmentBridge:
         error_category: str | None = None
         future: Future[ExecResultLike] | None = None
 
-        try:
-            coroutine = self._execute_async(action)
-            try:
-                future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
-            except Exception:
-                coroutine.close()
-                raise
-            result = future.result(timeout=timeout_seconds + self._WAIT_GRACE_SECONDS)
-            stdout = result.stdout or ""
-            stderr = result.stderr or ""
-            return_code = result.return_code
-        except FutureTimeoutError:
-            if future is not None:
-                future.cancel()
-            timed_out = True
-            error_category = "timeout"
-            stderr = "Harbor action exceeded the configured timeout."
-        except Exception:
+        if not self._loop.is_running():
             error_category = "transport"
             stderr = "Harbor action failed."
+        else:
+            try:
+                coroutine = self._execute_async(action)
+                try:
+                    future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+                except Exception:
+                    coroutine.close()
+                    raise
+                result = future.result(timeout=timeout_seconds + self._WAIT_GRACE_SECONDS)
+                stdout = result.stdout or ""
+                stderr = result.stderr or ""
+                return_code = result.return_code
+            except FutureTimeoutError:
+                if future is not None:
+                    future.cancel()
+                timed_out = True
+                error_category = "timeout"
+                stderr = "Harbor action exceeded the configured timeout."
+            except Exception as error:
+                if self._is_harbor_docker_timeout(error):
+                    timed_out = True
+                    error_category = "timeout"
+                    stderr = "Harbor action exceeded the configured timeout."
+                else:
+                    error_category = "transport"
+                    stderr = "Harbor action failed."
 
         after = self._state.advance() if action_may_mutate(action) else before
         raw_output = json.dumps(
@@ -291,7 +357,13 @@ class HarborEnvironmentBridge:
             )
         finally:
             self._remove_local_file(local_patch)
-            await self._remove_remote_patch(remote_patch)
+            self._schedule_remote_patch_cleanup(remote_patch)
+
+    @classmethod
+    def _is_harbor_docker_timeout(cls, error: Exception) -> bool:
+        return isinstance(error, RuntimeError) and bool(
+            cls._HARBOR_DOCKER_TIMEOUT.fullmatch(str(error))
+        )
 
     @staticmethod
     def _write_temporary_file(content: str) -> Path:
@@ -304,6 +376,22 @@ class HarborEnvironmentBridge:
         try:
             path.unlink(missing_ok=True)
         except Exception:
+            pass
+
+    def _schedule_remote_patch_cleanup(self, remote_patch: str) -> None:
+        coroutine = self._remove_remote_patch(remote_patch)
+        try:
+            task = asyncio.get_running_loop().create_task(coroutine)
+        except Exception:
+            coroutine.close()
+            return
+        task.add_done_callback(self._consume_cleanup_task)
+
+    @staticmethod
+    def _consume_cleanup_task(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except BaseException:
             pass
 
     async def _remove_remote_patch(self, remote_patch: str) -> None:

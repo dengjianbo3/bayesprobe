@@ -127,6 +127,51 @@ async def test_transport_failure_advances_mutating_state_without_leaking_error_s
     assert observation.post_environment_state_id == "env:1"
 
 
+class RuntimeFailureEnvironment(RecordingEnvironment):
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | None = None,
+    ) -> FakeExecResult:
+        raise RuntimeError(self.message)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "timed_out", "error_category"),
+    [
+        ("Command timed out after 120 seconds", True, "timeout"),
+        ("Harbor command unavailable: provider-secret", False, "transport"),
+    ],
+)
+async def test_runtime_failures_use_only_the_known_harbor_timeout_shape(
+    message: str,
+    timed_out: bool,
+    error_category: str,
+) -> None:
+    bridge = make_bridge(asyncio.get_running_loop(), RuntimeFailureEnvironment(message))
+
+    observation = await asyncio.to_thread(
+        bridge.execute,
+        ShellAction(command="touch /app/value.txt"),
+        1,
+    )
+
+    assert observation.timed_out is timed_out
+    assert observation.error_category == error_category
+    assert observation.return_code is None
+    assert observation.post_environment_state_id == "env:1"
+    assert message not in observation.stderr
+    assert "provider-secret" not in observation.model_facing_output
+
+
 @pytest.mark.asyncio
 async def test_closed_captured_loop_is_a_clean_transport_failure_with_mutating_lineage() -> None:
     closed_loop = asyncio.new_event_loop()
@@ -145,6 +190,42 @@ async def test_closed_captured_loop_is_a_clean_transport_failure_with_mutating_l
     assert observation.error_category == "transport"
     assert observation.stderr == "Harbor action failed."
     assert observation.pre_environment_state_id == "env:0"
+    assert observation.post_environment_state_id == "env:1"
+    assert not [
+        warning
+        for warning in captured_warnings
+        if issubclass(warning.category, RuntimeWarning)
+        and "was never awaited" in str(warning.message)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stopped_open_loop_returns_without_unawaited_coroutine_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stopped_loop = asyncio.new_event_loop()
+    monkeypatch.setattr(HarborEnvironmentBridge, "_WAIT_GRACE_SECONDS", 0)
+    bridge = make_bridge(stopped_loop, RecordingEnvironment())
+
+    with warnings.catch_warnings(record=True) as captured_warnings:
+        warnings.simplefilter("always")
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                bridge.execute,
+                ShellAction(command="touch /app/value.txt", timeout_seconds=1),
+                1,
+            )
+        )
+        try:
+            observation = await asyncio.wait_for(asyncio.shield(worker), timeout=0.25)
+        finally:
+            if not worker.done():
+                await worker
+            stopped_loop.close()
+            gc.collect()
+
+    assert observation.timed_out is False
+    assert observation.error_category == "transport"
     assert observation.post_environment_state_id == "env:1"
     assert not [
         warning
@@ -202,6 +283,10 @@ async def test_timeout_is_bounded_cancels_harbor_work_and_advances_mutating_stat
 
 
 class PatchCleanupFailureEnvironment(RecordingEnvironment):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanup_started = asyncio.Event()
+
     async def exec(
         self,
         command: str,
@@ -212,6 +297,7 @@ class PatchCleanupFailureEnvironment(RecordingEnvironment):
     ) -> FakeExecResult:
         self.commands.append((command, timeout_sec))
         if command.startswith("rm -f "):
+            self.cleanup_started.set()
             raise RuntimeError("cleanup-secret")
         return FakeExecResult(stdout="patch output", stderr="patch error", return_code=7)
 
@@ -234,6 +320,7 @@ async def test_patch_cleanup_failure_never_masks_nonzero_execution_result() -> N
     assert observation.post_environment_state_id == "env:1"
     assert "cleanup-secret" not in observation.model_facing_output
     assert len(environment.uploads) == 1
+    await asyncio.wait_for(environment.cleanup_started.wait(), timeout=1)
     assert any(command.startswith("rm -f ") for command, _ in environment.commands)
 
 
@@ -292,6 +379,55 @@ async def test_patch_cleanup_failure_never_masks_primary_transport_failure() -> 
     assert "cleanup-secret" not in observation.model_facing_output
 
 
+class DelayedPatchCleanupEnvironment(RecordingEnvironment):
+    def __init__(self) -> None:
+        super().__init__(FakeExecResult(stdout="patch output", return_code=7))
+        self.cleanup_started = asyncio.Event()
+        self.release_cleanup = asyncio.Event()
+        self.cleanup_finished = asyncio.Event()
+
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | None = None,
+    ) -> FakeExecResult:
+        self.commands.append((command, timeout_sec))
+        if command.startswith("rm -f "):
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+            self.cleanup_finished.set()
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_patch_primary_result_is_not_delayed_by_remote_cleanup() -> None:
+    environment = DelayedPatchCleanupEnvironment()
+    bridge = make_bridge(asyncio.get_running_loop(), environment)
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            bridge.execute,
+            ApplyPatchAction(patch="*** Begin Patch\n*** End Patch\n"),
+            1,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(environment.cleanup_started.wait(), timeout=1)
+        observation = await asyncio.wait_for(asyncio.shield(worker), timeout=0.25)
+    finally:
+        environment.release_cleanup.set()
+        await asyncio.wait_for(environment.cleanup_finished.wait(), timeout=1)
+        if not worker.done():
+            await worker
+
+    assert observation.return_code == 7
+    assert observation.error_category is None
+    assert observation.post_environment_state_id == "env:1"
+
+
 @pytest.mark.asyncio
 async def test_output_hash_covers_complete_raw_observation_before_model_truncation() -> None:
     environment = RecordingEnvironment(
@@ -325,10 +461,17 @@ async def test_output_hash_covers_complete_raw_observation_before_model_truncati
         ShellAction(command=r"cat /te\\sts/hidden.py"),
         ShellAction(command="cat %2Fsolution%2Fanswer.txt"),
         ShellAction(command=r"cat $'\x2fvar\x2frun\x2fdocker.sock'"),
+        ShellAction(command="cat //tests/hidden.py"),
+        ShellAction(command="cat /var/run/docker.so?"),
         WriteFileAction(path="/tmp/../solution/answer.txt", content="x"),
         WriteFileAction(path=r"tests\\hidden.py", content="x"),
+        WriteFileAction(path="//logs/verifier/reward.txt", content="x"),
         ApplyPatchAction(
             patch="*** Begin Patch\n*** Update File: a/../tests/hidden.py\n*** End Patch\n"
+        ),
+        ApplyPatchAction(
+            patch="*** Begin Patch\n*** Update File: a/tests/hidden.py\n*** End Patch\n",
+            strip=1,
         ),
         ApplyPatchAction(
             patch="*** Begin Patch\n*** Update File: /var/run/../run/docker.sock\n*** End Patch\n"
