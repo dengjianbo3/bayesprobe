@@ -29,6 +29,28 @@ from bayesprobe.evaluation import cli as evaluation_cli
             "report_capability_experiment",
             Path("restricted/experiment"),
         ),
+        (
+            [
+                "eval",
+                "checkpoint-prepare",
+                "--config",
+                "pilot.json",
+                "--source-experiment",
+                "restricted/source",
+            ],
+            "prepare_paradigm_checkpoint",
+            (Path("pilot.json"), Path("restricted/source")),
+        ),
+        (
+            ["eval", "checkpoint-run", "--experiment", "restricted/checkpoint"],
+            "run_paradigm_checkpoint",
+            Path("restricted/checkpoint"),
+        ),
+        (
+            ["eval", "checkpoint-score", "--experiment", "restricted/checkpoint"],
+            "score_paradigm_checkpoint",
+            Path("restricted/checkpoint"),
+        ),
     ],
 )
 def test_eval_cli_dispatches_four_phase_commands(
@@ -40,8 +62,8 @@ def test_eval_cli_dispatches_four_phase_commands(
 ):
     calls = []
 
-    def fake_handler(path):
-        calls.append(path)
+    def fake_handler(*paths):
+        calls.append(paths[0] if len(paths) == 1 else paths)
         return f"completed {function_name}"
 
     monkeypatch.setattr(evaluation_cli, function_name, fake_handler)
@@ -86,3 +108,19 @@ def test_eval_cli_returns_one_with_sanitized_error(monkeypatch, capsys):
     assert "provider rejected" in captured.err
     assert "sk-super-secret-value" not in captured.err
     assert "<redacted>" in captured.err
+
+
+def test_eval_cli_does_not_expose_restricted_key_error_value(monkeypatch, capsys):
+    def fail(path):
+        raise KeyError("restricted-sample-id")
+
+    monkeypatch.setattr(evaluation_cli, "score_paradigm_checkpoint", fail)
+
+    exit_code = main(
+        ["eval", "checkpoint-score", "--experiment", "restricted/checkpoint"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "restricted-sample-id" not in captured.err
+    assert "invalid or incomplete checkpoint artifact" in captured.err

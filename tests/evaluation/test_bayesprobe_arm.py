@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 
-from bayesprobe.evaluation.arms import BayesProbePythonArm
+from bayesprobe.evaluation.arms import BayesProbePythonArm, _any_posterior_increase
 from bayesprobe.evaluation.contracts import EvaluationCase
 from bayesprobe.ledger import JsonlLedgerStore
 
@@ -143,6 +143,28 @@ def test_bayesprobe_arm_freezes_autonomous_policy_and_process_metrics():
     assert 0 <= result.process_metrics["falsification_cycles"] <= 4
     assert result.process_metrics["max_absolute_contribution_delta"] > 0.0
     assert result.process_metrics["epistemic_stagnation"] is False
+    assert result.process_metrics["cycle_one_answer"] == "B"
+    assert result.process_metrics["cycle_four_equivalent_answer"] == "B"
+    assert isinstance(result.process_metrics["same_root_no_change_cycles"], int)
+    assert result.process_metrics["same_root_posterior_drift_violations"] == 0
+    assert result.process_metrics["no_change_confidence_increases"] == 0
+
+
+def test_no_change_confidence_check_catches_non_top_posterior_increase():
+    class Belief:
+        def __init__(self, values):
+            self._values = values
+
+        def hypotheses_by_id(self):
+            return {
+                key: type("Hypothesis", (), {"posterior": value})()
+                for key, value in self._values.items()
+            }
+
+    previous = Belief({"A": 0.8, "B": 0.2})
+    current = Belief({"A": 0.7, "B": 0.3})
+
+    assert _any_posterior_increase(previous, current) is True
 
 
 def test_bayesprobe_arm_adds_case_context_to_every_provider_request_without_gold():

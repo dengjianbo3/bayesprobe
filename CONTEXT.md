@@ -18,7 +18,8 @@ BayesProbe is the project context for a new agent paradigm centered on signal-gr
   falsification, and stagnation without reimplementing Evidence rules.
 - Offline conformance tests prove same-model-root no-self-reinforcement,
   independent-tool counterevidence, and same-root reversal. They do not prove
-  higher HLE accuracy. The frozen 30-case process checkpoint remains pending.
+  higher HLE accuracy. The correctness-blind 77-to-30 checkpoint executor is
+  implemented; its provider-backed run and score remain pending.
 
 ## Language
 

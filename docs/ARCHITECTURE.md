@@ -681,7 +681,7 @@ snapshot, and completes the four-phase protocol.
 | Prompt/version metadata | Good MVP | StructuredModelRequest metadata and EvidenceEvent model_trace are implemented. |
 | Multi-agent protocol | Partial | Projection-as-signal semantics exist; transport/protocol schema not complete. |
 | Production persistence | Missing | JSONL only. |
-| Capability evaluation | Strong MVP | Gold-isolated HLE text-MCQ preparation, Direct/BayesProbe paired arms, Docker Python probes, resumable execution, exact scoring, paired/calibration metrics, and leak-safe reports are implemented and synthetic-tested. Formal HLE execution remains pending. |
+| Capability evaluation | Strong MVP | Gold-isolated HLE text-MCQ preparation, Direct/BayesProbe paired arms, Docker Python probes, resumable execution, exact scoring, paired/calibration metrics, leak-safe reports, and the frozen 77-to-30 paradigm checkpoint executor are implemented and synthetic-tested. Formal corrected HLE execution remains pending. |
 | Large benchmark suite | Partial | The HLE text-MCQ-100 runner is ready, but no formal gated run or broader multimodal/exact-answer suite has been completed. |
 
 ## 6. Open-Question Framing Status
@@ -704,8 +704,13 @@ claims.
 Cross-cycle Evidence Memory v3 is implemented for native runs. It owns
 provenance identity, Evidence Root bindings, current root contributions, and
 discovery/falsification history. The remaining limitation is empirical: the
-frozen 30-case process checkpoint has not yet been run, so no corrected HLE
-accuracy claim follows from the conformance work.
+frozen 30-case process checkpoint executor is ready but has not yet completed a
+provider-backed run, so no corrected HLE accuracy claim follows from the
+conformance work. `checkpoint-prepare` freezes the completed/completed 77-case
+population before reading gold, hashes the reused Direct results, and writes the
+30-case manifest last. `checkpoint-run` refuses to schedule the reused Direct
+arm and reruns only corrected BayesProbe; `checkpoint-score` reports cycle-one
+and final accuracy plus root, falsification, stagnation, and drift metrics.
 
 ## 7. External Seams and Configuration
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -28,6 +29,11 @@ from bayesprobe.evaluation.hle import (
     HLEDatasetAdapter,
 )
 from bayesprobe.evaluation.python_probe import DockerPythonSandbox
+from bayesprobe.evaluation.paradigm_checkpoint import (
+    prepare_paradigm_checkpoint,
+    run_paradigm_checkpoint,
+    score_paradigm_checkpoint,
+)
 from bayesprobe.evaluation.runner import (
     CapabilityExperimentRunner,
     CapabilityPreflightResult,
@@ -70,6 +76,24 @@ def add_eval_subparser(subparsers: Any) -> None:
             required=True,
             help="Path to the restricted capability experiment directory.",
         )
+    checkpoint_prepare = commands.add_parser("checkpoint-prepare")
+    checkpoint_prepare.add_argument(
+        "--config",
+        required=True,
+        help="Path to the frozen HLE v0.1 experiment JSON config.",
+    )
+    checkpoint_prepare.add_argument(
+        "--source-experiment",
+        required=True,
+        help="Path to the completed restricted HLE v0.1 source experiment.",
+    )
+    for command in ("checkpoint-run", "checkpoint-score"):
+        command_parser = commands.add_parser(command)
+        command_parser.add_argument(
+            "--experiment",
+            required=True,
+            help="Path to the prepared paradigm checkpoint directory.",
+        )
 
 
 def run_eval_command(args: argparse.Namespace) -> int:
@@ -82,9 +106,27 @@ def run_eval_command(args: argparse.Namespace) -> int:
             message = score_capability_experiment(Path(args.experiment))
         elif args.eval_command == "report":
             message = report_capability_experiment(Path(args.experiment))
+        elif args.eval_command == "checkpoint-prepare":
+            message = prepare_paradigm_checkpoint(
+                Path(args.config),
+                Path(args.source_experiment),
+            )
+        elif args.eval_command == "checkpoint-run":
+            message = run_paradigm_checkpoint(Path(args.experiment))
+        elif args.eval_command == "checkpoint-score":
+            message = score_paradigm_checkpoint(Path(args.experiment))
         else:
             raise ValueError(f"unsupported eval command: {args.eval_command}")
-    except (ValueError, OSError, RuntimeError) as error:
+    except KeyError:
+        print("error: invalid or incomplete checkpoint artifact", file=sys.stderr)
+        return 1
+    except (
+        TypeError,
+        ValueError,
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+    ) as error:
         print(f"error: {_sanitized_error(error)}", file=sys.stderr)
         return 1
     print(message)

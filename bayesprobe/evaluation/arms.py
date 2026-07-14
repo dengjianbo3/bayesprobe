@@ -30,7 +30,7 @@ from bayesprobe.question_runner import (
     AutonomousQuestionRunner,
     AutonomousQuestionStopReason,
 )
-from bayesprobe.schemas import SignalKind
+from bayesprobe.schemas import EvidenceContributionMode, SignalKind
 
 
 _DIRECT_REQUIRED_KEYS = frozenset(
@@ -327,6 +327,42 @@ def _run_process_metrics(
         ),
         len(cycles),
     )
+    previous_states = [
+        result.initial_belief_state,
+        *(cycle.belief_state for cycle in cycles[:-1]),
+    ]
+    same_root_no_change_cycles = 0
+    same_root_posterior_drift_violations = 0
+    no_change_confidence_increases = 0
+    for previous_state, cycle in zip(previous_states, cycles):
+        has_root_change = (
+            cycle.epistemic_progress.new_root_count
+            + cycle.epistemic_progress.revised_root_count
+            + cycle.epistemic_progress.retracted_root_count
+        ) > 0
+        no_change_cycle = (
+            not has_root_change
+            and cycle.epistemic_progress.max_absolute_contribution_delta == 0.0
+            and not cycle.hypothesis_evolutions
+            and previous_state.frame_state == cycle.belief_state.frame_state
+        )
+        same_root_no_change = (
+            no_change_cycle
+            and bool(cycle.contribution_deltas)
+            and all(
+                delta.mode is EvidenceContributionMode.NO_CHANGE
+                for delta in cycle.contribution_deltas
+            )
+        )
+        if same_root_no_change:
+            same_root_no_change_cycles += 1
+            if _posterior_vector_changed(previous_state, cycle.belief_state):
+                same_root_posterior_drift_violations += 1
+        if no_change_cycle and _any_posterior_increase(
+            previous_state,
+            cycle.belief_state,
+        ):
+            no_change_confidence_increases += 1
     metrics: dict[str, int | float | str | bool] = {
         "cycles": len(cycles),
         "probes": probes,
@@ -364,6 +400,13 @@ def _run_process_metrics(
         ),
         "epistemic_stagnation": result.stop_reason
         == AutonomousQuestionStopReason.EPISTEMIC_STAGNATION,
+        "cycle_one_answer": top_sequence[1] if cycles else top_sequence[0],
+        "cycle_four_equivalent_answer": final_answer,
+        "same_root_no_change_cycles": same_root_no_change_cycles,
+        "same_root_posterior_drift_violations": (
+            same_root_posterior_drift_violations
+        ),
+        "no_change_confidence_increases": no_change_confidence_increases,
     }
     metrics.update(python_metrics)
     return metrics
@@ -374,6 +417,33 @@ def _top_hypothesis_id(belief_state: Any) -> str:
         belief_state.hypotheses,
         key=lambda hypothesis: hypothesis.posterior,
     ).id
+
+
+def _posterior_vector_changed(previous: Any, current: Any) -> bool:
+    previous_by_id = previous.hypotheses_by_id()
+    current_by_id = current.hypotheses_by_id()
+    if set(previous_by_id) != set(current_by_id):
+        return True
+    return any(
+        abs(
+            previous_by_id[hypothesis_id].posterior
+            - current_by_id[hypothesis_id].posterior
+        )
+        > 1e-12
+        for hypothesis_id in previous_by_id
+    )
+
+
+def _any_posterior_increase(previous: Any, current: Any) -> bool:
+    previous_by_id = previous.hypotheses_by_id()
+    current_by_id = current.hypotheses_by_id()
+    if set(previous_by_id) != set(current_by_id):
+        return True
+    return any(
+        current_by_id[hypothesis_id].posterior
+        > previous_by_id[hypothesis_id].posterior + 1e-12
+        for hypothesis_id in previous_by_id
+    )
 
 
 def _result_from_payload(
