@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from bayesprobe import ProbeDesign, ProbeExecutionBrief, ProbeExecutionHypothesisView
+
+
+FIXED_DATASET = "terminal-bench/terminal-bench-2"
+FIXED_TASK = "terminal-bench/break-filter-js-from-html"
+FIXED_DATASET_REVISION = "sha256:" + "1" * 64
+FIXED_TASK_CHECKSUM = "sha256:" + "2" * 64
+FIXED_CONTAINER_IMAGE = (
+    "ghcr.io/laude-institute/break-filter-js-from-html@sha256:" + "3" * 64
+)
 
 
 @pytest.fixture
@@ -64,3 +76,67 @@ def execution_context() -> ProbeExecutionBrief:
             ),
         ),
     )
+
+
+@pytest.fixture
+def synthetic_oracle_job(tmp_path: Path) -> Path:
+    job_dir = tmp_path / "oracle-job"
+    trial_dir = job_dir / "break-filter-js-from-html__oracle"
+    trial_dir.mkdir(parents=True)
+
+    job_config = {
+        "job_name": "bayesprobe-terminal-bench-oracle-smoke",
+        "jobs_dir": ".runs/harbor/oracle",
+        "n_attempts": 1,
+        "n_concurrent_trials": 1,
+        "datasets": [
+            {
+                "name": FIXED_DATASET,
+                "ref": FIXED_DATASET_REVISION,
+                "task_names": [FIXED_TASK],
+            }
+        ],
+        "agents": [{"name": "oracle"}],
+        "environment": {"type": "docker", "delete": True},
+    }
+    trial_config = {
+        "task": {
+            "name": FIXED_TASK,
+            "ref": FIXED_DATASET_REVISION,
+            "source": FIXED_DATASET,
+        },
+        "trial_name": trial_dir.name,
+        "trials_dir": str(job_dir),
+        "agent": {"name": "oracle"},
+        "environment": {"type": "docker", "delete": True},
+        # Harbor's downloaded task environment supplies this value. The
+        # fixture keeps it explicit so lock parsing remains fully offline.
+        "task_environment": {"docker_image": FIXED_CONTAINER_IMAGE},
+    }
+    trial_result = {
+        "task_name": "break-filter-js-from-html",
+        "trial_name": trial_dir.name,
+        "task_id": {
+            "org": "terminal-bench",
+            "name": "break-filter-js-from-html",
+            "ref": FIXED_DATASET_REVISION,
+        },
+        "source": FIXED_DATASET,
+        "task_checksum": FIXED_TASK_CHECKSUM,
+        "config": trial_config,
+        "agent_info": {"name": "oracle", "version": "0.18.0"},
+        "verifier_result": {"rewards": {"reward": 1.0}},
+        "started_at": "2026-07-14T00:00:00Z",
+        "finished_at": "2026-07-14T00:01:00Z",
+    }
+
+    (job_dir / "config.json").write_text(
+        json.dumps(job_config), encoding="utf-8"
+    )
+    (trial_dir / "config.json").write_text(
+        json.dumps(trial_config), encoding="utf-8"
+    )
+    (trial_dir / "result.json").write_text(
+        json.dumps(trial_result), encoding="utf-8"
+    )
+    return job_dir

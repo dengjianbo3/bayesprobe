@@ -1,0 +1,463 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import tempfile
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from importlib.metadata import version
+from pathlib import Path
+from typing import Any
+
+from bayesprobe_terminal_bench.config import TerminalBenchConfig
+
+
+HARBOR_VERSION = "0.18.0"
+DATASET_NAME = "terminal-bench/terminal-bench-2"
+TASK_ID = "terminal-bench/break-filter-js-from-html"
+LOCK_SCHEMA_VERSION = "terminal_bench_lock:v0.1"
+TERMINAL_PLAN_VERSION = "terminal_probe_plan:v0.1"
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class RuntimeIdentity:
+    harbor_version: str
+    root_git_sha: str
+    adapter_tree_sha: str
+    image_digest: str
+
+
+@dataclass(frozen=True)
+class OracleIdentity:
+    dataset_name: str
+    dataset_revision: str
+    task_id: str
+    task_checksum: str
+    container_image: str
+    n_attempts: int
+
+
+def build_lock(
+    *,
+    job_dir: Path,
+    config: TerminalBenchConfig,
+    runtime_identity: RuntimeIdentity,
+    restricted_values: tuple[str, ...] = (),
+) -> dict[str, object]:
+    oracle = _extract_oracle_identity(Path(job_dir))
+    if runtime_identity.harbor_version != HARBOR_VERSION:
+        raise ValueError(f"Harbor version must be {HARBOR_VERSION}")
+    if not _DIGEST.fullmatch(runtime_identity.image_digest):
+        raise ValueError("image digest must be a sha256 digest")
+
+    lock: dict[str, object] = {
+        "schema_version": LOCK_SCHEMA_VERSION,
+        "harbor_version": runtime_identity.harbor_version,
+        "dataset_name": oracle.dataset_name,
+        "dataset_revision": oracle.dataset_revision,
+        "task_id": oracle.task_id,
+        "task_checksum": oracle.task_checksum,
+        "container_image": oracle.container_image,
+        "image_digest": runtime_identity.image_digest,
+        "root_git_sha": runtime_identity.root_git_sha,
+        "adapter_tree_sha": runtime_identity.adapter_tree_sha,
+        "n_attempts": oracle.n_attempts,
+        "model": config.model,
+        "base_url": config.base_url,
+        "provider_protocol": "openai_chat_completions",
+        "api_key_env": config.api_key_env,
+        "temperature": 0,
+        "max_cycles": config.max_cycles,
+        "max_probes_per_cycle": config.max_probes_per_cycle,
+        "max_actions_per_probe": config.max_actions_per_probe,
+        "max_total_actions": config.max_total_actions,
+        "max_model_calls": config.max_model_calls,
+        "command_timeout_seconds": config.command_timeout_seconds,
+        "provider_timeout_seconds": config.provider_timeout_seconds,
+        "max_output_tokens": config.max_output_tokens,
+        "signal_output_bytes": config.signal_output_bytes,
+        "terminal_plan_version": TERMINAL_PLAN_VERSION,
+    }
+    _serialize_lock(lock, restricted_values=restricted_values)
+    return lock
+
+
+def collect_runtime_identity(
+    *,
+    repository_root: Path,
+    container_image: str,
+) -> RuntimeIdentity:
+    installed_harbor = version("harbor")
+    if installed_harbor != HARBOR_VERSION:
+        raise ValueError(
+            f"Harbor version must be {HARBOR_VERSION}; found {installed_harbor}"
+        )
+    root = Path(repository_root).resolve()
+    return RuntimeIdentity(
+        harbor_version=installed_harbor,
+        root_git_sha=_run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            error="could not resolve repository Git identity",
+        ),
+        adapter_tree_sha=_run(
+            ["git", "rev-parse", "HEAD:benchmarks/terminal_bench"],
+            cwd=root,
+            error="could not resolve committed adapter tree identity",
+        ),
+        image_digest=_docker_image_digest(container_image),
+    )
+
+
+def write_lock_atomic(
+    output_path: Path,
+    lock: Mapping[str, object],
+    *,
+    restricted_values: tuple[str, ...] = (),
+) -> None:
+    output = Path(output_path)
+    serialized = _serialize_lock(lock, restricted_values=restricted_values)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Write the locked Terminal-Bench engineering smoke identity."
+    )
+    parser.add_argument("--oracle-job", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args(argv)
+
+    config, api_key = TerminalBenchConfig.from_sources()
+    oracle = _extract_oracle_identity(args.oracle_job)
+    repository_root = Path(__file__).resolve().parents[3]
+    runtime_identity = collect_runtime_identity(
+        repository_root=repository_root,
+        container_image=oracle.container_image,
+    )
+    lock = build_lock(
+        job_dir=args.oracle_job,
+        config=config,
+        runtime_identity=runtime_identity,
+        restricted_values=(api_key,),
+    )
+    write_lock_atomic(args.output, lock, restricted_values=(api_key,))
+    return 0
+
+
+def _extract_oracle_identity(job_dir: Path) -> OracleIdentity:
+    if not job_dir.is_dir():
+        raise ValueError("Oracle job directory does not exist")
+    completed = _completed_trial_files(job_dir)
+    if not completed:
+        root_result_path = job_dir / "result.json"
+        if root_result_path.is_file():
+            root_result = _read_object(root_result_path)
+            reward = _official_reward(root_result)
+            if reward != 1.0:
+                raise ValueError("oracle reward must be 1")
+        raise ValueError("exactly one completed Oracle trial is required; found 0")
+    if len(completed) != 1:
+        raise ValueError(
+            f"exactly one completed Oracle trial is required; found {len(completed)}"
+        )
+
+    config_path, result_path = completed[0]
+    trial_config = _read_object(config_path)
+    trial_result = _read_object(result_path)
+    reward = _official_reward(trial_result)
+    if reward != 1.0:
+        raise ValueError("oracle reward must be 1")
+
+    job_config_path = job_dir / "config.json"
+    job_config = (
+        _read_object(job_config_path) if job_config_path.is_file() else {}
+    )
+    dataset_name, dataset_revision, n_attempts = _dataset_identity(
+        job_config=job_config,
+        trial_config=trial_config,
+        trial_result=trial_result,
+    )
+    task_id = _task_identity(trial_config, trial_result)
+    if dataset_name != DATASET_NAME:
+        raise ValueError(f"Oracle dataset must be {DATASET_NAME}")
+    if task_id != TASK_ID:
+        raise ValueError(f"Oracle task must be {TASK_ID}")
+
+    task_checksum = _required_string(trial_result.get("task_checksum"), "task checksum")
+    container_image = _container_image(trial_config, trial_result)
+    return OracleIdentity(
+        dataset_name=dataset_name,
+        dataset_revision=dataset_revision,
+        task_id=task_id,
+        task_checksum=task_checksum,
+        container_image=container_image,
+        n_attempts=n_attempts,
+    )
+
+
+def _completed_trial_files(job_dir: Path) -> list[tuple[Path, Path]]:
+    completed: list[tuple[Path, Path]] = []
+    for result_path in sorted(job_dir.rglob("result.json")):
+        if result_path.parent == job_dir:
+            continue
+        config_path = result_path.with_name("config.json")
+        if not config_path.is_file():
+            continue
+        result = _read_object(result_path)
+        if result.get("finished_at") is not None:
+            completed.append((config_path, result_path))
+    return completed
+
+
+def _official_reward(result: Mapping[str, Any]) -> float:
+    verifier = result.get("verifier_result")
+    if isinstance(verifier, Mapping):
+        rewards = verifier.get("rewards")
+        if isinstance(rewards, Mapping):
+            values = [
+                float(value)
+                for value in rewards.values()
+                if type(value) in (int, float)
+            ]
+            if len(values) == 1:
+                return values[0]
+            if "reward" in rewards and type(rewards["reward"]) in (int, float):
+                return float(rewards["reward"])
+    reward = result.get("reward")
+    if type(reward) in (int, float):
+        return float(reward)
+    raise ValueError("completed Oracle trial has no official reward")
+
+
+def _dataset_identity(
+    *,
+    job_config: Mapping[str, Any],
+    trial_config: Mapping[str, Any],
+    trial_result: Mapping[str, Any],
+) -> tuple[str, str, int]:
+    datasets = job_config.get("datasets")
+    matching: list[Mapping[str, Any]] = []
+    if isinstance(datasets, list):
+        matching = [
+            item
+            for item in datasets
+            if isinstance(item, Mapping) and item.get("name") == DATASET_NAME
+        ]
+    if len(matching) > 1:
+        raise ValueError("Oracle job contains duplicate fixed datasets")
+
+    task_config = trial_config.get("task")
+    task_mapping = task_config if isinstance(task_config, Mapping) else {}
+    dataset_name = (
+        matching[0].get("name") if matching else trial_result.get("source")
+    )
+    if not isinstance(dataset_name, str) or not dataset_name.strip():
+        dataset_name = task_mapping.get("source")
+    dataset_revision: object = None
+    if matching:
+        dataset_revision = matching[0].get("ref") or matching[0].get("version")
+    if dataset_revision is None:
+        dataset_revision = task_mapping.get("ref")
+    n_attempts = job_config.get("n_attempts", 1)
+    if type(n_attempts) is not int or n_attempts != 1:
+        raise ValueError("Oracle smoke must use exactly one attempt")
+    return (
+        _required_string(dataset_name, "dataset name"),
+        _required_string(dataset_revision, "dataset revision"),
+        n_attempts,
+    )
+
+
+def _task_identity(
+    trial_config: Mapping[str, Any],
+    trial_result: Mapping[str, Any],
+) -> str:
+    identities: set[str] = set()
+    task_id = trial_result.get("task_id")
+    if isinstance(task_id, Mapping):
+        org = task_id.get("org")
+        name = task_id.get("name")
+        if isinstance(org, str) and isinstance(name, str):
+            identities.add(f"{org}/{name}")
+    for document in (trial_config, trial_result.get("config")):
+        if not isinstance(document, Mapping):
+            continue
+        task = document.get("task")
+        if isinstance(task, Mapping):
+            name = task.get("name")
+            if isinstance(name, str) and name.strip():
+                identities.add(name.strip())
+    if len(identities) > 1:
+        raise ValueError("completed Oracle trial contains conflicting task identities")
+    if not identities:
+        raise ValueError("completed Oracle trial has no task identity")
+    return identities.pop()
+
+
+def _container_image(
+    trial_config: Mapping[str, Any],
+    trial_result: Mapping[str, Any],
+) -> str:
+    values: set[str] = set()
+    for document in (trial_config, trial_result):
+        for key, value in _walk(document):
+            if key in {"container_image", "docker_image"} and isinstance(value, str):
+                if value.strip():
+                    values.add(value.strip())
+    if len(values) != 1:
+        raise ValueError(
+            f"completed Oracle trial must identify exactly one container image; found {len(values)}"
+        )
+    return values.pop()
+
+
+def _walk(value: Any) -> list[tuple[str, Any]]:
+    fields: list[tuple[str, Any]] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            fields.append((str(key), item))
+            fields.extend(_walk(item))
+    elif isinstance(value, list):
+        for item in value:
+            fields.extend(_walk(item))
+    return fields
+
+
+def _docker_image_digest(container_image: str) -> str:
+    output = _run(
+        ["docker", "image", "inspect", container_image],
+        cwd=None,
+        error="could not inspect locked container image",
+    )
+    try:
+        documents = json.loads(output)
+    except json.JSONDecodeError:
+        raise ValueError("Docker image inspect returned invalid JSON") from None
+    if not isinstance(documents, list) or len(documents) != 1:
+        raise ValueError("Docker image inspect must resolve exactly one image")
+    document = documents[0]
+    if not isinstance(document, Mapping):
+        raise ValueError("Docker image inspect returned an invalid image record")
+    matching_repo_digests: set[str] = set()
+    repo_digests_found: list[str] = []
+    repository = _image_repository(container_image)
+    repo_digests = document.get("RepoDigests")
+    if isinstance(repo_digests, list):
+        for item in repo_digests:
+            if not isinstance(item, str) or "@" not in item:
+                continue
+            repo, digest = item.rsplit("@", 1)
+            if not _DIGEST.fullmatch(digest):
+                continue
+            repo_digests_found.append(digest)
+            if repo == repository:
+                matching_repo_digests.add(digest)
+    if len(matching_repo_digests) > 1:
+        raise ValueError("Docker image resolves to conflicting repository digests")
+    if matching_repo_digests:
+        return matching_repo_digests.pop()
+
+    explicit_digest = (
+        container_image.rsplit("@", 1)[-1] if "@" in container_image else None
+    )
+    if isinstance(explicit_digest, str) and _DIGEST.fullmatch(explicit_digest):
+        return explicit_digest
+    if len(set(repo_digests_found)) == 1:
+        return repo_digests_found[0]
+    image_id = document.get("Id")
+    if isinstance(image_id, str) and _DIGEST.fullmatch(image_id):
+        return image_id
+    raise ValueError("Docker image has no unambiguous sha256 digest")
+
+
+def _image_repository(reference: str) -> str:
+    without_digest = reference.split("@", 1)[0]
+    slash = without_digest.rfind("/")
+    colon = without_digest.rfind(":")
+    if colon > slash:
+        return without_digest[:colon]
+    return without_digest
+
+
+def _run(
+    command: list[str],
+    *,
+    cwd: Path | None,
+    error: str,
+) -> str:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        raise ValueError(error) from None
+    output = completed.stdout.strip()
+    if not output:
+        raise ValueError(error)
+    return output
+
+
+def _read_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError(f"could not read Harbor JSON artifact: {path.name}") from None
+    if not isinstance(value, dict):
+        raise ValueError(f"Harbor JSON artifact must be an object: {path.name}")
+    return value
+
+
+def _required_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"completed Oracle trial has no {label}")
+    return value.strip()
+
+
+def _serialize_lock(
+    lock: Mapping[str, object],
+    *,
+    restricted_values: tuple[str, ...],
+) -> str:
+    serialized = json.dumps(
+        dict(lock),
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    ) + "\n"
+    for restricted in restricted_values:
+        if restricted and restricted in serialized:
+            raise ValueError("benchmark lock contains a restricted value")
+    return serialized
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
