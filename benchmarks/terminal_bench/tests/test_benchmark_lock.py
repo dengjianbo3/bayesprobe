@@ -39,8 +39,8 @@ from write_benchmark_lock import (
 
 RUNTIME_IDENTITY = RuntimeIdentity(
     harbor_version="0.18.0",
-    root_git_sha="root-sha",
-    adapter_tree_sha="adapter-sha",
+    root_git_sha="a" * 40,
+    adapter_tree_sha="b" * 40,
     container_image=FIXED_CONTAINER_IMAGE,
     image_digest="sha256:" + "4" * 64,
 )
@@ -87,8 +87,8 @@ def test_lock_extracts_official_identity_and_matches_runtime_validator(
         "task_checksum": FIXED_TASK_CHECKSUM,
         "container_image": FIXED_CONTAINER_IMAGE,
         "image_digest": "sha256:" + "4" * 64,
-        "root_git_sha": "root-sha",
-        "adapter_tree_sha": "adapter-sha",
+        "root_git_sha": "a" * 40,
+        "adapter_tree_sha": "b" * 40,
         "n_attempts": 1,
         "model": "test-model",
         "base_url": "https://provider.example/v1",
@@ -168,6 +168,36 @@ def test_lock_rejects_conflicting_trial_task_id(
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
     with pytest.raises(ValueError, match="conflicting task identities"):
+        build_lock(
+            job_dir=synthetic_oracle_job,
+            config=TerminalBenchConfig(model="test-model"),
+            runtime_identity=RUNTIME_IDENTITY,
+        )
+
+
+@pytest.mark.parametrize(
+    ("task_names", "remove_field"),
+    [
+        (None, True),
+        ([], False),
+        ([FIXED_TASK, "terminal-bench/other-task"], False),
+        (["terminal-bench/other-task"], False),
+    ],
+)
+def test_lock_requires_dataset_task_names_to_select_exactly_the_fixed_task(
+    synthetic_oracle_job: Path,
+    task_names: list[str] | None,
+    remove_field: bool,
+) -> None:
+    config_path = synthetic_oracle_job / "config.json"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    if remove_field:
+        payload["datasets"][0].pop("task_names")
+    else:
+        payload["datasets"][0]["task_names"] = task_names
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="task_names"):
         build_lock(
             job_dir=synthetic_oracle_job,
             config=TerminalBenchConfig(model="test-model"),
@@ -720,6 +750,11 @@ def test_smoke_classifier_rejects_stale_complete_lock_identity(
         "environment-state",
         "action-index",
         "cycle-run",
+        "missing-evidence-root",
+        "missing-direction",
+        "neutral-direction",
+        "unknown-direction",
+        "inconsistent-direction",
     ],
 )
 def test_smoke_classifier_rejects_false_action_provenance_links(
@@ -765,13 +800,34 @@ def test_smoke_classifier_rejects_false_action_provenance_links(
         signal["provenance"]["artifact_refs"] = [
             "environment_actions.jsonl#2"
         ]
-    else:
+    elif broken_link == "cycle-run":
         cycle = next(
             record["payload"]
             for record in records
             if record["record_type"] == "cycle"
         )
         cycle["run_id"] = "run_other"
+    else:
+        evidence = next(
+            record["payload"]
+            for record in records
+            if record["record_type"] == "evidence_event"
+        )
+        update = next(
+            record["payload"]
+            for record in records
+            if record["record_type"] == "belief_update"
+        )
+        if broken_link == "missing-evidence-root":
+            evidence.pop("derivation_root_id")
+        elif broken_link == "missing-direction":
+            update.pop("direction")
+        elif broken_link == "neutral-direction":
+            update["direction"] = "neutral"
+        elif broken_link == "unknown-direction":
+            update["direction"] = "sideways"
+        else:
+            update["direction"] = "weakened"
     actions_path.write_text(
         "".join(json.dumps(action) + "\n" for action in actions),
         encoding="utf-8",

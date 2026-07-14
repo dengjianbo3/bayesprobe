@@ -46,6 +46,92 @@ from bayesprobe_terminal_bench.gateway import HarborProbeToolGateway
 from bayesprobe_terminal_bench.planning import OpenAICompatibleTerminalProbePlanner
 
 
+_LOCK_FIELD_TYPES: dict[str, type] = {
+    "schema_version": str,
+    "harbor_version": str,
+    "dataset_name": str,
+    "dataset_revision": str,
+    "task_id": str,
+    "task_checksum": str,
+    "container_image": str,
+    "image_digest": str,
+    "root_git_sha": str,
+    "adapter_tree_sha": str,
+    "n_attempts": int,
+    "model": str,
+    "provider_protocol": str,
+    "api_key_env": str,
+    "temperature": int,
+    "max_cycles": int,
+    "max_probes_per_cycle": int,
+    "max_actions_per_probe": int,
+    "max_total_actions": int,
+    "max_model_calls": int,
+    "command_timeout_seconds": int,
+    "provider_timeout_seconds": int,
+    "max_output_tokens": int,
+    "signal_output_bytes": int,
+    "terminal_plan_version": str,
+}
+_LOCK_EXACT_VALUES: dict[str, object] = {
+    "schema_version": "terminal_bench_lock:v0.1",
+    "harbor_version": "0.18.0",
+    "dataset_name": "terminal-bench/terminal-bench-2",
+    "task_id": "terminal-bench/break-filter-js-from-html",
+    "n_attempts": 1,
+    "provider_protocol": "openai_chat_completions",
+    "api_key_env": "BAYESPROBE_BENCH_API_KEY",
+    "temperature": 0,
+    "terminal_plan_version": "terminal_probe_plan:v0.1",
+}
+_LOCK_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_LOCK_GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def terminal_bench_lock_schema_mismatches(
+    payload: Mapping[str, Any],
+) -> set[str]:
+    mismatches = {
+        key
+        for key, expected_type in _LOCK_FIELD_TYPES.items()
+        if key not in payload or type(payload[key]) is not expected_type
+    }
+    if "base_url" not in payload or (
+        payload.get("base_url") is not None
+        and (
+            type(payload.get("base_url")) is not str
+            or not str(payload["base_url"]).strip()
+        )
+    ):
+        mismatches.add("base_url")
+    for key, expected_value in _LOCK_EXACT_VALUES.items():
+        if payload.get(key) != expected_value:
+            mismatches.add(key)
+    for key, expected_type in _LOCK_FIELD_TYPES.items():
+        if (
+            expected_type is str
+            and type(payload.get(key)) is str
+            and not str(payload[key]).strip()
+        ):
+            mismatches.add(key)
+    for key in ("dataset_revision", "task_checksum", "image_digest"):
+        value = payload.get(key)
+        if type(value) is not str or not _LOCK_SHA256.fullmatch(value):
+            mismatches.add(key)
+    for key in ("root_git_sha", "adapter_tree_sha"):
+        value = payload.get(key)
+        if type(value) is not str or not _LOCK_GIT_OBJECT_ID.fullmatch(value):
+            mismatches.add(key)
+    for key, expected_type in _LOCK_FIELD_TYPES.items():
+        if (
+            expected_type is int
+            and key != "temperature"
+            and (type(payload.get(key)) is not int or int(payload[key]) <= 0)
+        ):
+            mismatches.add(key)
+    return mismatches
+
+
 def _terminal_capabilities() -> tuple[CapabilityDescriptor, ...]:
     return (
         CapabilityDescriptor(
@@ -212,7 +298,7 @@ def load_and_validate_lock(
         "signal_output_bytes": config.signal_output_bytes,
         "terminal_plan_version": "terminal_probe_plan:v0.1",
     }
-    mismatches = {
+    mismatches = terminal_bench_lock_schema_mismatches(payload) | {
         key
         for key, expected_value in expected.items()
         if key not in payload

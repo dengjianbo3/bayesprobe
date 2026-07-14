@@ -26,6 +26,9 @@ from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
 
 from bayesprobe_terminal_bench.config import TerminalBenchConfig
+from bayesprobe_terminal_bench.runner_factory import (
+    terminal_bench_lock_schema_mismatches,
+)
 
 
 HARBOR_VERSION = "0.18.0"
@@ -100,6 +103,9 @@ def build_lock(
         "signal_output_bytes": config.signal_output_bytes,
         "terminal_plan_version": TERMINAL_PLAN_VERSION,
     }
+    mismatches = terminal_bench_lock_schema_mismatches(lock)
+    if mismatches:
+        raise ValueError(f"Terminal-Bench lock mismatch: {sorted(mismatches)}")
     _serialize_lock(lock, restricted_values=restricted_values)
     return lock
 
@@ -291,6 +297,19 @@ def extract_job_identity(
         raise ValueError("completed Harbor trial must have a package task id")
 
     dataset = job_config.datasets[0]
+    task_names = dataset.task_names
+    if task_names is None or len(task_names) != 1:
+        raise ValueError(
+            f"Harbor job dataset task_names must contain exactly {TASK_ID}"
+        )
+    dataset_task_names = tuple(
+        _required_string(value, f"job dataset task_names[{index}]")
+        for index, value in enumerate(task_names)
+    )
+    if dataset_task_names != (TASK_ID,):
+        raise ValueError(
+            f"Harbor job dataset task_names must contain exactly {TASK_ID}"
+        )
     dataset_name = _single_candidate(
         "dataset sources",
         (
@@ -315,6 +334,7 @@ def extract_job_identity(
     task_id = _single_candidate(
         "task identities",
         (
+            *dataset_task_names,
             _required_string(job_lock.trials[0].task.name, "job lock task name"),
             _required_string(trial_lock.task.name, "trial lock task name"),
             _required_string(trial_config.task.name, "trial config task name"),

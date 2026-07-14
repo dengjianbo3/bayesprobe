@@ -30,9 +30,10 @@ from bayesprobe_terminal_bench.runner_factory import (
     load_and_validate_lock,
     safe_run_id,
 )
+from write_benchmark_lock import RuntimeIdentity, build_lock
 
 
-_LOCKED_KEYS = (
+_CONFIG_LOCKED_KEYS = (
     "schema_version",
     "harbor_version",
     "dataset_name",
@@ -53,6 +54,16 @@ _LOCKED_KEYS = (
     "signal_output_bytes",
     "terminal_plan_version",
 )
+_IDENTITY_KEYS = (
+    "dataset_revision",
+    "task_checksum",
+    "container_image",
+    "image_digest",
+    "root_git_sha",
+    "adapter_tree_sha",
+    "n_attempts",
+)
+_LOCKED_KEYS = _CONFIG_LOCKED_KEYS + _IDENTITY_KEYS
 
 
 class NoSignalGateway:
@@ -101,7 +112,14 @@ def _lock_payload(config: TerminalBenchConfig) -> dict[str, object]:
         "schema_version": "terminal_bench_lock:v0.1",
         "harbor_version": "0.18.0",
         "dataset_name": "terminal-bench/terminal-bench-2",
+        "dataset_revision": "sha256:" + "1" * 64,
         "task_id": "terminal-bench/break-filter-js-from-html",
+        "task_checksum": "sha256:" + "2" * 64,
+        "container_image": "registry.example/terminal-bench/task:locked",
+        "image_digest": "sha256:" + "3" * 64,
+        "root_git_sha": "4" * 40,
+        "adapter_tree_sha": "5" * 40,
+        "n_attempts": 1,
         "model": config.model,
         "base_url": config.base_url,
         "provider_protocol": "openai_chat_completions",
@@ -244,7 +262,7 @@ def test_lock_is_required_and_must_contain_an_object(tmp_path: Path) -> None:
         load_and_validate_lock(invalid, config)
 
 
-@pytest.mark.parametrize("key", _LOCKED_KEYS)
+@pytest.mark.parametrize("key", _CONFIG_LOCKED_KEYS)
 def test_lock_rejects_every_locked_setting_mismatch(tmp_path: Path, key: str) -> None:
     config = TerminalBenchConfig(
         model="locked-model",
@@ -304,6 +322,73 @@ def test_valid_lock_is_returned_without_rewriting_it(tmp_path: Path) -> None:
 
     assert load_and_validate_lock(path, config) == payload
     assert path.read_bytes() == original
+
+
+def test_partial_pre_task9_lock_is_rejected_before_agent_construction(
+    tmp_path: Path,
+) -> None:
+    config = TerminalBenchConfig(model="locked-model")
+    payload = _lock_payload(config)
+    for key in _IDENTITY_KEYS:
+        payload.pop(key)
+    path = tmp_path / "old-partial.lock.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Terminal-Bench lock mismatch") as error:
+        load_and_validate_lock(path, config)
+
+    assert set(_IDENTITY_KEYS) <= set(re.findall(r"[a-z_]+", str(error.value)))
+
+
+@pytest.mark.parametrize(
+    ("key", "invalid_value"),
+    [
+        ("dataset_revision", "latest"),
+        ("task_checksum", "sha256:not-a-digest"),
+        ("container_image", ""),
+        ("image_digest", "sha256:" + "A" * 64),
+        ("root_git_sha", "not-a-git-object-id"),
+        ("adapter_tree_sha", "f" * 39),
+        ("n_attempts", 2),
+    ],
+)
+def test_lock_rejects_malformed_task9_identity_before_agent_construction(
+    tmp_path: Path,
+    key: str,
+    invalid_value: object,
+) -> None:
+    config = TerminalBenchConfig(model="locked-model")
+    payload = _lock_payload(config)
+    payload[key] = invalid_value
+    path = tmp_path / f"malformed-{key}.lock.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Terminal-Bench lock mismatch") as error:
+        load_and_validate_lock(path, config)
+
+    assert key in str(error.value)
+
+
+def test_loader_accepts_complete_build_lock_output(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+) -> None:
+    config = TerminalBenchConfig(model="locked-model")
+    lock = build_lock(
+        job_dir=synthetic_oracle_job,
+        config=config,
+        runtime_identity=RuntimeIdentity(
+            harbor_version="0.18.0",
+            root_git_sha="a" * 40,
+            adapter_tree_sha="b" * 40,
+            container_image="registry.example/terminal-bench/task:locked",
+            image_digest="sha256:" + "c" * 64,
+        ),
+    )
+    path = tmp_path / "complete.lock.json"
+    path.write_text(json.dumps(lock), encoding="utf-8")
+
+    assert load_and_validate_lock(path, config) == lock
 
 
 @pytest.mark.asyncio

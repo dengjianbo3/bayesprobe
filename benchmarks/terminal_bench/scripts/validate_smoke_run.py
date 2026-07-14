@@ -8,12 +8,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from bayesprobe_terminal_bench.runner_factory import (
+    terminal_bench_lock_schema_mismatches,
+)
 from write_benchmark_lock import (
-    DATASET_NAME,
-    HARBOR_VERSION,
-    LOCK_SCHEMA_VERSION,
-    TASK_ID,
-    TERMINAL_PLAN_VERSION,
     extract_job_identity,
 )
 
@@ -26,35 +24,7 @@ SmokeClassification = Literal[
     "conformance_error",
 ]
 _SUCCESS = frozenset({"engineering_pass", "task_failure"})
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_LOCK_FIELDS: dict[str, type] = {
-    "schema_version": str,
-    "harbor_version": str,
-    "dataset_name": str,
-    "dataset_revision": str,
-    "task_id": str,
-    "task_checksum": str,
-    "container_image": str,
-    "image_digest": str,
-    "root_git_sha": str,
-    "adapter_tree_sha": str,
-    "n_attempts": int,
-    "model": str,
-    "provider_protocol": str,
-    "api_key_env": str,
-    "temperature": int,
-    "max_cycles": int,
-    "max_probes_per_cycle": int,
-    "max_actions_per_probe": int,
-    "max_total_actions": int,
-    "max_model_calls": int,
-    "command_timeout_seconds": int,
-    "provider_timeout_seconds": int,
-    "max_output_tokens": int,
-    "signal_output_bytes": int,
-    "terminal_plan_version": str,
-}
 
 
 def classify_smoke_run(
@@ -127,46 +97,7 @@ def _trial_dirs(job_dir: Path) -> list[Path]:
 
 
 def _valid_lock_identity(lock: Mapping[str, Any]) -> bool:
-    if any(
-        key not in lock or type(lock[key]) is not expected_type
-        for key, expected_type in _LOCK_FIELDS.items()
-    ):
-        return False
-    if "base_url" not in lock or (
-        lock["base_url"] is not None
-        and (not isinstance(lock["base_url"], str) or not lock["base_url"].strip())
-    ):
-        return False
-    expected = {
-        "schema_version": LOCK_SCHEMA_VERSION,
-        "harbor_version": HARBOR_VERSION,
-        "dataset_name": DATASET_NAME,
-        "task_id": TASK_ID,
-        "provider_protocol": "openai_chat_completions",
-        "api_key_env": "BAYESPROBE_BENCH_API_KEY",
-        "temperature": 0,
-        "n_attempts": 1,
-        "terminal_plan_version": TERMINAL_PLAN_VERSION,
-    }
-    if any(lock.get(key) != value for key, value in expected.items()):
-        return False
-    if any(
-        not isinstance(lock[key], str) or not lock[key].strip()
-        for key, expected_type in _LOCK_FIELDS.items()
-        if expected_type is str
-    ):
-        return False
-    if any(
-        not _DIGEST.fullmatch(str(lock[key]))
-        for key in ("dataset_revision", "task_checksum", "image_digest")
-    ):
-        return False
-    positive_integer_fields = {
-        key
-        for key, expected_type in _LOCK_FIELDS.items()
-        if expected_type is int
-    } - {"temperature"}
-    return all(int(lock[key]) > 0 for key in positive_integer_fields)
+    return not terminal_bench_lock_schema_mismatches(lock)
 
 
 def _result_matches_lock(job_dir: Path, lock: Mapping[str, Any]) -> bool:
@@ -476,19 +407,37 @@ def _signal_has_directional_evidence(
     if not isinstance(signal_id, str) or not isinstance(provenance, Mapping):
         return False
     derivation_root = provenance.get("derivation_root_id")
+    if not isinstance(derivation_root, str) or not derivation_root:
+        return False
+    signal_evidence = [
+        evidence
+        for evidence in by_type.get("evidence_event", [])
+        if evidence.get("derived_from_signal") == signal_id
+    ]
+    if not signal_evidence:
+        return False
     evidence_ids: set[str] = set()
-    for evidence in by_type.get("evidence_event", []):
+    for evidence in signal_evidence:
         evidence_id = evidence.get("id")
-        evidence_root = evidence.get("derivation_root_id")
         if (
-            isinstance(evidence_id, str)
-            and evidence.get("derived_from_signal") == signal_id
-            and evidence.get("epistemic_origin") == "tool_result"
-            and evidence.get("discard_reason") is None
-            and evidence_root in {None, derivation_root}
+            not isinstance(evidence_id, str)
+            or not evidence_id
+            or evidence_id in evidence_ids
+            or evidence.get("epistemic_origin") != "tool_result"
+            or evidence.get("discard_reason") is not None
+            or evidence.get("derivation_root_id") != derivation_root
         ):
-            evidence_ids.add(evidence_id)
-    for update in by_type.get("belief_update", []):
+            return False
+        evidence_ids.add(evidence_id)
+    linked_updates = [
+        update
+        for update in by_type.get("belief_update", [])
+        if update.get("cycle_id") == cycle_id
+        and update.get("evidence_id") in evidence_ids
+    ]
+    if not linked_updates:
+        return False
+    for update in linked_updates:
         evidence_id = update.get("evidence_id")
         sensitivity = update.get("sensitivity")
         caused_by = (
@@ -496,17 +445,20 @@ def _signal_has_directional_evidence(
             if isinstance(sensitivity, Mapping)
             else None
         )
+        prior = update.get("prior")
+        posterior = update.get("posterior")
+        direction = update.get("direction")
         if (
-            update.get("cycle_id") == cycle_id
-            and evidence_id in evidence_ids
-            and isinstance(caused_by, list)
-            and evidence_id in caused_by
-            and type(update.get("prior")) in (int, float)
-            and type(update.get("posterior")) in (int, float)
-            and update.get("prior") != update.get("posterior")
+            not isinstance(caused_by, list)
+            or evidence_id not in caused_by
+            or type(prior) not in (int, float)
+            or type(posterior) not in (int, float)
+            or direction not in {"strengthened", "weakened"}
+            or (direction == "strengthened" and posterior <= prior)
+            or (direction == "weakened" and posterior >= prior)
         ):
-            return True
-    return False
+            return False
+    return True
 
 
 def _canonical_digest(payload: Mapping[str, Any]) -> str:
