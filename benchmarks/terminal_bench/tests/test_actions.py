@@ -43,6 +43,7 @@ def test_model_label_does_not_override_read_only_allowlist() -> None:
     [
         "./ls --all",
         "/tmp/ls --all",
+        "ls & touch /tmp/x",
         "rg --pre=rm needle target.txt",
         "rg --pre cat needle target.txt",
         "rg --pre-glob='*.txt' needle target.txt",
@@ -50,6 +51,8 @@ def test_model_label_does_not_override_read_only_allowlist() -> None:
         "git diff --output=result.patch",
         "file --compile magic-file",
         "file -C",
+        "file -Ckm custom.magic",
+        "file -kCm custom.magic",
     ],
 )
 def test_inspect_plan_rejects_allowlisted_executable_bypasses(command: str) -> None:
@@ -87,6 +90,11 @@ def test_read_only_commands_require_a_simple_allowlisted_command(
     command: str, expected: bool
 ) -> None:
     assert shell_command_is_provably_read_only(command) is expected
+
+
+@pytest.mark.parametrize("command", ["ls & touch /tmp/x", "file -Ckm", "file -kCm"])
+def test_classifier_rejects_composition_and_clustered_compile_options(command: str) -> None:
+    assert not shell_command_is_provably_read_only(command)
 
 
 def test_verify_allows_shell_but_not_direct_file_writes() -> None:

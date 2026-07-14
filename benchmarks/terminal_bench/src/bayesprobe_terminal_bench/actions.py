@@ -62,7 +62,7 @@ _READ_ONLY_GIT_SUBCOMMANDS = frozenset({
     "show",
     "status",
 })
-_SHELL_COMPOSITION_MARKERS = ("\n", ";", "&&", "||", "|", ">", "<", "`", "$(")
+_SHELL_COMPOSITION_MARKERS = ("\r", "\n", ";", "&", "|", ">", "<", "`", "$(")
 _RG_PREPROCESSOR_OPTIONS = frozenset({"--pre", "--pre-glob"})
 _GIT_UNSAFE_OPTIONS = frozenset({"--ext-diff", "--textconv", "--output"})
 _FILE_UNSAFE_OPTIONS = frozenset({"-C", "--compile"})
@@ -85,6 +85,7 @@ def _arguments_are_provably_read_only(executable: str, arguments: list[str]) -> 
         return not any(
             argument in _FILE_UNSAFE_OPTIONS
             or argument.startswith("--compile=")
+            or (argument.startswith("-") and not argument.startswith("--") and "C" in argument[1:])
             for argument in arguments
         )
     return True
