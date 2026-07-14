@@ -11,6 +11,25 @@ PACKAGE_DIR = PROJECT_DIR / "src" / "bayesprobe_terminal_bench"
 FORBIDDEN_FILES = {"loop.py", "core.py", "evidence.py", "updater.py"}
 
 
+def _production_source_paths(package_dir: Path) -> list[Path]:
+    return sorted(package_dir.rglob("*.py"))
+
+
+def test_nested_python_sources_are_discovered_recursively(tmp_path: Path) -> None:
+    package_dir = tmp_path / "bayesprobe_terminal_bench"
+    nested_source = package_dir / "adapters" / "core.py"
+    nested_source.parent.mkdir(parents=True)
+    nested_source.write_text(
+        "from bayesprobe.private_module import PrivateType\n",
+        encoding="utf-8",
+    )
+
+    assert nested_source not in package_dir.glob("*.py")
+    source_paths = _production_source_paths(package_dir)
+    assert nested_source in source_paths
+    assert {path.name for path in source_paths} & FORBIDDEN_FILES == {"core.py"}
+
+
 def test_nested_project_is_materialized() -> None:
     assert (PACKAGE_DIR / "__init__.py").is_file()
     assert (PROJECT_DIR / "uv.lock").is_file()
@@ -28,12 +47,14 @@ def test_required_runtime_types_are_public_root_exports() -> None:
 
 
 def test_benchmark_has_no_shadow_kernel_modules() -> None:
-    assert {path.name for path in PACKAGE_DIR.glob("*.py")}.isdisjoint(FORBIDDEN_FILES)
+    assert {path.name for path in _production_source_paths(PACKAGE_DIR)}.isdisjoint(
+        FORBIDDEN_FILES
+    )
 
 
 def test_production_source_uses_only_bayesprobe_root_imports() -> None:
     violations: list[str] = []
-    for source_path in sorted(PACKAGE_DIR.glob("*.py")):
+    for source_path in _production_source_paths(PACKAGE_DIR):
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
