@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -598,6 +599,30 @@ def _write_complete_benchmark_lock(
     return lock
 
 
+def _trace_dir(job_dir: Path) -> Path:
+    trial_dir = next(path for path in job_dir.iterdir() if path.is_dir())
+    return trial_dir / "agent" / "bayesprobe"
+
+
+def _read_trace_records(bayesprobe_dir: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in (bayesprobe_dir / "bayesprobe_ledger.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+
+def _write_trace_records(
+    bayesprobe_dir: Path,
+    records: list[dict[str, object]],
+) -> None:
+    (bayesprobe_dir / "bayesprobe_ledger.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.parametrize(
     ("reward", "trace", "classification", "exit_code"),
     [
@@ -655,6 +680,210 @@ def test_smoke_classifier_rejects_partial_lock(
         json.dumps({"task_id": FIXED_TASK, "task_checksum": FIXED_TASK_CHECKSUM}),
         encoding="utf-8",
     )
+
+    assert (
+        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        == "conformance_error"
+    )
+
+
+@pytest.mark.parametrize("evidence_outcome", ["admitted", "discarded", "neutral"])
+def test_smoke_classifier_allows_linked_evidence_without_directional_update(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+    evidence_outcome: str,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    bayesprobe_dir = _trace_dir(job_dir)
+    records = _read_trace_records(bayesprobe_dir)
+    evidence = next(
+        record["payload"]
+        for record in records
+        if record["record_type"] == "evidence_event"
+    )
+    if evidence_outcome == "discarded":
+        evidence["discard_reason"] = "duplicate_exact"
+    if evidence_outcome == "neutral":
+        update = next(
+            record["payload"]
+            for record in records
+            if record["record_type"] == "belief_update"
+        )
+        update["direction"] = "neutral"
+        update["posterior"] = update["prior"]
+    else:
+        records = [
+            record for record in records if record["record_type"] != "belief_update"
+        ]
+    _write_trace_records(bayesprobe_dir, records)
+    lock_path = tmp_path / "benchmark.lock.json"
+    _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
+
+    assert (
+        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        == "engineering_pass"
+    )
+
+
+def test_smoke_classifier_allows_a_completed_no_signal_no_update_cycle(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    bayesprobe_dir = _trace_dir(job_dir)
+    summary_path = bayesprobe_dir / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["bayesprobe_cycles"] = 2
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    records = _read_trace_records(bayesprobe_dir)
+    run = next(
+        record["payload"] for record in records if record["record_type"] == "run"
+    )
+    run["current_cycle_id"] = "cycle_2"
+    records[-1:-1] = [
+        {
+            "record_type": "cycle",
+            "payload": {
+                "cycle_id": "cycle_2",
+                "run_id": execution_context.run_id,
+                "cycle_index": 2,
+                "boundary_status": "integrated",
+                "completed_at": "2026-07-14T00:00:31Z",
+            },
+        },
+        {
+            "record_type": "probe_set",
+            "payload": {
+                "cycle_id": "cycle_2",
+                "probe_set_id": "PS2",
+                "probes": [],
+                "may_be_empty": True,
+            },
+        },
+        {
+            "record_type": "belief_state",
+            "payload": {"cycle_id": "cycle_2", "belief_state_id": "B2"},
+        },
+    ]
+    _write_trace_records(bayesprobe_dir, records)
+    lock_path = tmp_path / "benchmark.lock.json"
+    _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
+
+    assert (
+        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        == "engineering_pass"
+    )
+
+
+def test_policy_denied_reserved_action_is_reconciled_without_an_observation(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    bayesprobe_dir = _trace_dir(job_dir)
+    summary_path = bayesprobe_dir / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["terminal_actions"] = 2
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    (bayesprobe_dir / "errors.jsonl").write_text(
+        json.dumps(
+            {
+                "action_index": 2,
+                "category": "policy_error",
+                "error_type": "PolicyViolation",
+                "probe_id": probe.id,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lock_path = tmp_path / "benchmark.lock.json"
+    _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
+
+    assert (
+        classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
+        == "engineering_pass"
+    )
+
+
+@pytest.mark.parametrize("orphan", ["signal", "evidence", "update"])
+def test_smoke_classifier_rejects_orphan_epistemic_rows(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+    orphan: str,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    bayesprobe_dir = _trace_dir(job_dir)
+    records = _read_trace_records(bayesprobe_dir)
+    if orphan == "signal":
+        signal = deepcopy(
+            next(
+                record["payload"]
+                for record in records
+                if record["record_type"] == "external_signal"
+            )
+        )
+        signal["id"] = "S_orphan"
+        signal["cycle_id"] = "cycle_orphan"
+        records.append({"record_type": "external_signal", "payload": signal})
+    elif orphan == "evidence":
+        evidence = deepcopy(
+            next(
+                record["payload"]
+                for record in records
+                if record["record_type"] == "evidence_event"
+            )
+        )
+        evidence["id"] = "E_orphan"
+        evidence["derived_from_signal"] = "S_missing"
+        records.append({"record_type": "evidence_event", "payload": evidence})
+    else:
+        update = deepcopy(
+            next(
+                record["payload"]
+                for record in records
+                if record["record_type"] == "belief_update"
+            )
+        )
+        update["update_id"] = "U_orphan"
+        update["evidence_id"] = "E_missing"
+        update["sensitivity"] = {"caused_by_event_ids": ["E_missing"]}
+        records.append({"record_type": "belief_update", "payload": update})
+    _write_trace_records(bayesprobe_dir, records)
+    lock_path = tmp_path / "benchmark.lock.json"
+    _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
 
     assert (
         classify_smoke_run(job_dir=job_dir, lock_path=lock_path)
@@ -746,7 +975,9 @@ def test_smoke_classifier_rejects_stale_complete_lock_identity(
     "broken_link",
     [
         "arbitrary-root",
+        "fingerprint",
         "no-matching-action",
+        "request-mismatch",
         "environment-state",
         "action-index",
         "cycle-run",
@@ -792,8 +1023,14 @@ def test_smoke_classifier_rejects_false_action_provenance_links(
         signal["provenance"]["derivation_root_id"] = (
             "harbor-action:sha256:" + "f" * 64
         )
+    elif broken_link == "fingerprint":
+        signal["provenance"]["canonical_content_fingerprint"] = (
+            "sha256:" + "f" * 64
+        )
     elif broken_link == "no-matching-action":
         actions[0]["action_index"] = 2
+    elif broken_link == "request-mismatch":
+        actions[0]["action"]["command"] = "printf different request"
     elif broken_link == "environment-state":
         signal["provenance"]["environment_state_id"] = "env:other"
     elif broken_link == "action-index":

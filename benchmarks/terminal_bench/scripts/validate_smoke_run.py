@@ -4,13 +4,18 @@ import argparse
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from pydantic import TypeAdapter, ValidationError
+
+from bayesprobe_terminal_bench.actions import TerminalAction
 from bayesprobe_terminal_bench.runner_factory import (
     terminal_bench_lock_schema_mismatches,
 )
+from bayesprobe_terminal_bench.signals import executed_request_from_action
 from write_benchmark_lock import (
     extract_job_identity,
 )
@@ -25,6 +30,9 @@ SmokeClassification = Literal[
 ]
 _SUCCESS = frozenset({"engineering_pass", "task_failure"})
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_TERMINAL_ACTION_ADAPTER = TypeAdapter(TerminalAction)
+_SIGNAL_SCHEMA_VERSION = "harbor-observation:v2"
+_MAX_OBSERVATION_BYTES = 32_768
 
 
 def classify_smoke_run(
@@ -179,7 +187,17 @@ def _complete_trace(bayesprobe_dir: Path) -> bool:
     actions_by_index = _actions_by_index(actions)
     if actions_by_index is None:
         return False
-    if len(actions_by_index) != summary.get("terminal_actions"):
+    errors_path = bayesprobe_dir / "errors.jsonl"
+    errors = _read_jsonl(errors_path) if errors_path.is_file() else []
+    if errors is None:
+        return False
+    reserved_without_observation = _reserved_no_observation_indices(errors)
+    if (
+        reserved_without_observation is None
+        or set(actions_by_index) & reserved_without_observation
+        or set(actions_by_index) | reserved_without_observation
+        != set(range(1, int(summary["terminal_actions"]) + 1))
+    ):
         return False
 
     by_type: dict[str, list[Mapping[str, Any]]] = {}
@@ -216,7 +234,15 @@ def _complete_trace(bayesprobe_dir: Path) -> bool:
     cycle_indices = {cycle.get("cycle_index") for cycle in cycles}
     if cycle_indices != set(range(1, len(cycles) + 1)):
         return False
-    if not by_type.get("belief_state"):
+    cycle_ids = {cycle.get("cycle_id") for cycle in cycles}
+    if any(not isinstance(cycle_id, str) for cycle_id in cycle_ids):
+        return False
+    belief_state_cycles = {
+        state.get("cycle_id") for state in by_type.get("belief_state", [])
+    }
+    if not cycle_ids.issubset(belief_state_cycles):
+        return False
+    if not _epistemic_links_are_valid(by_type=by_type, cycle_ids=cycle_ids):
         return False
 
     used_action_indices: set[int] = set()
@@ -259,6 +285,108 @@ def _actions_by_index(
     return by_index
 
 
+def _reserved_no_observation_indices(
+    errors: Sequence[Mapping[str, Any]],
+) -> set[int] | None:
+    reserved: set[int] = set()
+    for error in errors:
+        if error.get("category") != "policy_error":
+            continue
+        action_index = error.get("action_index")
+        if (
+            type(action_index) is not int
+            or action_index < 1
+            or action_index in reserved
+            or error.get("error_type") != "PolicyViolation"
+            or not isinstance(error.get("probe_id"), str)
+        ):
+            return None
+        reserved.add(action_index)
+    return reserved
+
+
+def _epistemic_links_are_valid(
+    *,
+    by_type: Mapping[str, list[Mapping[str, Any]]],
+    cycle_ids: set[object],
+) -> bool:
+    signals_by_id: dict[str, Mapping[str, Any]] = {}
+    for signal in by_type.get("external_signal", []):
+        signal_id = signal.get("id")
+        if (
+            not isinstance(signal_id, str)
+            or not signal_id
+            or signal_id in signals_by_id
+            or signal.get("cycle_id") not in cycle_ids
+            or signal.get("inbox_status", "accepted") != "accepted"
+        ):
+            return False
+        signals_by_id[signal_id] = signal
+
+    evidence_by_id: dict[str, Mapping[str, Any]] = {}
+    evidence_by_signal: dict[str, list[Mapping[str, Any]]] = {}
+    for evidence in by_type.get("evidence_event", []):
+        evidence_id = evidence.get("id")
+        signal_id = evidence.get("derived_from_signal")
+        signal = signals_by_id.get(signal_id) if isinstance(signal_id, str) else None
+        provenance = signal.get("provenance") if isinstance(signal, Mapping) else None
+        if (
+            not isinstance(evidence_id, str)
+            or not evidence_id
+            or evidence_id in evidence_by_id
+            or signal is None
+            or not isinstance(provenance, Mapping)
+            or evidence.get("epistemic_origin") != "tool_result"
+            or evidence.get("derivation_root_id")
+            != provenance.get("derivation_root_id")
+        ):
+            return False
+        evidence_by_id[evidence_id] = evidence
+        evidence_by_signal.setdefault(signal_id, []).append(evidence)
+
+    if set(evidence_by_signal) != set(signals_by_id):
+        return False
+
+    for update in by_type.get("belief_update", []):
+        evidence_id = update.get("evidence_id")
+        evidence = evidence_by_id.get(evidence_id) if isinstance(evidence_id, str) else None
+        if evidence is None or evidence.get("discard_reason") is not None:
+            return False
+        signal = signals_by_id.get(evidence.get("derived_from_signal"))
+        if (
+            signal is None
+            or update.get("cycle_id") != signal.get("cycle_id")
+            or not _update_is_consistent(update, evidence_id)
+        ):
+            return False
+    return True
+
+
+def _update_is_consistent(update: Mapping[str, Any], evidence_id: str) -> bool:
+    sensitivity = update.get("sensitivity")
+    caused_by = (
+        sensitivity.get("caused_by_event_ids")
+        if isinstance(sensitivity, Mapping)
+        else None
+    )
+    prior = update.get("prior")
+    posterior = update.get("posterior")
+    direction = update.get("direction")
+    if (
+        not isinstance(caused_by, list)
+        or evidence_id not in caused_by
+        or type(prior) not in (int, float)
+        or type(posterior) not in (int, float)
+        or direction not in {"strengthened", "weakened", "neutral"}
+    ):
+        return False
+    return (
+        (direction == "strengthened" and posterior > prior)
+        or (direction == "weakened" and posterior < prior)
+        or (direction == "neutral" and posterior == prior)
+    )
+
+
 def _cycle_linked_actions(
     *,
     cycle_id: str,
@@ -281,17 +409,12 @@ def _cycle_linked_actions(
         and item.get("cycle_id") == cycle_id
         and isinstance(item.get("id"), str)
     }
-    if not probe_ids:
-        return None
-
     signals = [
         item
         for item in by_type.get("external_signal", [])
         if item.get("cycle_id") == cycle_id
         and item.get("inbox_status", "accepted") == "accepted"
     ]
-    if not signals:
-        return None
     used_action_indices: set[int] = set()
     for signal in signals:
         action_index = _signal_action_index(
@@ -302,8 +425,6 @@ def _cycle_linked_actions(
             actions_by_index=actions_by_index,
         )
         if action_index is None or action_index in used_action_indices:
-            return None
-        if not _signal_has_directional_evidence(signal, cycle_id, by_type):
             return None
         used_action_indices.add(action_index)
     return used_action_indices
@@ -350,21 +471,43 @@ def _signal_action_index(
         return None
 
     full_output_sha256 = action["full_output_sha256"]
-    direct_root = f"harbor-action:sha256:{full_output_sha256}"
+    try:
+        terminal_action = _TERMINAL_ACTION_ADAPTER.validate_python(action["action"])
+    except ValidationError:
+        return None
+    executed_request = executed_request_from_action(terminal_action)
+    environment_digest = _canonical_digest(
+        {
+            "run_id": run_id,
+            "schema_version": _SIGNAL_SCHEMA_VERSION,
+            "post_environment_state_id": action["post_environment_state_id"],
+        }
+    )
+    source_identity = f"harbor-terminal:sha256:{environment_digest}"
+    raw_content = signal.get("raw_content")
+    if (
+        provenance.get("source_identity") != source_identity
+        or provenance.get("correlation_group")
+        != f"harbor-env:sha256:{environment_digest}"
+        or not isinstance(raw_content, str)
+        or provenance.get("canonical_content_fingerprint")
+        != _canonical_content_fingerprint(source_identity, raw_content)
+    ):
+        return None
     composite_root = "harbor-action:sha256:" + _canonical_digest(
         {
-            "action": action["action"],
             "action_index": action_index,
             "cycle_id": cycle_id,
+            "executed_request": executed_request,
             "full_output_sha256": full_output_sha256,
             "post_environment_state_id": action["post_environment_state_id"],
             "pre_environment_state_id": action["pre_environment_state_id"],
             "probe_id": probe_id,
             "run_id": run_id,
-            "schema_version": "harbor-observation:v1",
+            "schema_version": _SIGNAL_SCHEMA_VERSION,
         }
     )
-    if provenance.get("derivation_root_id") not in {direct_root, composite_root}:
+    if provenance.get("derivation_root_id") != composite_root:
         return None
     return action_index
 
@@ -383,11 +526,21 @@ def _signal_content_matches_action(
     nested_action = action.get("action")
     if not isinstance(payload, Mapping) or not isinstance(nested_action, Mapping):
         return False
+    try:
+        terminal_action = _TERMINAL_ACTION_ADAPTER.validate_python(nested_action)
+    except ValidationError:
+        return False
+    observation = action.get("model_facing_output")
+    if (
+        not isinstance(observation, str)
+        or len(observation.encode("utf-8")) > _MAX_OBSERVATION_BYTES
+    ):
+        return False
     expected = {
         "action_index": action.get("action_index"),
-        "action_type": nested_action.get("type"),
         "error_category": action.get("error_category"),
-        "model_facing_output": action.get("model_facing_output"),
+        "executed_request": executed_request_from_action(terminal_action),
+        "observation": observation,
         "output_truncated": action.get("output_truncated"),
         "post_environment_state_id": action.get("post_environment_state_id"),
         "pre_environment_state_id": action.get("pre_environment_state_id"),
@@ -397,68 +550,14 @@ def _signal_content_matches_action(
     return dict(payload) == expected
 
 
-def _signal_has_directional_evidence(
-    signal: Mapping[str, Any],
-    cycle_id: str,
-    by_type: Mapping[str, list[Mapping[str, Any]]],
-) -> bool:
-    signal_id = signal.get("id")
-    provenance = signal.get("provenance")
-    if not isinstance(signal_id, str) or not isinstance(provenance, Mapping):
-        return False
-    derivation_root = provenance.get("derivation_root_id")
-    if not isinstance(derivation_root, str) or not derivation_root:
-        return False
-    signal_evidence = [
-        evidence
-        for evidence in by_type.get("evidence_event", [])
-        if evidence.get("derived_from_signal") == signal_id
-    ]
-    if not signal_evidence:
-        return False
-    evidence_ids: set[str] = set()
-    for evidence in signal_evidence:
-        evidence_id = evidence.get("id")
-        if (
-            not isinstance(evidence_id, str)
-            or not evidence_id
-            or evidence_id in evidence_ids
-            or evidence.get("epistemic_origin") != "tool_result"
-            or evidence.get("discard_reason") is not None
-            or evidence.get("derivation_root_id") != derivation_root
-        ):
-            return False
-        evidence_ids.add(evidence_id)
-    linked_updates = [
-        update
-        for update in by_type.get("belief_update", [])
-        if update.get("cycle_id") == cycle_id
-        and update.get("evidence_id") in evidence_ids
-    ]
-    if not linked_updates:
-        return False
-    for update in linked_updates:
-        evidence_id = update.get("evidence_id")
-        sensitivity = update.get("sensitivity")
-        caused_by = (
-            sensitivity.get("caused_by_event_ids")
-            if isinstance(sensitivity, Mapping)
-            else None
-        )
-        prior = update.get("prior")
-        posterior = update.get("posterior")
-        direction = update.get("direction")
-        if (
-            not isinstance(caused_by, list)
-            or evidence_id not in caused_by
-            or type(prior) not in (int, float)
-            or type(posterior) not in (int, float)
-            or direction not in {"strengthened", "weakened"}
-            or (direction == "strengthened" and posterior <= prior)
-            or (direction == "weakened" and posterior >= prior)
-        ):
-            return False
-    return True
+def _canonical_content_fingerprint(source_identity: str, raw_content: str) -> str:
+    canonical_content = " ".join(
+        unicodedata.normalize("NFKC", raw_content).split()
+    )
+    digest = hashlib.sha256(
+        f"{source_identity}\\n{canonical_content}".encode("utf-8")
+    ).hexdigest()
+    return f"sha256:{digest}"
 
 
 def _canonical_digest(payload: Mapping[str, Any]) -> str:
