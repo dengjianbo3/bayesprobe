@@ -47,7 +47,7 @@ class RunBudget:
 
 
 class TerminalBenchConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     model: str
     api_key_env: str = "BAYESPROBE_BENCH_API_KEY"
@@ -68,6 +68,14 @@ class TerminalBenchConfig(BaseModel):
         cls,
         extra_env: Mapping[str, str] | None = None,
     ) -> tuple[Self, str]:
+        if extra_env is not None and (
+            not isinstance(extra_env, Mapping)
+            or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in extra_env.items()
+            )
+        ):
+            raise ValueError("extra_env must be a mapping of strings to strings")
         source = {**os.environ, **dict(extra_env or {})}
         model = source.get("BAYESPROBE_BENCH_MODEL", "").strip()
         if not model:

@@ -34,6 +34,29 @@ def test_shared_budget_serializes_concurrent_reservations_and_reads() -> None:
     assert budget.model_calls_used == 40
 
 
+def test_shared_budget_rejects_concurrent_attempts_above_hard_limit() -> None:
+    budget = RunBudget(max_actions=8, max_model_calls=8)
+
+    def reserve_action_with_interleaved_read() -> tuple[int | None, BaseException | None, int]:
+        try:
+            return budget.reserve_action(), None, budget.actions_used
+        except BudgetExhausted as error:
+            return None, error, budget.actions_used
+
+    with ThreadPoolExecutor(max_workers=24) as executor:
+        results = list(executor.map(lambda _: reserve_action_with_interleaved_read(), range(24)))
+
+    successful = [reservation for reservation, error, _ in results if error is None]
+    exhausted = [error for _, error, _ in results if error is not None]
+    observed_counts = [count for _, _, count in results]
+
+    assert sorted(successful) == list(range(1, 9))
+    assert len(exhausted) == 16
+    assert all(isinstance(error, BudgetExhausted) for error in exhausted)
+    assert all(count <= 8 for count in observed_counts)
+    assert budget.actions_used == 8
+
+
 def test_extra_env_wins_and_config_never_serializes_key_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BAYESPROBE_BENCH_API_KEY", "host-secret")
     config, api_key = TerminalBenchConfig.from_sources({
@@ -77,6 +100,32 @@ def test_config_requires_model_and_api_key(name: str) -> None:
 
     with pytest.raises(ValueError, match=f"{name} is required"):
         TerminalBenchConfig.from_sources(source)
+
+
+@pytest.mark.parametrize(
+    "extra_env",
+    [
+        ["not-a-mapping"],
+        {"BAYESPROBE_BENCH_MODEL": 1},
+        {1: "model"},
+    ],
+)
+def test_config_rejects_non_string_extra_environment(extra_env: object) -> None:
+    with pytest.raises(ValueError, match="extra_env must be a mapping of strings to strings"):
+        TerminalBenchConfig.from_sources(extra_env)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_cycles": "8"},
+        {"max_cycles": True},
+        {"command_timeout_seconds": "120"},
+    ],
+)
+def test_config_rejects_coerced_and_boolean_values(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        TerminalBenchConfig(model="model", **kwargs)
 
 
 def test_config_enforces_brief_bounds() -> None:

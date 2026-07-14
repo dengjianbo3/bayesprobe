@@ -39,6 +39,40 @@ def test_model_label_does_not_override_read_only_allowlist() -> None:
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        "./ls --all",
+        "/tmp/ls --all",
+        "rg --pre=rm needle target.txt",
+        "rg --pre cat needle target.txt",
+        "rg --pre-glob='*.txt' needle target.txt",
+        "git status --ext-diff",
+        "git diff --output=result.patch",
+        "file --compile magic-file",
+        "file -C",
+    ],
+)
+def test_inspect_plan_rejects_allowlisted_executable_bypasses(command: str) -> None:
+    with pytest.raises(ValidationError, match="inspect plans require provably read-only actions"):
+        TerminalProbePlan(
+            mode="inspect",
+            actions=[ShellAction(command=command)],
+            expected_observation="The command is rejected as potentially mutating.",
+        )
+
+
+@pytest.mark.parametrize("command", ["ls -la", "rg needle README.md", "git status"])
+def test_inspect_plan_accepts_simple_read_only_commands(command: str) -> None:
+    plan = TerminalProbePlan(
+        mode="inspect",
+        actions=[ShellAction(command=command)],
+        expected_observation="The command is read-only.",
+    )
+
+    assert plan.actions[0].command == command
+
+
+@pytest.mark.parametrize(
     ("command", "expected"),
     [
         ("git status", True),
@@ -77,6 +111,47 @@ def test_intervene_requires_a_potentially_mutating_action() -> None:
             actions=[ShellAction(command="pwd")],
             expected_observation="The working directory is shown.",
         )
+
+
+def test_plan_actions_are_immutable_after_json_array_validation() -> None:
+    plan = TerminalProbePlan.model_validate_json(
+        """{
+            "mode": "inspect",
+            "actions": [{"type": "shell", "command": "ls -la"}],
+            "expected_observation": "Directory contents are visible."
+        }"""
+    )
+
+    assert isinstance(plan.actions, tuple)
+    with pytest.raises(AttributeError):
+        plan.actions.append(ShellAction(command="touch output.txt"))
+    with pytest.raises(ValidationError):
+        plan.actions = (ShellAction(command="touch output.txt"),)
+    with pytest.raises(ValidationError):
+        plan.actions[0].command = "touch output.txt"
+    assert plan.actions == (ShellAction(command="ls -la"),)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: ShellAction(command="ls", timeout_seconds="120"),
+        lambda: ShellAction(command="ls", mutates_environment="false"),
+        lambda: ShellAction(command="ls", timeout_seconds=True),
+        lambda: ActionObservation(
+            action_index=True,
+            action=ShellAction(command="ls"),
+            duration_ms=True,
+            pre_environment_state_id="before",
+            post_environment_state_id="after",
+            full_output_sha256="a" * 64,
+            model_facing_output="Directory contents.",
+        ),
+    ],
+)
+def test_action_models_reject_coerced_and_boolean_values(factory: object) -> None:
+    with pytest.raises(ValidationError):
+        factory()
 
 
 def test_observation_preserves_discriminated_action_details() -> None:

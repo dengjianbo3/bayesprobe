@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import shlex
-from pathlib import Path
+from collections.abc import Mapping
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ShellAction(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     type: Literal["shell"] = "shell"
     command: str = Field(min_length=1, max_length=32_768)
@@ -17,7 +17,7 @@ class ShellAction(BaseModel):
 
 
 class WriteFileAction(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     type: Literal["write_file"] = "write_file"
     path: str = Field(min_length=1, max_length=4_096)
@@ -25,7 +25,7 @@ class WriteFileAction(BaseModel):
 
 
 class ApplyPatchAction(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     type: Literal["apply_patch"] = "apply_patch"
     patch: str = Field(min_length=1, max_length=1_000_000)
@@ -63,6 +63,31 @@ _READ_ONLY_GIT_SUBCOMMANDS = frozenset({
     "status",
 })
 _SHELL_COMPOSITION_MARKERS = ("\n", ";", "&&", "||", "|", ">", "<", "`", "$(")
+_RG_PREPROCESSOR_OPTIONS = frozenset({"--pre", "--pre-glob"})
+_GIT_UNSAFE_OPTIONS = frozenset({"--ext-diff", "--textconv", "--output"})
+_FILE_UNSAFE_OPTIONS = frozenset({"-C", "--compile"})
+
+
+def _arguments_are_provably_read_only(executable: str, arguments: list[str]) -> bool:
+    if executable == "rg":
+        return not any(
+            argument in _RG_PREPROCESSOR_OPTIONS
+            or any(argument.startswith(f"{option}=") for option in _RG_PREPROCESSOR_OPTIONS)
+            for argument in arguments
+        )
+    if executable == "git":
+        return not any(
+            argument in _GIT_UNSAFE_OPTIONS
+            or any(argument.startswith(f"{option}=") for option in _GIT_UNSAFE_OPTIONS)
+            for argument in arguments
+        )
+    if executable == "file":
+        return not any(
+            argument in _FILE_UNSAFE_OPTIONS
+            or argument.startswith("--compile=")
+            for argument in arguments
+        )
+    return True
 
 
 def shell_command_is_provably_read_only(command: str) -> bool:
@@ -74,10 +99,18 @@ def shell_command_is_provably_read_only(command: str) -> bool:
         return False
     if not tokens:
         return False
-    executable = Path(tokens[0]).name
+    executable = tokens[0]
+    if "/" in executable or "\\" in executable:
+        return False
     if executable == "git":
-        return len(tokens) >= 2 and tokens[1] in _READ_ONLY_GIT_SUBCOMMANDS
-    return executable in _READ_ONLY_COMMANDS
+        return (
+            len(tokens) >= 2
+            and tokens[1] in _READ_ONLY_GIT_SUBCOMMANDS
+            and _arguments_are_provably_read_only(executable, tokens[2:])
+        )
+    return executable in _READ_ONLY_COMMANDS and _arguments_are_provably_read_only(
+        executable, tokens[1:]
+    )
 
 
 def action_may_mutate(action: TerminalAction) -> bool:
@@ -88,11 +121,18 @@ def action_may_mutate(action: TerminalAction) -> bool:
 
 
 class TerminalProbePlan(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     mode: Literal["inspect", "intervene", "verify"]
-    actions: list[TerminalAction] = Field(min_length=1, max_length=3)
+    actions: tuple[TerminalAction, ...] = Field(min_length=1, max_length=3)
     expected_observation: str = Field(min_length=1, max_length=4_096)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_actions(cls, value: object) -> object:
+        if isinstance(value, Mapping) and isinstance(value.get("actions"), list):
+            return {**value, "actions": tuple(value["actions"])}
+        return value
 
     @model_validator(mode="after")
     def validate_mode(self) -> TerminalProbePlan:
@@ -109,7 +149,7 @@ class TerminalProbePlan(BaseModel):
 
 
 class ActionObservation(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     action_index: int = Field(ge=1)
     action: TerminalAction
