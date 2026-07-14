@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
@@ -8,7 +9,13 @@ from typing import Any, Protocol
 from openai import OpenAI
 
 from bayesprobe import ProbeDesign, ProbeExecutionBrief
-from bayesprobe_terminal_bench.actions import ActionObservation, TerminalProbePlan
+from bayesprobe_terminal_bench.actions import (
+    ActionObservation,
+    ApplyPatchAction,
+    ShellAction,
+    TerminalProbePlan,
+    WriteFileAction,
+)
 from bayesprobe_terminal_bench.config import RunBudget, TerminalBenchConfig
 
 
@@ -26,42 +33,34 @@ class TerminalProbePlanner(Protocol):
     ) -> TerminalProbePlan: ...
 
 
-_EXCLUDED_INPUT_FIELDS = frozenset(
-    {
-        "access_token",
-        "api_key",
-        "apikey",
-        "analysis",
-        "authorization",
-        "chain_of_thought",
-        "chainofthought",
-        "credential",
-        "credentials",
-        "password",
-        "posterior",
-        "posteriors",
-        "prior",
-        "priors",
-        "rationale",
-        "reasoning",
-        "reasoning_trace",
-        "score",
-        "scores",
-        "secret",
-        "thought_process",
-        "token",
-        "verifier_path",
-        "verifier_paths",
-    }
+_REDACTION_MARKER = "[REDACTED]"
+_HISTORY_MODEL_FACING_OUTPUT_LIMIT = 4_096
+_HISTORY_ACTION_TEXT_LIMIT = 4_096
+_FORBIDDEN_KEY_FRAGMENTS = (
+    "apikey",
+    "chainofthought",
+    "confidence",
+    "credential",
+    "password",
+    "posterior",
+    "probability",
+    "prior",
+    "reasoning",
+    "score",
+    "secret",
+    "solution",
+    "token",
+    "verifier",
 )
-_EXCLUDED_INPUT_FIELD_PREFIXES = (
-    "posterior_",
-    "prior_",
-    "score_",
-    "verifier_path_",
-)
-_COMPACT_EXCLUDED_INPUT_FIELDS = frozenset(
-    field.replace("_", "") for field in _EXCLUDED_INPUT_FIELDS
+_SENSITIVE_TEXT_PATTERN = re.compile(
+    r"""(?ix)
+    /+(?:solution|logs/verifier|tests|hidden_tests)(?:/[^\s'\"<>]*)?
+    | \b(?:database_)?password\b(?:\s*[:=]\s*[^\s,;]+)?
+    | \b(?:prior|posterior|score|confidence|probability|credential|secret|token|reasoning|verifier)\b(?:\s*[:=]\s*[^\s,;]+)?
+    | \bapi[\s_-]*key\b(?:\s*[:=]\s*[^\s,;]+)?
+    | \bchain[\s_-]*of[\s_-]*thought\b
+    | \bhidden[\s_-]*tests?\b
+    """
 )
 
 
@@ -72,11 +71,11 @@ def terminal_plan_input(
     history: tuple[ActionObservation, ...],
 ) -> dict[str, Any]:
     """Build the blind, bounded context the terminal planner may receive."""
-    return {
+    payload = {
         "task": {
             "problem": context.problem,
             "task_context": context.task_context,
-            "task_frame": _without_private_fields(context.task_frame),
+            "task_frame": context.task_frame,
         },
         "hypotheses": [
             {
@@ -104,8 +103,11 @@ def terminal_plan_input(
         },
         "recent_observations": [
             {
-                "action": item.action.model_dump(mode="json"),
-                "observation": item.model_facing_output,
+                "action": _history_action_input(item),
+                "observation": _bounded_text(
+                    item.model_facing_output,
+                    _HISTORY_MODEL_FACING_OUTPUT_LIMIT,
+                ),
                 "return_code": item.return_code,
                 "timed_out": item.timed_out,
                 "environment_state_id": item.post_environment_state_id,
@@ -113,6 +115,7 @@ def terminal_plan_input(
             for item in history[-12:]
         ],
     }
+    return _sanitize_outbound(payload)
 
 
 class OpenAICompatibleTerminalProbePlanner:
@@ -204,7 +207,7 @@ class OpenAICompatibleTerminalProbePlanner:
             raise TerminalPlanError("terminal planner provider request failed") from None
 
         content = _chat_completion_content(response)
-        if not isinstance(content, str) or not content.strip():
+        if not _has_text_content(content):
             self._observe_attempt(
                 repair=repair,
                 logical_call_index=logical_call_index,
@@ -251,7 +254,7 @@ class OpenAICompatibleTerminalProbePlanner:
     ) -> None:
         record: dict[str, Any] = {
             "task": "terminal_probe_plan",
-            "model": self._config.model,
+            "model": _sanitize_outbound(self._config.model),
             "repair": repair,
             "logical_call_index": logical_call_index,
             "outcome": outcome,
@@ -259,7 +262,10 @@ class OpenAICompatibleTerminalProbePlanner:
             "latency_seconds": max(0.0, time.monotonic() - started),
         }
         if response is not None:
-            record.update(_response_telemetry(response))
+            try:
+                record.update(_response_telemetry(response))
+            except Exception:
+                record["response_metadata"] = "unavailable"
         if error_type is not None:
             record["error_type"] = error_type
         if self._invocation_observer is None:
@@ -282,28 +288,49 @@ def _planner_instruction(*, repair: bool) -> str:
     )
 
 
-def _without_private_fields(value: Any) -> Any:
+def _history_action_input(observation: ActionObservation) -> dict[str, Any]:
+    action = observation.action
+    if isinstance(action, ShellAction):
+        return {
+            "type": action.type,
+            "command": _bounded_text(action.command, _HISTORY_ACTION_TEXT_LIMIT),
+            "timeout_seconds": action.timeout_seconds,
+            "mutates_environment": action.mutates_environment,
+        }
+    if isinstance(action, WriteFileAction):
+        return {
+            "type": action.type,
+            "path": _bounded_text(action.path, _HISTORY_ACTION_TEXT_LIMIT),
+        }
+    if isinstance(action, ApplyPatchAction):
+        return {"type": action.type, "strip": action.strip}
+    raise TypeError("unsupported terminal action")
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    return value[:limit]
+
+
+def _sanitize_outbound(value: Any) -> Any:
+    """Drop forbidden fields and redact sensitive string fragments recursively."""
+    if isinstance(value, str):
+        return _SENSITIVE_TEXT_PATTERN.sub(_REDACTION_MARKER, value)
     if isinstance(value, Mapping):
         return {
-            key: _without_private_fields(item)
+            key: _sanitize_outbound(item)
             for key, item in value.items()
             if isinstance(key, str) and not _is_private_field_name(key)
         }
     if isinstance(value, list | tuple):
-        return [_without_private_fields(item) for item in value]
+        return [_sanitize_outbound(item) for item in value]
     return value
 
 
 def _is_private_field_name(value: str) -> bool:
-    normalized = "".join(
-        character if character.isalnum() else "_"
-        for character in value.casefold()
-    ).strip("_")
-    compact = normalized.replace("_", "")
+    compact = "".join(character for character in value.casefold() if character.isalnum())
     return (
-        normalized in _EXCLUDED_INPUT_FIELDS
-        or compact in _COMPACT_EXCLUDED_INPUT_FIELDS
-        or normalized.startswith(_EXCLUDED_INPUT_FIELD_PREFIXES)
+        any(fragment in compact for fragment in _FORBIDDEN_KEY_FRAGMENTS)
+        or ("hidden" in compact and "test" in compact)
     )
 
 
@@ -318,17 +345,26 @@ def _chat_completion_content(response: Any) -> str | None:
     return content if isinstance(content, str) else None
 
 
+def _has_text_content(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return bool(str.strip(value))
+    except Exception:
+        return False
+
+
 def _response_telemetry(response: Any) -> dict[str, Any]:
     record: dict[str, Any] = {
         "usage": _usage_telemetry(_response_value(response, "usage")),
     }
     response_id = _response_value(response, "id")
     if isinstance(response_id, str):
-        record["response_id"] = response_id
+        record["response_id"] = _sanitize_outbound(response_id)
     choice = _first_choice(response)
     finish_reason = None if choice is None else _response_value(choice, "finish_reason")
     if isinstance(finish_reason, str):
-        record["finish_reason"] = finish_reason
+        record["finish_reason"] = _sanitize_outbound(finish_reason)
     return record
 
 
@@ -347,12 +383,20 @@ def _integer_response_value(value: Any, name: str) -> int | None:
 
 def _first_choice(response: Any) -> Any | None:
     choices = _response_value(response, "choices")
-    if not isinstance(choices, list | tuple) or not choices:
+    if not isinstance(choices, list | tuple):
         return None
-    return choices[0]
+    try:
+        if len(choices) < 1:
+            return None
+        return choices[0]
+    except Exception:
+        return None
 
 
 def _response_value(value: Any, name: str) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(name)
-    return getattr(value, name, None)
+    try:
+        if isinstance(value, Mapping):
+            return value.get(name)
+        return getattr(value, name, None)
+    except Exception:
+        return None
