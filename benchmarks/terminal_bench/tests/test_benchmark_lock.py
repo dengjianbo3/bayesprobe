@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from bayesprobe import ProbeDesign, ProbeExecutionBrief
+from bayesprobe import ExternalSignal, ProbeDesign, ProbeExecutionBrief
+from bayesprobe.evidence_memory import SignalProvenanceNormalizer
 from bayesprobe_terminal_bench.actions import ActionObservation, ShellAction
 from bayesprobe_terminal_bench.config import TerminalBenchConfig
 from bayesprobe_terminal_bench.runner_factory import (
@@ -754,6 +756,62 @@ def test_smoke_classifier_rejects_partial_lock(
     )
 
 
+def test_smoke_classifier_accepts_public_core_normalized_adapter_signal(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    bayesprobe_dir = _trace_dir(job_dir)
+    records = _read_trace_records(bayesprobe_dir)
+    signal_record = next(
+        record
+        for record in records
+        if record["record_type"] == "external_signal"
+    )
+    adapter_signal = ExternalSignal.model_validate(signal_record["payload"])
+    normalized_signal = SignalProvenanceNormalizer().normalize(
+        adapter_signal,
+        run_id=execution_context.run_id,
+    )
+    assert adapter_signal.provenance is not None
+    assert normalized_signal.provenance is not None
+    canonical_content = " ".join(
+        unicodedata.normalize("NFKC", normalized_signal.raw_content).split()
+    )
+    expected_fingerprint = "sha256:" + hashlib.sha256(
+        (
+            f"{normalized_signal.provenance.source_identity}\n"
+            f"{canonical_content}"
+        ).encode("utf-8")
+    ).hexdigest()
+    assert (
+        normalized_signal.provenance.canonical_content_fingerprint
+        == expected_fingerprint
+    )
+    assert normalized_signal.id == adapter_signal.id
+    assert (
+        normalized_signal.provenance.derivation_root_id
+        == adapter_signal.provenance.derivation_root_id
+    )
+    signal_record["payload"] = normalized_signal.model_dump(mode="json")
+    _write_trace_records(bayesprobe_dir, records)
+    lock_path = tmp_path / "benchmark.lock.json"
+    _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
+
+    assert (
+        _classify(job_dir=job_dir, lock_path=lock_path)
+        == "engineering_pass"
+    )
+
+
 @pytest.mark.parametrize("evidence_outcome", ["admitted", "discarded", "neutral"])
 def test_smoke_classifier_allows_linked_evidence_without_directional_update(
     tmp_path: Path,
@@ -894,6 +952,56 @@ def test_policy_denied_reserved_action_is_reconciled_without_an_observation(
     assert (
         _classify(job_dir=job_dir, lock_path=lock_path)
         == "engineering_pass"
+    )
+
+
+def test_all_policy_denied_cycle_needs_no_observation_signal_or_update(
+    tmp_path: Path,
+    synthetic_oracle_job: Path,
+    probe: ProbeDesign,
+    execution_context: ProbeExecutionBrief,
+) -> None:
+    job_dir = _write_smoke_job(
+        tmp_path,
+        reward=1.0,
+        trace="complete",
+        probe=probe,
+        execution_context=execution_context,
+    )
+    bayesprobe_dir = _trace_dir(job_dir)
+    (bayesprobe_dir / "environment_actions.jsonl").unlink()
+    records = [
+        record
+        for record in _read_trace_records(bayesprobe_dir)
+        if record["record_type"]
+        not in {"external_signal", "evidence_event", "belief_update"}
+    ]
+    _write_trace_records(bayesprobe_dir, records)
+    errors_path = bayesprobe_dir / "errors.jsonl"
+    errors_path.write_text(
+        json.dumps(
+            {
+                "action_index": 1,
+                "category": "policy_error",
+                "error_type": "PolicyViolation",
+                "probe_id": probe.id,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lock_path = tmp_path / "benchmark.lock.json"
+    _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
+
+    assert (
+        _classify(job_dir=job_dir, lock_path=lock_path)
+        == "engineering_pass"
+    )
+
+    errors_path.unlink()
+    assert (
+        _classify(job_dir=job_dir, lock_path=lock_path)
+        == "conformance_error"
     )
 
 

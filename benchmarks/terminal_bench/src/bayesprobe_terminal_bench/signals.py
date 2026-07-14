@@ -122,7 +122,7 @@ def _signal_id_inputs(
 def _canonical_content_fingerprint(source_identity: str, raw_content: str) -> str:
     canonical_content = " ".join(unicodedata.normalize("NFKC", raw_content).split())
     digest = hashlib.sha256(
-        f"{source_identity}\\n{canonical_content}".encode("utf-8")
+        f"{source_identity}\n{canonical_content}".encode("utf-8")
     ).hexdigest()
     return f"sha256:{digest}"
 

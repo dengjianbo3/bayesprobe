@@ -157,7 +157,7 @@ def _observation(
 
 def _canonical_fingerprint(source_identity: str, raw_content: str) -> str:
     canonical_content = " ".join(unicodedata.normalize("NFKC", raw_content).split())
-    digest = hashlib.sha256(f"{source_identity}\\n{canonical_content}".encode("utf-8"))
+    digest = hashlib.sha256(f"{source_identity}\n{canonical_content}".encode("utf-8"))
     return f"sha256:{digest.hexdigest()}"
 
 

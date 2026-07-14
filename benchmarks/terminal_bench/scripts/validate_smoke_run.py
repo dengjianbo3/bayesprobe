@@ -210,20 +210,23 @@ def _complete_trace(bayesprobe_dir: Path) -> bool:
         return False
     if not _positive_int(summary.get("bayesprobe_cycles")):
         return False
-    actions = _read_jsonl(bayesprobe_dir / "environment_actions.jsonl")
     records = _read_jsonl(bayesprobe_dir / "bayesprobe_ledger.jsonl")
-    if not actions or not records:
-        return False
-    actions_by_index = _actions_by_index(actions)
-    if actions_by_index is None:
+    if not records:
         return False
     errors_path = bayesprobe_dir / "errors.jsonl"
     errors = _read_jsonl(errors_path) if errors_path.is_file() else []
     if errors is None:
         return False
     reserved_without_observation = _reserved_no_observation_indices(errors)
+    if reserved_without_observation is None:
+        return False
+    actions_path = bayesprobe_dir / "environment_actions.jsonl"
+    actions = _read_jsonl(actions_path) if actions_path.is_file() else []
+    if actions is None:
+        return False
+    actions_by_index = _actions_by_index(actions)
     if (
-        reserved_without_observation is None
+        actions_by_index is None
         or set(actions_by_index) & reserved_without_observation
         or set(actions_by_index) | reserved_without_observation
         != set(range(1, int(summary["terminal_actions"]) + 1))
@@ -585,7 +588,7 @@ def _canonical_content_fingerprint(source_identity: str, raw_content: str) -> st
         unicodedata.normalize("NFKC", raw_content).split()
     )
     digest = hashlib.sha256(
-        f"{source_identity}\\n{canonical_content}".encode("utf-8")
+        f"{source_identity}\n{canonical_content}".encode("utf-8")
     ).hexdigest()
     return f"sha256:{digest}"
 
