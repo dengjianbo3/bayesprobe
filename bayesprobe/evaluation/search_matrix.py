@@ -337,28 +337,33 @@ def _baseline_correctness(
     source: Path,
     gold_labels: Mapping[str, str],
 ) -> dict[str, dict[str, bool]]:
-    direct = _completed_results(source, "direct_flash")
-    bayesprobe = _completed_results(source, "bayesprobe_python")
+    direct = _terminal_results(source, "direct_flash")
+    bayesprobe = _terminal_results(source, "bayesprobe_python")
     if set(direct) != set(gold_labels) or set(bayesprobe) != set(gold_labels):
-        raise ValueError("source checkpoint must have completed baseline results")
+        raise ValueError("source checkpoint must have terminal baseline results")
     return {
         sample_id: {
-            "direct_no_web": direct[sample_id].get("answer_label")
-            == gold_labels[sample_id],
-            "bayesprobe_no_web": bayesprobe[sample_id].get("answer_label")
-            == gold_labels[sample_id],
+            "direct_no_web": (
+                direct[sample_id].get("state") == "completed"
+                and direct[sample_id].get("answer_label") == gold_labels[sample_id]
+            ),
+            "bayesprobe_no_web": (
+                bayesprobe[sample_id].get("state") == "completed"
+                and bayesprobe[sample_id].get("answer_label")
+                == gold_labels[sample_id]
+            ),
         }
         for sample_id in gold_labels
     }
 
 
-def _completed_results(source: Path, arm: str) -> dict[str, dict[str, Any]]:
+def _terminal_results(source: Path, arm: str) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
     for path in sorted((source / "arms" / arm).glob("*/result.json")):
         payload = _read_json_object(path)
         sample_id = payload.get("sample_id")
-        if payload.get("state") != "completed":
-            continue
+        if payload.get("state") not in {"completed", "terminal_failed"}:
+            raise ValueError("source checkpoint has non-terminal baseline result")
         if not isinstance(sample_id, str) or not sample_id or sample_id in results:
             raise ValueError("source checkpoint has invalid completed result identity")
         results[sample_id] = payload
