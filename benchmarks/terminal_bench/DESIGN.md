@@ -31,6 +31,28 @@ The Harbor verifier is the sole authority for task success. BayesProbe's answer
 projection may decide that work is ready for verification, but it cannot award
 itself success or replace the modified task workspace.
 
+### 1.1 Downstream-consumer contract
+
+The benchmark project is an engineering consumer of the installed BayesProbe
+package, not a second implementation of it. Production benchmark source may
+import BayesProbe symbols only from the package's top-level public interface:
+
+```python
+from bayesprobe import AutonomousQuestionRunner, BayesProbeCore, ProbeExecutor
+```
+
+It must instantiate the real `AutonomousQuestionRunner`, `BayesProbeCore`,
+evidence path, updater, task framing, and ledger implementations. Benchmark code
+may provide adapters for public extension interfaces such as `ProbeToolGateway`,
+`ProbeDesigner`, progress observation, and `ModelGateway`, but it may not copy or
+replace the autonomous cycle.
+
+Imports from private implementation modules such as `bayesprobe.core` or
+`bayesprobe.question_runner` are forbidden in benchmark production source. If a
+required Terminal-Bench behavior cannot be expressed through the public
+interface, the integration must fail with a documented public-interface gap. It
+must not bypass the gap by duplicating kernel behavior in the benchmark project.
+
 ## 2. Why Terminal-Bench First
 
 Terminal-Bench is the lower-risk first integration because it exposes a general
@@ -124,18 +146,29 @@ benchmarks/terminal_bench/
 |   `-- baseline-smoke.yaml
 |-- src/bayesprobe_terminal_bench/
 |   |-- agent.py
-|   |-- loop.py
+|   |-- runner_factory.py
+|   |-- actions.py
 |   |-- planning.py
 |   |-- environment.py
+|   |-- gateway.py
 |   |-- signals.py
 |   |-- artifacts.py
-|   `-- config.py
+|   |-- config.py
+|   `-- baseline.py
+|-- scripts/
+|   |-- write_benchmark_lock.py
+|   `-- validate_smoke_run.py
 `-- tests/
 ```
 
 The nested project will own its dependencies and lockfile. It will use a local,
 editable dependency on the repository root. The root project will not acquire a
 Harbor dependency.
+
+The nested project pins the first implementation to Harbor `0.18.0` and Python
+`>=3.12`, matching Harbor's current stable package contract. `environment.py`
+contains only the action policy and async/sync environment bridge. There is
+deliberately no benchmark-owned `loop.py`.
 
 Generated runs, provider caches, and downloaded benchmark data will be ignored
 by the nested `.gitignore`.
@@ -154,7 +187,7 @@ Harbor job
         -> ExternalSignal records
         -> existing Evidence interpretation
         -> existing posterior Update
-        -> next cycle or finish
+        -> next cycle or existing runner stop reason
   -> Harbor verifier inspects final workspace
   -> official reward and artifacts
 ```
@@ -163,6 +196,12 @@ The adapter will reuse `AutonomousQuestionRunner`; it will not duplicate the
 autonomous loop. Benchmark-owned implementations may be supplied through the
 runner's existing extension points for probe planning, probe execution, task
 framing, and answer projection.
+
+The initial engineering slice directly constructs the existing runner and uses
+its existing stop reasons: `NO_PROBES`, `EPISTEMIC_STAGNATION`,
+`CONFIDENCE_REACHED`, `POSTERIOR_STABLE`, or `MAX_CYCLES`. The adapter does not
+introduce an external completion flag or a second controller. Once
+`run_question` returns, Harbor proceeds to the official verifier.
 
 ### 7.1 Async bridge
 
@@ -197,38 +236,44 @@ Hypotheses may be introduced, revised, split, or retired through the existing
 open-ended hypothesis-admission mechanism. A hypothesis is not accepted merely
 because the model generated it repeatedly.
 
-A coding run is complete only when the agent chooses `finish` and Harbor runs
+A coding run is complete only when the existing runner returns and Harbor runs
 the verifier, or when a hard budget or task timeout is reached. A natural-language
 answer alone is not a valid Terminal-Bench deliverable.
 
 ## 9. Probe Action Protocol
 
-Each high-level Probe has one of four modes:
+Each high-level Probe has one of three modes:
 
 - `inspect`: read files, search content, inspect processes, or query environment
   state;
 - `intervene`: write files, apply a patch, install allowed dependencies, or
   change configuration;
-- `verify`: compile, run tests, exercise a service, or inspect produced output;
-- `finish`: stop issuing commands and leave the environment to Harbor's verifier.
+- `verify`: compile, run tests, exercise a service, or inspect produced output.
+
+These modes classify environment actions inside a selected BayesProbe Probe;
+they do not control the autonomous cycle. In particular, the MVP action schema
+does not define a `finish` action.
 
 The model produces a structured probe plan:
 
 ```json
 {
-  "probe_id": "p-001",
   "mode": "inspect",
-  "objective": "Identify why the supplied command fails",
-  "target_hypotheses": ["h-001", "h-002"],
   "actions": [
     {
       "type": "shell",
-      "command": "pwd && ls -la",
-      "timeout_seconds": 30
+      "command": "pwd",
+      "timeout_seconds": 30,
+      "mutates_environment": false
+    },
+    {
+      "type": "shell",
+      "command": "ls -la",
+      "timeout_seconds": 30,
+      "mutates_environment": false
     }
   ],
-  "expected_observation": "A concrete error linked to one candidate cause",
-  "completion_candidate": false
+  "expected_observation": "A concrete error linked to one candidate cause"
 }
 ```
 
@@ -244,6 +289,14 @@ A high-level Probe contains at most three low-level actions. `write_file` and
 `apply_patch` are encoded by the adapter rather than by asking the model to build
 shell heredocs. This keeps quoting, binary boundaries, and result attribution
 deterministic.
+
+The model's `mutates_environment` declaration is advisory, not authoritative.
+The adapter permits an `inspect` shell action only when a conservative classifier
+can prove that it is one simple read-only command. Shell composition,
+redirection, interpreters, package managers, tests, and unknown executables are
+treated as potentially mutating. `verify` may execute such shell commands, but
+the environment lineage then advances. `write_file` and `apply_patch` are always
+mutating interventions.
 
 One schema-repair request is allowed for malformed model output. If repair
 fails, the Probe ends with a `plan_error`; the adapter must not infer and execute
@@ -281,10 +334,12 @@ environment state. The updater consumes admitted Evidence, not raw model prose.
 
 ### 10.1 Environment lineage
 
-Every successful mutation advances `environment_state_id`. Inspect and verify
-actions retain the current state identifier. Repeating a test against an
-unchanged environment is correlated evidence and must not be counted as an
-independent confirmation merely because it was rerun.
+Every attempted action classified as potentially mutating advances
+`environment_state_id`, including a timeout or non-zero exit, because partial
+mutation cannot be excluded. Only shell actions proven read-only retain the
+current state identifier. Repeating an observation against an unchanged
+environment is correlated evidence and must not be counted as an independent
+confirmation merely because it was rerun.
 
 ### 10.2 No-signal invariant
 
@@ -337,13 +392,19 @@ The initial benchmark adapter uses these preregistered limits:
 | Maximum high-level probes per cycle | 2 |
 | Maximum actions per high-level probe | 3 |
 | Maximum terminal actions per trial | 24 |
-| Maximum model calls per trial | 40 |
+| Maximum logical model calls per trial | 40 |
 | Per-command timeout | 120 seconds |
 | Provider request timeout | 360 seconds |
 | Model-facing output per action | 32 KB |
 
 The trial timeout remains the official Terminal-Bench value for the task. The
 adapter will not extend it to compensate for its own overhead.
+
+A logical model call is one BayesProbe structured request, one terminal-plan
+request, or one terminal-plan repair request. Transport retries inside that
+request do not create additional logical budget units. Telemetry records every
+attempt exposed by the provider Adapter; SDK-internal retries, if any, are not
+misreported as separate logical calls.
 
 ## 13. Baseline and Fairness
 
@@ -369,6 +430,12 @@ one arm's limits.
 
 Harbor's Oracle agent validates harness health only. Terminus-2 may later serve
 as a public reference point, but it is not the sole baseline for the MVP.
+
+Implementation is split into two independently testable plans. The first plan
+delivers the BayesProbe engineering vertical slice through the official verifier.
+The second plan adds the ReAct control and paired experiment runner only after
+the reuse and conformance gates pass. This sequencing does not change the
+agreed comparison; it prevents baseline work from hiding integration defects.
 
 ## 14. Reproducibility Lock
 
@@ -449,12 +516,20 @@ The official documentation's canonical larger check can also be run separately:
 harbor run -d terminal-bench/terminal-bench-2 -a oracle -l 5
 ```
 
-### 17.2 Stage 1: one-task integration smoke
+### 17.2 Stage 1A: BayesProbe engineering vertical slice
 
-Run BayesProbe and the minimal ReAct baseline once on the same fixed task. Both
-must execute at least one real action and reach the official verifier.
+Run BayesProbe once on the fixed task. It must execute at least one real action,
+route the observation through the existing Signal/Evidence/Update path, and
+reach the official verifier. This proves the downstream integration, not task
+accuracy.
 
-### 17.3 Stage 2: three-task capability smoke
+### 17.3 Stage 1B: paired one-task integration smoke
+
+After Stage 1A passes, run BayesProbe and the minimal ReAct baseline once on the
+same fixed task under the same locked controls. Both must execute at least one
+real action and reach the official verifier.
+
+### 17.4 Stage 2: three-task capability smoke
 
 Run both agents once on the same three preregistered, architecture-neutral tasks.
 These runs validate process behavior and failure attribution only. They are not
@@ -465,7 +540,7 @@ larger pilot, BayesProbe must additionally receive reward 1 on at least one of
 the three tasks. A 0/3 result triggers failure analysis; it does not permit
 replacing tasks or repeatedly tuning on them.
 
-### 17.4 Later stages
+### 17.5 Later stages
 
 After the MVP adapter is frozen, use a preregistered 20-30 task pilot. Repeated
 `k=5` runs and a full benchmark are later decisions based on runtime, variance,
@@ -485,18 +560,30 @@ and cost measured in the pilot.
 
 ### 18.2 Contract tests
 
-A fake Harbor environment will exercise `inspect`, `intervene`, `verify`, and
-`finish`. It must produce the same normalized Signals as a live environment for
-equivalent action results.
+A fake Harbor environment will exercise `inspect`, `intervene`, and `verify`.
+It must produce the same normalized Signals as a live environment for equivalent
+action results.
 
-### 18.3 Concurrency tests
+### 18.3 Public-reuse tests
+
+- benchmark production source imports BayesProbe only through `from bayesprobe
+  import ...`;
+- no benchmark production file is named `loop.py`, `core.py`, `evidence.py`, or
+  `updater.py`;
+- the runner factory returns the real public `AutonomousQuestionRunner` and
+  `BayesProbeCore` types;
+- the Harbor agent invokes `AutonomousQuestionRunner.run_question` exactly once
+  in a worker thread;
+- a real root-package runner completes the fake-environment vertical slice.
+
+### 18.4 Concurrency tests
 
 The async bridge must complete without deadlock, propagate cancellation, and
 turn command timeout into a recorded Signal. The Harbor event loop must remain
 responsive while the synchronous BayesProbe runner operates in its worker
 thread.
 
-### 18.4 Paradigm-conformance tests
+### 18.5 Paradigm-conformance tests
 
 - planner text cannot be admitted as Signal or Evidence;
 - every posterior change traces to admitted Evidence and source Signals;
@@ -505,35 +592,60 @@ thread.
 - the complete `Belief -> Probe -> Signal -> Evidence -> Update` trace is
   present for every completed cycle.
 
-### 18.5 Fairness tests
+### 18.6 Fairness tests
 
 The BayesProbe and ReAct configurations must resolve to the same executor,
 provider controls, action budget, model-call budget, and task timeout.
 
-### 18.6 Live smoke tests
+### 18.7 Live smoke tests
 
 - Oracle receives reward 1 on the fixed bootstrap task;
-- BayesProbe reaches the verifier on the fixed integration task;
-- ReAct reaches the same verifier under the same controls;
+- the first plan proves BayesProbe reaches the verifier on the fixed integration
+  task;
+- the follow-up plan proves ReAct reaches the same verifier under the same
+  controls;
 - the three fixed task identifiers cannot be replaced after outcomes are known.
 
 ## 19. Acceptance Criteria
 
-Implementation is accepted only when all of the following hold:
+Acceptance is staged so that the BayesProbe integration can be proven before a
+second controller is introduced.
 
-1. `git diff -- bayesprobe pyproject.toml` is empty for the benchmark change.
-2. Existing root tests still pass.
-3. Nested benchmark unit, contract, concurrency, conformance, and fairness tests
-   pass.
-4. Harbor can import both custom agents by their configured import paths.
-5. The official Oracle succeeds on the locked bootstrap task.
-6. Both real agents reach the official verifier on the same locked task.
-7. Every BayesProbe cycle has a complete, provenance-linked epistemic trace.
-8. No-signal cycles cannot directionally update posterior values.
-9. No API key value appears in configuration, logs, traces, or committed files.
-10. A completed Harbor verifier result is required for engineering readiness.
-11. BayesProbe obtains reward 1 on at least one of the three fixed capability
-    smoke tasks before a larger pilot begins.
+### 19.1 BayesProbe engineering vertical slice
+
+The first implementation plan is accepted only when all of the following hold:
+
+1. The benchmark implementation diff contains no path under `bayesprobe/` and
+   no root `pyproject.toml` change.
+2. An AST import guard proves benchmark production source uses only the
+   top-level `bayesprobe` public interface.
+3. No benchmark-owned autonomous-loop or kernel implementation file exists.
+4. Existing root tests still pass.
+5. Nested benchmark unit, contract, public-reuse, concurrency, and conformance
+   tests pass.
+6. The runner factory returns the installed public `AutonomousQuestionRunner`
+   and the Harbor agent calls its `run_question` method exactly once.
+7. Harbor can import the BayesProbe custom agent by its configured import path.
+8. The official Oracle succeeds on the locked bootstrap task.
+9. The real BayesProbe agent reaches the official verifier on the locked task.
+10. Every BayesProbe cycle has a complete, provenance-linked epistemic trace.
+11. No-signal cycles cannot directionally update posterior values.
+12. No API key value appears in configuration, logs, traces, or committed files.
+13. A completed Harbor verifier result is required for engineering readiness.
+
+### 19.2 Paired comparison readiness
+
+The follow-up ReAct plan is accepted only when Harbor can import both custom
+agents, fairness tests prove identical provider controls and budgets, and both
+agents reach the same official verifier on the same locked task. These checks do
+not block completion of the first engineering vertical slice.
+
+### 19.3 Larger-pilot gate
+
+Before a 20-30 task pilot begins, both agents must complete the locked three-task
+capability smoke and BayesProbe must obtain reward 1 on at least one of those
+three tasks. This later gate is not an acceptance condition for the engineering
+vertical slice.
 
 ## 20. Risks and Controls
 
