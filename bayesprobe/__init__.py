@@ -80,6 +80,15 @@ from bayesprobe.openai_gateway import (
     build_openai_request_payload,
     parse_openai_structured_response,
 )
+from bayesprobe.tavily_search import (
+    TavilySearchClient,
+    TavilySearchConfig,
+    TavilySearchError,
+    TavilySearchExecutionRecord,
+    TavilySearchRequest,
+    TavilySearchResponse,
+    TavilySearchResult,
+)
 from bayesprobe.probe_executor import (
     DeterministicProbeToolGateway,
     ModelBackedProbeToolGateway,
@@ -300,6 +309,13 @@ __all__ = [
     "TaskAdmissionStatus",
     "TaskAwareAnswerProjector",
     "TaskKind",
+    "TavilySearchClient",
+    "TavilySearchConfig",
+    "TavilySearchError",
+    "TavilySearchExecutionRecord",
+    "TavilySearchRequest",
+    "TavilySearchResponse",
+    "TavilySearchResult",
     "NeedsReframingResult",
     "OutOfScopeResult",
     "SignalProvenance",
