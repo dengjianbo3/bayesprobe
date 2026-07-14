@@ -34,6 +34,12 @@ from bayesprobe.evaluation.paradigm_checkpoint import (
     run_paradigm_checkpoint,
     score_paradigm_checkpoint,
 )
+from bayesprobe.evaluation.search_matrix import (
+    prepare_search_matrix,
+    report_search_matrix,
+    run_search_matrix,
+    score_search_matrix,
+)
 from bayesprobe.evaluation.runner import (
     CapabilityExperimentRunner,
     CapabilityPreflightResult,
@@ -94,6 +100,12 @@ def add_eval_subparser(subparsers: Any) -> None:
             required=True,
             help="Path to the prepared paradigm checkpoint directory.",
         )
+    search_prepare = commands.add_parser("search-prepare")
+    search_prepare.add_argument("--config", required=True)
+    search_prepare.add_argument("--source-checkpoint", required=True)
+    for command in ("search-run", "search-score", "search-report"):
+        command_parser = commands.add_parser(command)
+        command_parser.add_argument("--experiment", required=True)
 
 
 def run_eval_command(args: argparse.Namespace) -> int:
@@ -115,6 +127,17 @@ def run_eval_command(args: argparse.Namespace) -> int:
             message = run_paradigm_checkpoint(Path(args.experiment))
         elif args.eval_command == "checkpoint-score":
             message = score_paradigm_checkpoint(Path(args.experiment))
+        elif args.eval_command == "search-prepare":
+            message = prepare_search_matrix(
+                Path(args.config),
+                Path(args.source_checkpoint),
+            )
+        elif args.eval_command == "search-run":
+            message = run_search_matrix(Path(args.experiment))
+        elif args.eval_command == "search-score":
+            message = score_search_matrix(Path(args.experiment))
+        elif args.eval_command == "search-report":
+            message = report_search_matrix(Path(args.experiment))
         else:
             raise ValueError(f"unsupported eval command: {args.eval_command}")
     except KeyError:

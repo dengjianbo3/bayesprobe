@@ -23,7 +23,9 @@ from bayesprobe.experiment_runner import (
 )
 from bayesprobe.evaluation import (
     ArmCaseResult,
+    BayesProbeSearchArm,
     CapabilityExperimentConfig,
+    DirectSearchArm,
     EvaluationCase,
 )
 from bayesprobe.initialization import (
@@ -208,6 +210,7 @@ __all__ = [
     "AutonomousQuestionProgressObserver",
     "AutonomousQuestionStopReason",
     "BayesProbeCore",
+    "BayesProbeSearchArm",
     "BayesProbeInitializer",
     "BeliefState",
     "BeliefStateProjection",
@@ -224,6 +227,7 @@ __all__ = [
     "CapabilityKind",
     "DeterministicModelGateway",
     "DeterministicProbeToolGateway",
+    "DirectSearchArm",
     "EvidenceJudgment",
     "EvidenceJudgmentRepairPolicy",
     "EvidenceContributionDelta",

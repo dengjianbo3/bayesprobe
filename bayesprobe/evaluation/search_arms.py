@@ -13,6 +13,7 @@ from bayesprobe.evaluation.arms import (
 )
 from bayesprobe.evaluation.contracts import ArmCaseResult, EvaluationCase
 from bayesprobe.initialization import BayesProbeInitializer, InitializeRunInput
+from bayesprobe.ledger import JsonlLedgerStore
 from bayesprobe.model_gateway import ModelGateway, ModelGatewayValidationError, StructuredModelRequest
 from bayesprobe.probe_design import ProbeDesignContext, ProbeDesignResult, ProbeDesigner
 from bayesprobe.probe_executor import ProbeExecutor
@@ -161,6 +162,7 @@ class BayesProbeSearchArm:
         max_search_calls: int = 2,
         invocation_metadata: Mapping[str, Any] | None = None,
         run_result_observer: Callable[[AutonomousQuestionRunResult], None] | None = None,
+        ledger_factory: Callable[[EvaluationCase], JsonlLedgerStore] | None = None,
     ) -> None:
         if type(max_search_calls) is not int or max_search_calls < 1:
             raise ValueError("max_search_calls must be a positive integer")
@@ -169,6 +171,7 @@ class BayesProbeSearchArm:
         self._max_search_calls = max_search_calls
         self._invocation_metadata = dict(invocation_metadata or {})
         self._run_result_observer = run_result_observer
+        self._ledger_factory = ledger_factory
         self.run_config = AutonomousQuestionRunConfig(
             max_cycles=4,
             max_probes_per_cycle=1,
@@ -194,7 +197,8 @@ class BayesProbeSearchArm:
             self._client,
             max_search_calls=self._max_search_calls,
         )
-        core = BayesProbeCore(model_gateway=contextual_gateway)
+        ledger = self._ledger_factory(case) if self._ledger_factory is not None else None
+        core = BayesProbeCore(ledger=ledger, model_gateway=contextual_gateway)
         runner = AutonomousQuestionRunner(
             core=core,
             initializer=BayesProbeInitializer(ledger=core.ledger),

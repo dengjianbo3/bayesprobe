@@ -62,6 +62,9 @@ The repository currently includes:
 - active probe execution plus passive human, agent, benchmark, or system input;
 - deterministic, recorded, OpenAI Responses, and OpenAI-compatible Chat
   Completions model gateways;
+- opt-in Tavily retrieval, where a probe plans a query, each returned URL enters
+  as a `RETRIEVED_SOURCE` signal, and the evidence gate alone decides whether it
+  can revise belief;
 - a local WebUI with streamed run progress, belief state, evidence trail, and
   cycle trace;
 - JSONL ledger, provider telemetry, benchmark artifacts, and a frozen HLE
@@ -71,6 +74,25 @@ The repository currently includes:
 BayesProbe does **not** yet provide a production-grade tool ecosystem, durable
 distributed execution, a finished multi-agent protocol, or a validated coding
 agent. SWE-bench, Terminal-Bench, and RE-Bench are future validation targets.
+
+### Tavily Search Matrix
+
+The search experiment compares the frozen no-web checkpoint with two new,
+equal-budget arms: `direct_search` and `bayesprobe_search`. Set provider and
+Tavily credentials only as environment variables, then run:
+
+```bash
+export TAVILY_API_KEY='...'
+python -m bayesprobe eval search-prepare --config configs/hle-pilot-v0.1.json --source-checkpoint /path/to/checkpoint
+python -m bayesprobe eval search-run --experiment /path/to/prepared-search-matrix
+python -m bayesprobe eval search-score --experiment /path/to/prepared-search-matrix
+python -m bayesprobe eval search-report --experiment /path/to/prepared-search-matrix
+```
+
+Each arm has at most two Tavily `advanced` calls per case. Search failures and
+empty results do not fall back to model-reasoning signals; they are recorded as
+treatment-not-delivered cases. Reports contain only aggregates, never questions,
+retrieved URLs, snippets, or credentials.
 
 ## Quick Start
 

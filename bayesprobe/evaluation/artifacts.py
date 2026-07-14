@@ -51,7 +51,20 @@ class CapabilityArtifactStore:
         identity: Any,
         *,
         secret: bytes | None = None,
+        arm_names: tuple[str, ...] | None = None,
     ) -> None:
+        resolved_arm_names = self.arm_names if arm_names is None else arm_names
+        if (
+            not isinstance(resolved_arm_names, tuple)
+            or len(resolved_arm_names) < 1
+            or any(
+                not isinstance(arm, str) or not arm.strip()
+                for arm in resolved_arm_names
+            )
+            or len(set(resolved_arm_names)) != len(resolved_arm_names)
+        ):
+            raise ValueError("capability artifact arm names must be unique non-empty text")
+        self.arm_names = tuple(arm.strip() for arm in resolved_arm_names)
         self.identity = identity
         self.root = Path(restricted_root) / identity.experiment_id
         _private_directory(self.root)
@@ -220,9 +233,8 @@ class CapabilityArtifactStore:
         _atomic_private_bytes(self._secret_path, value)
         return value
 
-    @classmethod
-    def _validate_arm(cls, arm: str) -> None:
-        if arm not in cls.arm_names:
+    def _validate_arm(self, arm: str) -> None:
+        if arm not in self.arm_names:
             raise ValueError(f"unsupported capability arm: {arm}")
 
 

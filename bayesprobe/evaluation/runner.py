@@ -111,16 +111,18 @@ def build_experiment_identity(
 def deterministic_task_schedule(
     experiment_id: str,
     cases: list[EvaluationCase],
+    *,
+    arm_names: tuple[str, ...] = ("direct_flash", "bayesprobe_python"),
 ) -> list[ScheduledArmTask]:
+    if not arm_names or len(set(arm_names)) != len(arm_names):
+        raise ValueError("scheduled arm names must be non-empty and unique")
     tasks: list[ScheduledArmTask] = []
     for case in sorted(cases, key=lambda item: item.sample_id):
         digest = hashlib.sha256(
             f"{experiment_id}:{case.sample_id}".encode("utf-8")
         ).digest()
         arm_order = (
-            ("direct_flash", "bayesprobe_python")
-            if digest[-1] & 1 == 0
-            else ("bayesprobe_python", "direct_flash")
+            arm_names if digest[-1] & 1 == 0 else tuple(reversed(arm_names))
         )
         for arm in arm_order:
             tasks.append(
@@ -210,9 +212,10 @@ class CapabilityExperimentRunner:
         artifact_store: CapabilityArtifactStore,
         direct_concurrency: int = 8,
         bayesprobe_concurrency: int = 4,
+        arm_concurrency: Mapping[str, int] | None = None,
     ) -> None:
-        if set(arms) != {"direct_flash", "bayesprobe_python"}:
-            raise ValueError("capability runner requires both frozen experiment arms")
+        if set(arms) != set(artifact_store.arm_names):
+            raise ValueError("capability runner arms must match artifact store arms")
         for name, value in (
             ("direct_concurrency", direct_concurrency),
             ("bayesprobe_concurrency", bayesprobe_concurrency),
@@ -227,21 +230,32 @@ class CapabilityExperimentRunner:
         self._cases_by_id = {case.sample_id: case for case in cases}
         self.arms = dict(arms)
         self.artifact_store = artifact_store
+        requested_concurrency = (
+            {
+                "direct_flash": direct_concurrency,
+                "bayesprobe_python": bayesprobe_concurrency,
+            }
+            if arm_concurrency is None
+            else dict(arm_concurrency)
+        )
+        if set(requested_concurrency) != set(arms):
+            raise ValueError("capability runner concurrency must name every arm")
+        if any(type(value) is not int or value < 1 for value in requested_concurrency.values()):
+            raise ValueError("capability runner arm concurrency must be positive")
         self._semaphores = {
-            "direct_flash": threading.BoundedSemaphore(direct_concurrency),
-            "bayesprobe_python": threading.BoundedSemaphore(
-                bayesprobe_concurrency
-            ),
+            arm: threading.BoundedSemaphore(requested_concurrency[arm])
+            for arm in artifact_store.arm_names
         }
-        self._max_workers = direct_concurrency + bayesprobe_concurrency
+        self._max_workers = sum(requested_concurrency.values())
 
     def run(self) -> CapabilityRunSummary:
         for case in self.cases:
-            for arm in CapabilityArtifactStore.arm_names:
+            for arm in self.artifact_store.arm_names:
                 self.artifact_store.initialize_case(arm, case.sample_id)
         schedule = deterministic_task_schedule(
             self.identity.experiment_id,
             self.cases,
+            arm_names=self.artifact_store.arm_names,
         )
         runnable: list[ScheduledArmTask] = []
         for task in schedule:
@@ -257,7 +271,7 @@ class CapabilityExperimentRunner:
         states = [
             self.artifact_store.status(arm, case.sample_id)["state"]
             for case in self.cases
-            for arm in CapabilityArtifactStore.arm_names
+            for arm in self.artifact_store.arm_names
         ]
         terminal_count = sum(
             state in {"completed", "terminal_failed"} for state in states

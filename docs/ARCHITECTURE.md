@@ -372,6 +372,9 @@ Current adapters:
 - `DeterministicProbeToolGateway`.
 - `ModelBackedProbeToolGateway`, which converts the structured `execute_probe`
   result from a `ModelGateway` into an active `ExternalSignal`.
+- `TavilyProbeToolGateway`, which uses the model only to plan a query and turns
+  each Tavily result URL into a separate `RETRIEVED_SOURCE` signal. Query
+  planning is not evidence; retrieval failures produce no reasoning fallback.
 
 `ModelBackedProbeToolGateway` is an internal-deliberation adapter, not a claim of
 web search or source verification. Its signals use a conservative quality
@@ -380,7 +383,7 @@ baseline (`reliability=0.55`, `independence=0.35`, `verifiability=0.30`) and kee
 
 Future adapters:
 
-- search;
+- production search providers beyond the bounded Tavily adapter;
 - document retrieval;
 - tool invocation;
 - skill execution;
@@ -669,7 +672,7 @@ snapshot, and completes the four-phase protocol.
 | Belief update | Strong MVP | Solver consumes contribution deltas only. Exclusive mass remains normalized; independent credences update without cross-normalization; penalties, discarded-evidence neutrality, and relation-aware summaries are implemented. |
 | Hypothesis evolution | Good MVP | Anomaly spawn, weakening/reframing/retirement style evolution preserves explicit independent conflicts and reciprocal exclusive rivals; semantic evolution remains deferred. |
 | Probe planning | Strong MVP | Task-specific probe design, bounded probe-set ranking, and post-cycle reservation of a genuine top-hypothesis falsifier are implemented. |
-| Probe execution/tool seam | Good MVP | Execution receives an immutable score-free brief. Deterministic and model-backed adapters exist; search/retrieval/tool adapters remain future work. |
+| Probe execution/tool seam | Good MVP | Execution receives an immutable score-free brief. Deterministic, model-backed, and bounded Tavily retrieval adapters exist; broader retrieval and tool adapters remain future work. |
 | Autonomous question loop | Strong MVP | End-to-end runner returns a terminal run, final integrated cycle, task-aware selection, synthesis, or abstention, answer projection, explicit stop reason, and epistemic-stagnation termination. |
 | Synchronized round loop | Strong MVP | Fixed-round runner supports passive-only, active-only, and mixed rounds, reports epistemic progress, and remains externally controlled rather than self-stopping. |
 | Ledger/audit | Strong MVP | JSONL audit path has explicit canonical ownership and exactly-once probe-set/signal records. |
@@ -697,7 +700,7 @@ and relation-aware exclusive categorical mass and independent-credence solver
 semantics. Models propose task semantics, while `BayesProbeCore` alone admits
 Evidence, changes belief, and authorizes hypothesis expansion.
 
-Not implemented: external search, retrieval, or production tool adapters;
+Not implemented: durable multi-provider retrieval or a production-grade tool ecosystem;
 coding interventions; public benchmark execution; or probability calibration
 claims.
 
@@ -741,7 +744,7 @@ must be parsed, validated, and converted into BayesProbe domain objects.
 
 Use for active external information gathering:
 
-- search;
+- additional search providers and tool adapters;
 - document retrieval;
 - code/tool execution;
 - skill execution;
