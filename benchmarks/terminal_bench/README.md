@@ -60,8 +60,11 @@ ORACLE_JOB_DIR="$(find .runs/harbor/oracle -mindepth 1 -maxdepth 1 -type d | sor
 uv run python scripts/write_benchmark_lock.py --oracle-job "$ORACLE_JOB_DIR" --output .runs/benchmark.lock.json
 ```
 
-The writer requires Oracle reward `1.0`, Harbor 0.18.0, a committed adapter
-tree, and a locally inspectable task image. It writes the lock atomically.
+The writer requires Oracle reward `1.0`, Harbor 0.18.0, a clean committed
+adapter tree, and a locally inspectable task image. Ignored `.runs/` content
+does not make the adapter dirty. The writer records the current root HEAD,
+adapter tree, exact resolved image reference, and inspected image digest, then
+writes the lock atomically.
 
 ## BayesProbe Smoke
 
@@ -77,6 +80,11 @@ uv run python scripts/validate_smoke_run.py --job "$BAYESPROBE_JOB_DIR" --lock .
 The run must use the lock produced above. Harbor invokes the official verifier
 after the public `AutonomousQuestionRunner` returns.
 
+Before classification, the validator rediscovers the exact task image from the
+completed Harbor result and package cache, inspects its Docker digest, and
+compares the image, root HEAD, and committed adapter tree to the lock. A stale
+lock or dirty adapter fails validation even when the lock JSON is well formed.
+
 ## Artifact Locations
 
 - `.runs/benchmark.lock.json`: immutable benchmark and runtime identity
@@ -87,6 +95,14 @@ after the public `AutonomousQuestionRunner` returns.
 - `<trial>/verifier/`: official verifier logs and reward files
 
 All `.runs` content is generated local state and must remain untracked.
+
+## Residual Limitation
+
+The current public BayesProbe core aborts an `active_only` cycle with zero
+Signals before it can emit a completed integrated cycle. This benchmark slice
+does not modify or work around that core behavior. Its validator nevertheless
+accepts a future completed no-Signal/no-update cycle as unchanged, while still
+rejecting orphan Signals, Evidence, and updates.
 
 ## Result Classifications
 
