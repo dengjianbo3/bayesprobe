@@ -15,19 +15,46 @@ def _production_source_paths(package_dir: Path) -> list[Path]:
     return sorted(package_dir.rglob("*.py"))
 
 
+def _bayesprobe_import_violations(package_dir: Path) -> list[str]:
+    violations: list[str] = []
+    for source_path in _production_source_paths(package_dir):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "bayesprobe" or alias.name.startswith("bayesprobe."):
+                        violations.append(f"{source_path.name}:{node.lineno}: import {alias.name}")
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module.startswith("bayesprobe."):
+                    violations.append(f"{source_path.name}:{node.lineno}: from {module}")
+    return violations
+
+
 def test_nested_python_sources_are_discovered_recursively(tmp_path: Path) -> None:
     package_dir = tmp_path / "bayesprobe_terminal_bench"
     nested_source = package_dir / "adapters" / "core.py"
     nested_source.parent.mkdir(parents=True)
-    nested_source.write_text(
-        "from bayesprobe.private_module import PrivateType\n",
-        encoding="utf-8",
-    )
+    nested_source.write_text("value = 1\n", encoding="utf-8")
 
     assert nested_source not in package_dir.glob("*.py")
     source_paths = _production_source_paths(package_dir)
     assert nested_source in source_paths
     assert {path.name for path in source_paths} & FORBIDDEN_FILES == {"core.py"}
+
+
+def test_nested_private_imports_are_reported(tmp_path: Path) -> None:
+    package_dir = tmp_path / "bayesprobe_terminal_bench"
+    nested_source = package_dir / "adapters" / "provider.py"
+    nested_source.parent.mkdir(parents=True)
+    nested_source.write_text(
+        "from bayesprobe.private_module import value\n",
+        encoding="utf-8",
+    )
+
+    assert _bayesprobe_import_violations(package_dir) == [
+        "provider.py:1: from bayesprobe.private_module"
+    ]
 
 
 def test_nested_project_is_materialized() -> None:
@@ -53,16 +80,4 @@ def test_benchmark_has_no_shadow_kernel_modules() -> None:
 
 
 def test_production_source_uses_only_bayesprobe_root_imports() -> None:
-    violations: list[str] = []
-    for source_path in _production_source_paths(PACKAGE_DIR):
-        tree = ast.parse(source_path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == "bayesprobe" or alias.name.startswith("bayesprobe."):
-                        violations.append(f"{source_path.name}:{node.lineno}: import {alias.name}")
-            if isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                if module.startswith("bayesprobe."):
-                    violations.append(f"{source_path.name}:{node.lineno}: from {module}")
-    assert violations == []
+    assert _bayesprobe_import_violations(PACKAGE_DIR) == []
