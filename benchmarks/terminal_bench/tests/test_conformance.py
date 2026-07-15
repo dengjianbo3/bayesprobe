@@ -94,7 +94,7 @@ def _run_input(run_id: str) -> InitializeRunInput:
     return InitializeRunInput(
         run_id=run_id,
         problem="Determine which implementation diagnosis matches the observed test.",
-        task_kind=TaskKind.DECISION,
+        task_kind=TaskKind.DESIGN,
         hypothesis_relation=HypothesisRelation.EXCLUSIVE_EXHAUSTIVE,
         hypothesis_seeds=[
             HypothesisSeed(

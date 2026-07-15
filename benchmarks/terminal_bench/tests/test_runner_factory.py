@@ -15,6 +15,7 @@ from bayesprobe import (
     BayesProbeCore,
     CapabilityKind,
     DeterministicModelGateway,
+    RecordedTaskAdmitter,
     TaskAwareAnswerProjector,
 )
 from bayesprobe_terminal_bench.artifacts import TrialArtifactStore
@@ -180,6 +181,7 @@ def test_factory_returns_real_public_runner_and_core(tmp_path: Path) -> None:
 
     assert type(runner) is AutonomousQuestionRunner
     assert type(runner.core) is BayesProbeCore
+    assert type(runner.initializer._task_admitter) is RecordedTaskAdmitter
     assert runner.core._model_gateway is model_gateway
     assert runner.executor._gateway is probe_gateway
     assert {item.kind for item in runner.available_capabilities} == {

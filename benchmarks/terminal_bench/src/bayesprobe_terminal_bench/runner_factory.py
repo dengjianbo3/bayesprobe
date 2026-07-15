@@ -13,13 +13,14 @@ from bayesprobe import (
     AutonomousQuestionProgressObserver,
     AutonomousQuestionRunConfig,
     AutonomousQuestionRunner,
+    AnswerContractOutline,
+    AnswerValueType,
     BayesProbeCore,
     BayesProbeInitializer,
     CapabilityDescriptor,
     CapabilityKind,
     DeterministicModelGateway,
     EpistemicOrigin,
-    ExplicitTaskAdmitter,
     ExplicitTaskFramer,
     HypothesisExpansionService,
     InitializeRunInput,
@@ -27,17 +28,19 @@ from bayesprobe import (
     ModelGateway,
     ModelHypothesisExpansionAdapter,
     ModelProbeDesigner,
-    ModelTaskAdmitter,
     ModelTaskFramer,
     OpenAIChatCompletionsModelGateway,
     OpenAIModelGatewayConfig,
     ProbeExecutor,
     ProbeToolGateway,
     ProviderRequestControls,
-    RoutingTaskAdmitter,
+    RecordedTaskAdmitter,
     RoutingTaskFramer,
     StructuredModelRequest,
+    TaskAdmissionDecision,
+    TaskAdmissionStatus,
     TaskAwareAnswerProjector,
+    TaskKind,
 )
 
 from bayesprobe_terminal_bench.artifacts import TrialArtifactStore
@@ -219,9 +222,24 @@ def build_runner(
     progress_observer: AutonomousQuestionProgressObserver | None = None,
 ) -> AutonomousQuestionRunner:
     ledger = JsonlLedgerStore(Path(ledger_path))
-    task_admitter = RoutingTaskAdmitter(
-        explicit_admitter=ExplicitTaskAdmitter(),
-        open_admitter=ModelTaskAdmitter(model_gateway),
+    task_admitter = RecordedTaskAdmitter(
+        TaskAdmissionDecision(
+            attempt_id="terminal_bench_admission_template",
+            status=TaskAdmissionStatus.ADMITTED,
+            epistemic_basis=[
+                "Harbor supplied a fixed official benchmark task for execution."
+            ],
+            proposed_task_kind=TaskKind.DESIGN,
+            answer_contract_outline=AnswerContractOutline(
+                objective="Complete the supplied task in the benchmark environment.",
+                answer_value_type=AnswerValueType.STRUCTURED_TEXT,
+                decision_form="environment_change",
+                permits_synthesis=True,
+                required_sections=["result", "verification", "uncertainty"],
+            ),
+            reason="Official benchmark tasks are admitted by the evaluation harness.",
+            model_trace={"source": "terminal_bench_harness:v0.1"},
+        )
     )
     task_framer = RoutingTaskFramer(
         explicit_framer=ExplicitTaskFramer(),
