@@ -55,11 +55,11 @@ class TerminalBenchConfig(BaseModel):
     provider_timeout_seconds: int = Field(default=360, ge=1)
     command_timeout_seconds: int = Field(default=120, ge=1, le=120)
     max_output_tokens: int = Field(default=8_192, ge=256)
-    max_cycles: int = Field(default=8, ge=1)
+    max_cycles: int = Field(default=3, ge=1)
     max_probes_per_cycle: int = Field(default=2, ge=1)
     max_actions_per_probe: int = Field(default=3, ge=1, le=3)
     max_total_actions: int = Field(default=24, ge=1)
-    max_model_calls: int = Field(default=40, ge=1)
+    max_model_calls: int = Field(default=72, ge=1)
     signal_output_bytes: int = Field(default=32_768, ge=1)
     lock_path: Path = Path(".runs/benchmark.lock.json")
 

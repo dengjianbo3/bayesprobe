@@ -82,12 +82,30 @@ def test_config_uses_exact_defaults_and_source_overrides() -> None:
     assert config.provider_timeout_seconds == 360
     assert config.command_timeout_seconds == 120
     assert config.max_output_tokens == 8_192
-    assert config.max_cycles == 8
+    assert config.max_cycles == 3
     assert config.max_probes_per_cycle == 2
     assert config.max_actions_per_probe == 3
     assert config.max_total_actions == 24
-    assert config.max_model_calls == 40
+    assert config.max_model_calls == 72
     assert config.signal_output_bytes == 32_768
+
+
+def test_default_smoke_model_budget_covers_all_cycle_repair_paths() -> None:
+    config = TerminalBenchConfig(model="test-model")
+    initialization_calls = 6
+    calls_per_cycle = (
+        2 * config.max_probes_per_cycle
+        + 2 * config.max_probes_per_cycle * config.max_actions_per_probe
+        + 2
+        + 2
+    )
+    intercycle_probe_design_calls = 2 * (config.max_cycles - 1)
+
+    assert config.max_model_calls >= (
+        initialization_calls
+        + config.max_cycles * calls_per_cycle
+        + intercycle_probe_design_calls
+    )
 
 
 @pytest.mark.parametrize("name", ["BAYESPROBE_BENCH_MODEL", "BAYESPROBE_BENCH_API_KEY"])
