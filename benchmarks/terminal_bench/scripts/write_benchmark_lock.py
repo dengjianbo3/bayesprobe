@@ -341,21 +341,28 @@ def extract_job_identity(
             ),
         ),
     )
-    if trial_result.task_name != trial_result.task_id.name:
+    result_task_name = _required_string(
+        trial_result.task_name,
+        "trial result task name",
+    )
+    if result_task_name not in {trial_result.task_id.name, package_task_id}:
         raise ValueError("completed Harbor trial contains conflicting task identities")
-    task_checksum = _single_candidate(
-        "task checksums or refs",
+    package_ref = _single_candidate(
+        "task package refs",
         (
             _required_string(job_lock.trials[0].task.digest, "job lock task digest"),
             _required_string(trial_lock.task.digest, "trial lock task digest"),
             _required_string(trial_config.task.ref, "trial config task ref"),
             _required_string(trial_result.task_id.ref, "trial result task ref"),
-            _required_string(trial_result.task_checksum, "trial result task checksum"),
             _required_string(
                 trial_result.config.task.ref,
                 "trial result config task ref",
             ),
         ),
+    )
+    task_checksum = _canonical_sha256(
+        trial_result.task_checksum,
+        "trial result task checksum",
     )
     if dataset_name != DATASET_NAME:
         raise ValueError(f"Oracle dataset must be {DATASET_NAME}")
@@ -363,8 +370,8 @@ def extract_job_identity(
         raise ValueError(f"Oracle task must be {TASK_ID}")
     if not _DIGEST.fullmatch(dataset_revision):
         raise ValueError("dataset revision must be a sha256 digest")
-    if not _DIGEST.fullmatch(task_checksum):
-        raise ValueError("task checksum must be a sha256 digest")
+    if not _DIGEST.fullmatch(package_ref):
+        raise ValueError("task package ref must be a sha256 digest")
     return OracleIdentity(
         dataset_name=dataset_name,
         dataset_revision=dataset_revision,
@@ -373,7 +380,7 @@ def extract_job_identity(
         n_attempts=job_config.n_attempts,
         package_org=trial_result.task_id.org,
         package_name=trial_result.task_id.name,
-        package_ref=task_checksum,
+        package_ref=package_ref,
         download_dir=trial_config.task.download_dir,
         force_build=trial_config.environment.force_build,
     )
@@ -517,6 +524,15 @@ def _required_string(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"completed Oracle trial has no {label}")
     return value.strip()
+
+
+def _canonical_sha256(value: object, label: str) -> str:
+    checksum = _required_string(value, label)
+    if re.fullmatch(r"[0-9a-f]{64}", checksum):
+        return f"sha256:{checksum}"
+    if _DIGEST.fullmatch(checksum):
+        return checksum
+    raise ValueError(f"{label} must be a sha256 checksum")
 
 
 def _serialize_lock(

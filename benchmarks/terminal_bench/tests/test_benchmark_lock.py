@@ -202,6 +202,25 @@ def test_lock_rejects_conflicting_trial_task_id(
         )
 
 
+def test_lock_accepts_real_harbor_package_identity_shape(
+    synthetic_oracle_job: Path,
+) -> None:
+    trial_dir = next(path for path in synthetic_oracle_job.iterdir() if path.is_dir())
+    result_path = trial_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["task_name"] = FIXED_TASK
+    result["task_checksum"] = "4" * 64
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    lock = build_lock(
+        job_dir=synthetic_oracle_job,
+        config=TerminalBenchConfig(model="test-model"),
+        runtime_identity=RUNTIME_IDENTITY,
+    )
+
+    assert lock["task_checksum"] == "sha256:" + "4" * 64
+
+
 @pytest.mark.parametrize(
     ("task_names", "remove_field"),
     [
