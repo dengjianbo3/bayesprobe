@@ -53,7 +53,11 @@ def _oracle_job(root: Path, *, failed_task: str | None = None) -> Path:
                         "source": "terminal-bench/terminal-bench-2",
                     }
                 }
-                for task_id in FROZEN_GATE_TASK_IDS
+                for task_id in (
+                    FROZEN_GATE_TASK_IDS[0],
+                    FROZEN_GATE_TASK_IDS[2],
+                    FROZEN_GATE_TASK_IDS[1],
+                )
             ],
         },
     )

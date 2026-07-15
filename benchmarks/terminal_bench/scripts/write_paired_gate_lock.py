@@ -66,14 +66,20 @@ def build_paired_gate_lock(
         raise ValueError("Oracle gate Harbor lock is invalid")
     if not isinstance(trials, list) or len(trials) != 3:
         raise ValueError("Oracle gate must resolve three trials")
-    resolved = []
+    resolved_by_id: dict[object, object] = {}
     for trial in trials:
         task = trial.get("task") if isinstance(trial, Mapping) else None
         if not isinstance(task, Mapping):
             raise ValueError("Oracle gate trial identity is invalid")
-        resolved.append((task.get("name"), task.get("digest")))
-    if tuple(item[0] for item in resolved) != FROZEN_GATE_TASK_IDS:
-        raise ValueError("Oracle gate resolved tasks do not match the frozen order")
+        task_id = task.get("name")
+        if task_id in resolved_by_id:
+            raise ValueError("Oracle gate contains a duplicate resolved task")
+        resolved_by_id[task_id] = task.get("digest")
+    if set(resolved_by_id) != set(FROZEN_GATE_TASK_IDS):
+        raise ValueError("Oracle gate resolved tasks do not match the frozen set")
+    resolved = [
+        (task_id, resolved_by_id[task_id]) for task_id in FROZEN_GATE_TASK_IDS
+    ]
     if any(FROZEN_GATE_TASK_REFS[task_id] != task_ref for task_id, task_ref in resolved):
         raise ValueError("Oracle gate resolved refs do not match the frozen refs")
 
