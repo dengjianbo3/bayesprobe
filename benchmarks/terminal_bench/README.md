@@ -1,9 +1,13 @@
-# Terminal-Bench Engineering Smoke
+# Terminal-Bench Engineering Smoke and Paired Gate
 
 This nested project runs one fixed Terminal-Bench 2.0 task through Harbor
 0.18.0 and the public BayesProbe adapter. This slice is an engineering test of
 the integration path; it is not accuracy evidence or a benchmark accuracy
 claim.
+
+After the one-task engineering smoke passes, the paired gate runs a minimal
+Direct/ReAct control and BayesProbe on the same three frozen tasks. The gate is
+still a capability check, not representative Terminal-Bench accuracy.
 
 ## Prerequisites
 
@@ -118,6 +122,68 @@ rejecting orphan Signals, Evidence, and updates.
 
 Both zero-exit classifications prove only that the engineering path reached the
 official verifier. Neither one establishes representative task accuracy.
+
+## Paired Three-Task Gate
+
+The gate freezes these tasks and package refs before the two experimental arms
+run:
+
+1. `terminal-bench/break-filter-js-from-html`
+2. `terminal-bench/cancel-async-tasks`
+3. `terminal-bench/build-cython-ext`
+
+The first task remains in the gate even though the engineering smoke already
+observed a BayesProbe reward of `0`. It must not be replaced after that outcome.
+
+Run the official Oracle on all three tasks:
+
+```bash
+HARBOR_TELEMETRY=off uv run harbor run -c configs/oracle-gate.yaml
+ORACLE_GATE_JOB=.runs/harbor/gate/oracle/bayesprobe-terminal-bench-oracle-gate
+```
+
+After the adapter changes are committed and the worktree is clean, freeze the
+resolved tasks, image digests, repository identity, model, and shared budgets:
+
+```bash
+export BAYESPROBE_BENCH_MODEL='<model>'
+export BAYESPROBE_BENCH_BASE_URL='<openai-compatible-base-url>'
+uv run python scripts/write_paired_gate_lock.py \
+  --oracle-job "$ORACLE_GATE_JOB" \
+  --output .runs/paired-gate.lock.json
+```
+
+The Oracle must earn `1.0` on all three tasks or the writer refuses to create
+the lock. Lock creation does not require the provider API key.
+
+Export the provider key only for the two real arms, then run them serially:
+
+```bash
+export BAYESPROBE_BENCH_API_KEY='<provider-key>'
+HARBOR_TELEMETRY=off uv run harbor run -c configs/direct-gate.yaml
+HARBOR_TELEMETRY=off uv run harbor run -c configs/bayesprobe-gate.yaml
+```
+
+Validate both jobs against the same lock:
+
+```bash
+uv run python scripts/validate_paired_gate.py \
+  --lock .runs/paired-gate.lock.json \
+  --direct-job .runs/harbor/gate/direct/bayesprobe-terminal-bench-direct-gate \
+  --bayesprobe-job .runs/harbor/gate/bayesprobe/bayesprobe-terminal-bench-bayesprobe-gate
+```
+
+The JSON report contains official per-task rewards, verifier completion,
+BayesProbe trace completeness, terminal actions, logical model calls, token
+usage, and wall time. The gate passes only when both arms reach all three
+official verifiers, all BayesProbe traces conform, and BayesProbe earns reward
+`1` on at least one task. A reward of `0` is never retried or reclassified as
+infrastructure failure.
+
+Both arms use the same OpenAI-compatible provider controls, low-level terminal
+actions, action policy, `24` action budget, `72` logical model-call budget,
+`120` second command timeout, `360` second provider timeout, and official task
+verifier. Only the controller state differs.
 
 ## Secret Handling
 

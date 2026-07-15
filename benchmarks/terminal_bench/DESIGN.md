@@ -388,11 +388,11 @@ The initial benchmark adapter uses these preregistered limits:
 
 | Limit | Value |
 | --- | ---: |
-| Maximum BayesProbe cycles | 8 |
+| Maximum BayesProbe cycles | 3 |
 | Maximum high-level probes per cycle | 2 |
 | Maximum actions per high-level probe | 3 |
 | Maximum terminal actions per trial | 24 |
-| Maximum logical model calls per trial | 40 |
+| Maximum logical model calls per trial | 72 |
 | Per-command timeout | 120 seconds |
 | Provider request timeout | 360 seconds |
 | Model-facing output per action | 32 KB |
@@ -414,7 +414,7 @@ Terminus-2 alone. The control and BayesProbe arms use:
 - the same provider, model, base URL, temperature, and per-call token limit;
 - the same low-level action executor and action policy;
 - the same maximum 24 terminal actions;
-- the same maximum 40 model calls;
+- the same maximum 72 model calls;
 - the same command and provider timeouts;
 - the same official task timeout and verifier.
 
@@ -531,7 +531,15 @@ real action and reach the official verifier.
 
 ### 17.4 Stage 2: three-task capability smoke
 
-Run both agents once on the same three preregistered, architecture-neutral tasks.
+Run both agents once on the same three preregistered, architecture-neutral tasks:
+
+1. `terminal-bench/break-filter-js-from-html`
+2. `terminal-bench/cancel-async-tasks`
+3. `terminal-bench/build-cython-ext`
+
+Their package refs are frozen in the benchmark source before the paired run.
+The first task remains selected despite its already-observed BayesProbe smoke
+reward of zero; it cannot be replaced based on that outcome.
 These runs validate process behavior and failure attribution only. They are not
 reported as representative benchmark accuracy.
 

@@ -24,6 +24,11 @@ from bayesprobe_terminal_bench.config import (
     RunBudget,
     TerminalBenchConfig,
 )
+from bayesprobe_terminal_bench.experiment_lock import (
+    FROZEN_GATE_TASK_IDS,
+    FROZEN_GATE_TASK_REFS,
+    PAIRED_GATE_ARMS,
+)
 from bayesprobe_terminal_bench.runner_factory import (
     ArtifactInvocationObserver,
     BudgetedModelGateway,
@@ -548,3 +553,66 @@ async def test_build_live_session_composes_shared_budget_and_active_loop_without
     assert probe_gateway._bridge._loop is active_loop
     assert api_key not in repr(session)
     assert list(session.artifacts.root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_build_live_session_accepts_paired_gate_lock_for_locked_task(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "paired.lock.json"
+    config = TerminalBenchConfig(
+        model="live-model",
+        base_url="https://provider.example/v1",
+        lock_path=lock_path,
+    )
+    payload = {
+        "schema_version": "terminal_bench_paired_gate:v0.1",
+        "harbor_version": "0.18.0",
+        "dataset_name": "terminal-bench/terminal-bench-2",
+        "dataset_revision": "sha256:" + "1" * 64,
+        "tasks": [
+            {
+                "task_id": task_id,
+                "task_ref": FROZEN_GATE_TASK_REFS[task_id],
+                "image_digest": "sha256:" + str(index) * 64,
+            }
+            for index, task_id in enumerate(FROZEN_GATE_TASK_IDS, start=2)
+        ],
+        "root_git_sha": "a" * 40,
+        "adapter_tree_sha": "b" * 40,
+        "n_attempts": 1,
+        "model": config.model,
+        "base_url": config.base_url,
+        "provider_protocol": "openai_chat_completions",
+        "api_key_env": config.api_key_env,
+        "temperature": 0,
+        "max_cycles": config.max_cycles,
+        "max_probes_per_cycle": config.max_probes_per_cycle,
+        "max_actions_per_probe": config.max_actions_per_probe,
+        "max_total_actions": config.max_total_actions,
+        "max_model_calls": config.max_model_calls,
+        "command_timeout_seconds": config.command_timeout_seconds,
+        "provider_timeout_seconds": config.provider_timeout_seconds,
+        "max_output_tokens": config.max_output_tokens,
+        "signal_output_bytes": config.signal_output_bytes,
+        "arms": PAIRED_GATE_ARMS,
+    }
+    lock_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    session = build_live_session(
+        config=config,
+        api_key="one-time-live-provider-secret",
+        instruction="Repair the supplied task workspace.",
+        environment=NeverExecutedEnvironment(),
+        event_loop=asyncio.get_running_loop(),
+        logs_dir=tmp_path / "logs",
+        session_id="cancel-async-tasks__AbCd123__agent",
+        context_id="context:id",
+        runtime_git_identity=RepositoryGitIdentity(
+            root_git_sha="a" * 40,
+            adapter_tree_sha="b" * 40,
+            adapter_dirty=False,
+        ),
+    )
+
+    assert type(session.runner) is AutonomousQuestionRunner

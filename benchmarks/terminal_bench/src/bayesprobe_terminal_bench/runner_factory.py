@@ -407,6 +407,34 @@ def load_and_validate_lock(
     return dict(payload)
 
 
+def validate_runtime_lock(
+    path: Path,
+    config: TerminalBenchConfig,
+    *,
+    arm: str,
+    session_id: str | None,
+    runtime_git_identity: RepositoryGitIdentity | None = None,
+) -> object:
+    from bayesprobe_terminal_bench.experiment_lock import (
+        load_paired_gate_lock,
+        paired_gate_schema_version,
+    )
+
+    if paired_gate_schema_version(path) == "terminal_bench_paired_gate:v0.1":
+        return load_paired_gate_lock(
+            path,
+            config,
+            arm=arm,
+            session_id=session_id,
+            runtime_git_identity=runtime_git_identity,
+        )
+    return load_and_validate_lock(
+        path,
+        config,
+        runtime_git_identity=runtime_git_identity,
+    )
+
+
 def build_live_session(
     *,
     config: TerminalBenchConfig,
@@ -419,9 +447,11 @@ def build_live_session(
     context_id: str | None,
     runtime_git_identity: RepositoryGitIdentity | None = None,
 ) -> LiveSession:
-    load_and_validate_lock(
+    validate_runtime_lock(
         config.lock_path,
         config,
+        arm="bayesprobe",
+        session_id=session_id,
         runtime_git_identity=runtime_git_identity,
     )
     artifacts = TrialArtifactStore(

@@ -1,0 +1,23 @@
+job_name: bayesprobe-terminal-bench-bayesprobe-gate
+jobs_dir: .runs/harbor/gate/bayesprobe
+n_attempts: 1
+datasets:
+  - name: terminal-bench/terminal-bench-2
+    task_names:
+      - terminal-bench/break-filter-js-from-html
+      - terminal-bench/cancel-async-tasks
+      - terminal-bench/build-cython-ext
+agents:
+  - import_path: bayesprobe_terminal_bench.agent:BayesProbeHarborAgent
+    model_name: ${BAYESPROBE_BENCH_MODEL}
+    env:
+      BAYESPROBE_BENCH_API_KEY: ${BAYESPROBE_BENCH_API_KEY}
+      BAYESPROBE_BENCH_BASE_URL: ${BAYESPROBE_BENCH_BASE_URL}
+      BAYESPROBE_BENCH_MODEL: ${BAYESPROBE_BENCH_MODEL}
+      BAYESPROBE_BENCH_LOCK_PATH: .runs/paired-gate.lock.json
+environment:
+  type: docker
+  delete: true
+orchestrator:
+  type: local
+  n_concurrent_trials: 1
