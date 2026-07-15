@@ -638,10 +638,17 @@ def _write_smoke_job(
             },
         },
         {
+            "record_type": "evidence_contribution_delta",
+            "payload": {
+                "contribution_root_id": "evidence-root:sha256:" + "1" * 64,
+                "caused_by_event_ids": ["E1"],
+            },
+        },
+        {
             "record_type": "belief_update",
             "payload": {
                 "cycle_id": "cycle_1",
-                "evidence_id": "E1",
+                "evidence_id": "evidence-root:sha256:" + "1" * 64,
                 "prior": 0.5,
                 "posterior": 0.7,
                 "direction": "strengthened",
@@ -865,7 +872,10 @@ def test_smoke_classifier_allows_linked_evidence_without_directional_update(
         update["posterior"] = update["prior"]
     else:
         records = [
-            record for record in records if record["record_type"] != "belief_update"
+            record
+            for record in records
+            if record["record_type"]
+            not in {"belief_update", "evidence_contribution_delta"}
         ]
     _write_trace_records(bayesprobe_dir, records)
     lock_path = tmp_path / "benchmark.lock.json"
@@ -993,7 +1003,12 @@ def test_all_policy_denied_cycle_needs_no_observation_signal_or_update(
         record
         for record in _read_trace_records(bayesprobe_dir)
         if record["record_type"]
-        not in {"external_signal", "evidence_event", "belief_update"}
+        not in {
+            "external_signal",
+            "evidence_event",
+            "evidence_contribution_delta",
+            "belief_update",
+        }
     ]
     _write_trace_records(bayesprobe_dir, records)
     errors_path = bayesprobe_dir / "errors.jsonl"

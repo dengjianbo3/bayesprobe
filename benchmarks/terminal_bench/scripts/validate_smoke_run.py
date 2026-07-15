@@ -380,22 +380,61 @@ def _epistemic_links_are_valid(
     if set(evidence_by_signal) != set(signals_by_id):
         return False
 
-    for update in by_type.get("belief_update", []):
-        evidence_id = update.get("evidence_id")
-        evidence = evidence_by_id.get(evidence_id) if isinstance(evidence_id, str) else None
-        if evidence is None or evidence.get("discard_reason") is not None:
-            return False
-        signal = signals_by_id.get(evidence.get("derived_from_signal"))
+    contribution_deltas: dict[str, list[tuple[str, ...]]] = {}
+    for delta in by_type.get("evidence_contribution_delta", []):
+        contribution_root_id = delta.get("contribution_root_id")
+        caused_by = delta.get("caused_by_event_ids")
         if (
-            signal is None
-            or update.get("cycle_id") != signal.get("cycle_id")
-            or not _update_is_consistent(update, evidence_id)
+            not isinstance(contribution_root_id, str)
+            or not contribution_root_id
+            or not isinstance(caused_by, list)
+            or not caused_by
+            or any(not isinstance(event_id, str) for event_id in caused_by)
+            or len(set(caused_by)) != len(caused_by)
         ):
+            return False
+        causal_events = [evidence_by_id.get(event_id) for event_id in caused_by]
+        if any(
+            event is None or event.get("discard_reason") is not None
+            for event in causal_events
+        ):
+            return False
+        contribution_deltas.setdefault(contribution_root_id, []).append(
+            tuple(caused_by)
+        )
+
+    for update in by_type.get("belief_update", []):
+        contribution_root_id = update.get("evidence_id")
+        sensitivity = update.get("sensitivity")
+        caused_by = (
+            sensitivity.get("caused_by_event_ids")
+            if isinstance(sensitivity, Mapping)
+            else None
+        )
+        if (
+            not isinstance(contribution_root_id, str)
+            or not isinstance(caused_by, list)
+            or tuple(caused_by) not in contribution_deltas.get(
+                contribution_root_id,
+                [],
+            )
+        ):
+            return False
+        causal_events = [evidence_by_id[event_id] for event_id in caused_by]
+        causal_signals = [
+            signals_by_id.get(event.get("derived_from_signal"))
+            for event in causal_events
+        ]
+        if any(signal is None for signal in causal_signals) or any(
+            update.get("cycle_id") != signal.get("cycle_id")
+            for signal in causal_signals
+            if signal is not None
+        ) or not _update_is_consistent(update):
             return False
     return True
 
 
-def _update_is_consistent(update: Mapping[str, Any], evidence_id: str) -> bool:
+def _update_is_consistent(update: Mapping[str, Any]) -> bool:
     sensitivity = update.get("sensitivity")
     caused_by = (
         sensitivity.get("caused_by_event_ids")
@@ -407,7 +446,7 @@ def _update_is_consistent(update: Mapping[str, Any], evidence_id: str) -> bool:
     direction = update.get("direction")
     if (
         not isinstance(caused_by, list)
-        or evidence_id not in caused_by
+        or not caused_by
         or type(prior) not in (int, float)
         or type(posterior) not in (int, float)
         or direction not in {"strengthened", "weakened", "neutral"}
