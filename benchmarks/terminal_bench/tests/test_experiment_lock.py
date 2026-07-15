@@ -163,7 +163,7 @@ def test_paired_gate_lock_rejects_dirty_or_different_runtime(tmp_path: Path) -> 
             path,
             _config(),
             arm="bayesprobe",
-            session_id="build-cython-ext__AbCd123__agent",
+            session_id="log-summary-date-ranges__AbCd123__agent",
             runtime_git_identity=_runtime(dirty=True),
         )
     with pytest.raises(ValueError, match="root_git_sha"):
@@ -171,7 +171,7 @@ def test_paired_gate_lock_rejects_dirty_or_different_runtime(tmp_path: Path) -> 
             path,
             _config(),
             arm="bayesprobe",
-            session_id="build-cython-ext__AbCd123__agent",
+            session_id="log-summary-date-ranges__AbCd123__agent",
             runtime_git_identity=SimpleNamespace(
                 root_git_sha="f" * 40,
                 adapter_tree_sha="b" * 40,

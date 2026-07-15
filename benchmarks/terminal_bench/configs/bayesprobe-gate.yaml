@@ -6,7 +6,7 @@ datasets:
     task_names:
       - terminal-bench/break-filter-js-from-html
       - terminal-bench/cancel-async-tasks
-      - terminal-bench/build-cython-ext
+      - terminal-bench/log-summary-date-ranges
 agents:
   - import_path: bayesprobe_terminal_bench.agent:BayesProbeHarborAgent
     model_name: ${BAYESPROBE_BENCH_MODEL}

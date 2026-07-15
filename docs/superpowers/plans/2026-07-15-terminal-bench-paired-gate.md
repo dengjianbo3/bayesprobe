@@ -15,7 +15,8 @@
 - The Direct arm must not import or imitate BayesProbe belief, probe, signal, evidence, or update components.
 - Both arms use the same provider, model, base URL, temperature `0`, token limit, provider timeout, command timeout, action policy, action budget, model-call budget, task timeout, and verifier.
 - Keep `max_total_actions=24`, `max_model_calls=72`, command timeout `120`, provider timeout `360`, and model-facing observation limit `32768` bytes for this gate.
-- Freeze these tasks before live outcomes: `terminal-bench/break-filter-js-from-html`, `terminal-bench/cancel-async-tasks`, and `terminal-bench/build-cython-ext`.
+- Freeze these tasks before experimental-arm outcomes: `terminal-bench/break-filter-js-from-html`, `terminal-bench/cancel-async-tasks`, and `terminal-bench/log-summary-date-ranges`.
+- Record `terminal-bench/build-cython-ext` as disqualified during Oracle qualification because its upstream repository test failed before either experimental arm ran.
 - The already-observed zero reward on `break-filter-js-from-html` remains part of the gate and may not be replaced.
 - Oracle must pass all three tasks before either experimental arm runs.
 - The gate passes only when both arms reach the verifier on all three tasks and BayesProbe earns reward `1` on at least one task.

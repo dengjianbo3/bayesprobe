@@ -535,11 +535,17 @@ Run both agents once on the same three preregistered, architecture-neutral tasks
 
 1. `terminal-bench/break-filter-js-from-html`
 2. `terminal-bench/cancel-async-tasks`
-3. `terminal-bench/build-cython-ext`
+3. `terminal-bench/log-summary-date-ranges`
 
 Their package refs are frozen in the benchmark source before the paired run.
 The first task remains selected despite its already-observed BayesProbe smoke
 reward of zero; it cannot be replaced based on that outcome.
+
+The initial third candidate, `terminal-bench/build-cython-ext`, was rejected at
+the Oracle qualification stage before either experimental arm ran. Its official
+Oracle verifier failed an upstream `pyknotid` repository test (`1 failed, 17
+passed`) despite the solution build completing. The replacement therefore
+addresses task/toolchain health and is not based on Direct or BayesProbe reward.
 These runs validate process behavior and failure attribution only. They are not
 reported as representative benchmark accuracy.
 

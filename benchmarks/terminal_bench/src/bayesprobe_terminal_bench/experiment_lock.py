@@ -14,7 +14,7 @@ from bayesprobe_terminal_bench.config import TerminalBenchConfig
 FROZEN_GATE_TASK_IDS = (
     "terminal-bench/break-filter-js-from-html",
     "terminal-bench/cancel-async-tasks",
-    "terminal-bench/build-cython-ext",
+    "terminal-bench/log-summary-date-ranges",
 )
 FROZEN_GATE_TASK_REFS = {
     "terminal-bench/break-filter-js-from-html": (
@@ -23,8 +23,8 @@ FROZEN_GATE_TASK_REFS = {
     "terminal-bench/cancel-async-tasks": (
         "sha256:7c230a29f27c49c2fff88f4721165f4241e456bd87a94cd525be05ae98c6cbbb"
     ),
-    "terminal-bench/build-cython-ext": (
-        "sha256:38e42b5662bb3c6b8610d193d5ef1b47ee3a8f4bd07eb860ceaab17e9406a368"
+    "terminal-bench/log-summary-date-ranges": (
+        "sha256:bd0eb5e8434840a46c623c8d29c71b4a6d0fc5c7bcbf637b6d1aef36b98f5cc5"
     ),
 }
 PAIRED_GATE_ARMS = {

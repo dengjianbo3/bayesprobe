@@ -130,10 +130,14 @@ run:
 
 1. `terminal-bench/break-filter-js-from-html`
 2. `terminal-bench/cancel-async-tasks`
-3. `terminal-bench/build-cython-ext`
+3. `terminal-bench/log-summary-date-ranges`
 
 The first task remains in the gate even though the engineering smoke already
 observed a BayesProbe reward of `0`. It must not be replaced after that outcome.
+The originally preregistered `build-cython-ext` candidate was disqualified
+before either experimental arm ran because the official Oracle verifier failed
+an upstream `pyknotid` repository test (`1 failed, 17 passed`). This is recorded
+as task qualification failure, not an agent result.
 
 Run the official Oracle on all three tasks:
 
