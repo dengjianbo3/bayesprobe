@@ -67,6 +67,26 @@ def test_store_writes_each_explicit_artifact_type_to_its_own_line_delimited_stre
     )
 
 
+def test_contract_attempts_use_a_dedicated_redacted_stream(tmp_path) -> None:
+    store = TrialArtifactStore(tmp_path, restricted_values=("provider-secret",))
+
+    store.append_contract_attempt(
+        {
+            "stage": "terminal_task_frame",
+            "response_sha256": "provider-secret",
+            "field_errors": ["hypotheses.0.type:literal_error"],
+        }
+    )
+
+    text = (tmp_path / "provider_contract.jsonl").read_text(encoding="utf-8")
+    assert "provider-secret" not in text
+    assert json.loads(text) == {
+        "field_errors": ["hypotheses.0.type:literal_error"],
+        "response_sha256": "[REDACTED]",
+        "stage": "terminal_task_frame",
+    }
+
+
 def test_concurrent_appends_are_complete_json_lines(tmp_path) -> None:
     store = TrialArtifactStore(tmp_path, restricted_values=())
 

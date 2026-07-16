@@ -40,6 +40,9 @@ class TrialArtifactStore:
     def append_provider_call(self, payload: Any) -> None:
         self._append("provider_telemetry.jsonl", payload)
 
+    def append_contract_attempt(self, payload: Any) -> None:
+        self._append("provider_contract.jsonl", payload)
+
     def append_error(self, payload: Any) -> None:
         self._append("errors.jsonl", payload)
 
