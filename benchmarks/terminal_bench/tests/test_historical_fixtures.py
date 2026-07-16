@@ -12,6 +12,7 @@ from freeze_historical_traces import (
     HistoricalTraceManifest,
     HistoricalTraceRef,
     freeze_historical_traces,
+    main,
 )
 
 
@@ -67,6 +68,7 @@ def test_historical_trace_fixtures_are_complete_redacted_and_immutable() -> None
     for path in FIXTURE_ROOT.rglob("*"):
         assert not path.is_symlink(), f"fixture symlink is not allowed: {path}"
 
+    expected_files = {"manifest.json"}
     for trace in manifest.traces:
         task_directory = FIXTURE_ROOT / trace.task_id.split("/", maxsplit=1)[1]
         actual_files = {
@@ -75,6 +77,10 @@ def test_historical_trace_fixtures_are_complete_redacted_and_immutable() -> None
             if path.is_file()
         }
         assert actual_files == set(trace.files)
+        expected_files.update(
+            f"{task_directory.name}/{relative_path}"
+            for relative_path in trace.files
+        )
 
         for relative_path, expected_digest in trace.files.items():
             normalized_path = PurePosixPath(relative_path)
@@ -89,6 +95,13 @@ def test_historical_trace_fixtures_are_complete_redacted_and_immutable() -> None
                 f"secret-shaped value found in {path.relative_to(FIXTURE_ROOT)}"
             )
             assert f"sha256:{hashlib.sha256(contents).hexdigest()}" == expected_digest
+
+    actual_files = {
+        path.relative_to(FIXTURE_ROOT).as_posix()
+        for path in FIXTURE_ROOT.rglob("*")
+        if path.is_file()
+    }
+    assert actual_files == expected_files
 
     manifest_text = manifest_path.read_text(encoding="utf-8")
     assert not _SECRET_PATTERN.search(manifest_text)
@@ -133,16 +146,17 @@ def test_freezer_copies_only_allowed_normalized_artifacts(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    ("source_value", "restricted_values", "error_message"),
+    ("source_value", "restricted_value_envs", "error_message"),
     [
-        ("provider-secret", ("provider-secret",), "restricted value"),
+        ("provider-secret", ("FIXTURE_RESTRICTED_VALUE",), "restricted value"),
         ("sk-1234567890ab", (), "secret-shaped content"),
     ],
 )
 def test_freezer_rejects_unsafe_source_content_without_replacing_output(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     source_value: str,
-    restricted_values: tuple[str, ...],
+    restricted_value_envs: tuple[str, ...],
     error_message: str,
 ) -> None:
     source_job = tmp_path / "source-job"
@@ -162,13 +176,90 @@ def test_freezer_rejects_unsafe_source_content_without_replacing_output(
     output.mkdir()
     sentinel = output / "sentinel.txt"
     sentinel.write_text("existing fixture", encoding="utf-8")
+    monkeypatch.setenv("FIXTURE_RESTRICTED_VALUE", "provider-secret")
 
     with pytest.raises(ValueError, match=error_message):
         freeze_historical_traces(
             source_job=source_job,
             output=output,
             source_commit=EXPECTED_SOURCE_COMMIT,
-            restricted_values=restricted_values,
+            restricted_value_envs=restricted_value_envs,
         )
 
     assert sentinel.read_text(encoding="utf-8") == "existing fixture"
+
+
+@pytest.mark.parametrize(
+    ("environment", "error_message"),
+    [
+        ({}, "restricted value environment variable is missing"),
+        ({"FIXTURE_RESTRICTED_VALUE": ""}, "restricted value environment variable is empty"),
+    ],
+)
+def test_freezer_requires_nonempty_named_restricted_value_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment: dict[str, str],
+    error_message: str,
+) -> None:
+    source_job = _safe_source_job(tmp_path)
+    monkeypatch.delenv("FIXTURE_RESTRICTED_VALUE", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=error_message):
+        freeze_historical_traces(
+            source_job=source_job,
+            output=tmp_path / "fixtures",
+            source_commit=EXPECTED_SOURCE_COMMIT,
+            restricted_value_envs=("FIXTURE_RESTRICTED_VALUE",),
+        )
+
+
+@pytest.mark.parametrize("environment_name", ("", "1INVALID", "INVALID-NAME"))
+def test_freezer_rejects_invalid_restricted_value_environment_name(
+    tmp_path: Path,
+    environment_name: str,
+) -> None:
+    with pytest.raises(ValueError, match="restricted value environment name is invalid"):
+        freeze_historical_traces(
+            source_job=_safe_source_job(tmp_path),
+            output=tmp_path / "fixtures",
+            source_commit=EXPECTED_SOURCE_COMMIT,
+            restricted_value_envs=(environment_name,),
+        )
+
+
+def test_freezer_cli_rejects_raw_restricted_values(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "--source-job",
+                "source-job",
+                "--output",
+                "fixtures",
+                "--source-commit",
+                EXPECTED_SOURCE_COMMIT,
+                "--restricted-value",
+                "provider-secret",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert "unrecognized arguments: --restricted-value provider-secret" in capsys.readouterr().err
+
+
+def _safe_source_job(tmp_path: Path) -> Path:
+    source_job = tmp_path / "source-job"
+    for task_id in EXPECTED_TASK_IDS:
+        artifact_directory = (
+            source_job
+            / f"{task_id.split('/', maxsplit=1)[1]}__historical"
+            / "agent"
+            / "bayesprobe"
+        )
+        artifact_directory.mkdir(parents=True)
+        (artifact_directory / "provider_telemetry.jsonl").write_text(
+            '{"value":"safe"}\n', encoding="utf-8"
+        )
+    return source_job

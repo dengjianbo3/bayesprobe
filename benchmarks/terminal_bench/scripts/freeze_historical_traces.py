@@ -41,6 +41,7 @@ _SECRET_PATTERN = re.compile(
     rb"github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})",
     re.IGNORECASE,
 )
+_ENVIRONMENT_VARIABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class HistoricalTraceRef(BaseModel):
@@ -66,16 +67,14 @@ def freeze_historical_traces(
     source_job: Path,
     output: Path,
     source_commit: str,
-    restricted_values: tuple[str, ...] = (),
+    restricted_value_envs: tuple[str, ...] = (),
 ) -> HistoricalTraceManifest:
     source_job = Path(source_job)
     output = Path(output)
     if source_job.is_symlink() or not source_job.is_dir():
         raise ValueError("source job must be a real directory")
 
-    values = tuple(value for value in restricted_values if value)
-    if any(not isinstance(value, str) for value in values):
-        raise TypeError("restricted values must be strings")
+    restricted_values = _restricted_values_from_environment(restricted_value_envs)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary_output = Path(
@@ -92,7 +91,7 @@ def freeze_historical_traces(
                 if not source_file.exists():
                     continue
                 contents = _normalized_source_contents(
-                    source_file, restricted_values=values
+                    source_file, restricted_values=restricted_values
                 )
                 destination = task_directory / filename
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +160,22 @@ def _normalized_source_contents(
         raise ValueError(f"source artifact is not valid JSON: {source_file.name}") from error
 
 
+def _restricted_values_from_environment(
+    environment_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    values: list[str] = []
+    for name in environment_names:
+        if not isinstance(name, str) or not _ENVIRONMENT_VARIABLE_NAME.fullmatch(name):
+            raise ValueError("restricted value environment name is invalid")
+        value = os.environ.get(name)
+        if value is None:
+            raise ValueError("restricted value environment variable is missing")
+        if not value:
+            raise ValueError("restricted value environment variable is empty")
+        values.append(value)
+    return tuple(values)
+
+
 def _dump_json(value: object) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -169,17 +184,17 @@ def _dump_json(value: object) -> bytes:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--source-job", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--source-commit", required=True)
-    parser.add_argument("--restricted-value", action="append", default=[])
+    parser.add_argument("--restricted-value-env", action="append", default=[])
     args = parser.parse_args(argv)
     manifest = freeze_historical_traces(
         source_job=args.source_job,
         output=args.output,
         source_commit=args.source_commit,
-        restricted_values=tuple(args.restricted_value),
+        restricted_value_envs=tuple(args.restricted_value_env),
     )
     print(json.dumps(manifest.model_dump(mode="json"), sort_keys=True))
     return 0
