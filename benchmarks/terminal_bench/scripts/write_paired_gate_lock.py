@@ -195,12 +195,25 @@ def _trial_results_by_task(job_dir: Path) -> dict[str, dict[str, object]]:
     results: dict[str, dict[str, object]] = {}
     for path in sorted(job_dir.glob("*/result.json")):
         payload = _read_object(path)
-        task_name = payload.get("task_name")
-        if isinstance(task_name, str) and payload.get("finished_at") is not None:
-            if task_name in results:
-                raise ValueError(f"duplicate Oracle result for {task_name}")
-            results[task_name] = payload
+        task_id = _result_task_id(payload)
+        if task_id is not None and payload.get("finished_at") is not None:
+            if task_id in results:
+                raise ValueError(f"duplicate Oracle result for {task_id}")
+            results[task_id] = payload
     return results
+
+
+def _result_task_id(payload: Mapping[str, object]) -> str | None:
+    identity = payload.get("task_id")
+    if isinstance(identity, Mapping):
+        org = identity.get("org")
+        name = identity.get("name")
+        if isinstance(org, str) and org.strip() and isinstance(name, str) and name.strip():
+            return f"{org.strip()}/{name.strip()}"
+    task_name = payload.get("task_name")
+    if isinstance(task_name, str) and "/" in task_name and task_name.strip():
+        return task_name.strip()
+    return None
 
 
 def _official_reward(result: Mapping[str, object]) -> float:

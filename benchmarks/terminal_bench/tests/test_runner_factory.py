@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import subprocess
@@ -1169,6 +1170,16 @@ async def test_build_live_session_composes_shared_budget_and_active_loop_without
     assert session.artifacts.root == (tmp_path / "logs" / "bayesprobe").resolve()
     assert session.budget.actions_used == 0
     assert session.budget.model_calls_used == 0
+    expected_lock_bytes = json.dumps(
+        lock,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    assert session.runtime_lock_sha256 == (
+        f"sha256:{hashlib.sha256(expected_lock_bytes).hexdigest()}"
+    )
     assert environment.calls == []
     assert type(session.runner.answer_projector) is TaskAwareAnswerProjector
 

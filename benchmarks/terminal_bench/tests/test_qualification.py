@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -58,6 +59,17 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
 
+def _canonical_sha256(payload: object) -> str:
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return f"sha256:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()}"
+
+
 def _oracle_job(root: Path, *, failed_task: str | None = None) -> Path:
     _write_json(
         root / "config.json",
@@ -95,7 +107,7 @@ def _oracle_job(root: Path, *, failed_task: str | None = None) -> Path:
         _write_json(
             root / f"{slug}__oracle" / "result.json",
             {
-                "task_name": task_id,
+                "task_name": slug,
                 "task_id": {
                     "org": "terminal-bench",
                     "name": slug,
@@ -191,17 +203,67 @@ def _write_lock(tmp_path: Path) -> Path:
 def _live_jobs(
     root: Path,
     *,
+    lock_path: Path,
     rewards: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> tuple[Path, Path, Path]:
+    runtime_lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    runtime_lock_sha256 = _canonical_sha256(runtime_lock)
     jobs: list[Path] = []
     for index, task_id in enumerate(FROZEN_GATE_TASK_IDS):
         slug = task_id.split("/", 1)[1]
         job = root / f"{slug}-job"
         jobs.append(job)
+        agent_timeout = _TASK_TIMEOUTS[task_id]
+        agent = {
+            "import_path": "bayesprobe_terminal_bench.agent:BayesProbeHarborAgent",
+            "model_name": "deepseek-v4-flash",
+            "env": {
+                "BAYESPROBE_BENCH_BASE_URL": "https://api.deepseek.com",
+                "BAYESPROBE_BENCH_LOCK_PATH": ".runs/causal-qualification.lock.json",
+                "BAYESPROBE_BENCH_MODEL": "deepseek-v4-flash",
+                "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS": str(agent_timeout),
+            },
+        }
+        _write_json(
+            job / "config.json",
+            {
+                "job_name": f"bayesprobe-causal-qualification-{slug}",
+                "n_attempts": 1,
+                "n_concurrent_trials": 1,
+                "retry": {"max_retries": 0},
+                "agents": [agent],
+                "datasets": [
+                    {
+                        "name": "terminal-bench/terminal-bench-2",
+                        "ref": "sha256:" + "1" * 64,
+                        "task_names": [task_id],
+                    }
+                ],
+            },
+        )
+        _write_json(
+            job / "lock.json",
+            {
+                "harbor": {"version": "0.18.0"},
+                "n_concurrent_trials": 1,
+                "retry": {"max_retries": 0},
+                "trials": [
+                    {
+                        "task": {
+                            "name": task_id,
+                            "digest": FROZEN_GATE_TASK_REFS[task_id],
+                            "source": "terminal-bench/terminal-bench-2",
+                        },
+                        "agent": agent,
+                    }
+                ],
+            },
+        )
         trial = job / f"{slug}__qualification"
         shutil.copytree(CONFORMANT_FIXTURE, trial / "agent" / "bayesprobe")
         summary_path = trial / "agent" / "bayesprobe" / "summary.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["runtime_lock_sha256"] = runtime_lock_sha256
         summary["runtime_budgets"] = {
             "max_total_actions": 24,
             "max_model_calls": 72,
@@ -216,7 +278,7 @@ def _live_jobs(
         _write_json(
             trial / "result.json",
             {
-                "task_name": task_id,
+                "task_name": slug,
                 "task_id": {
                     "org": "terminal-bench",
                     "name": slug,
@@ -441,6 +503,25 @@ def test_causal_lock_writer_rejects_non_oracle_provenance(
         )
 
 
+def test_causal_lock_writer_rejects_empty_oracle_completion_time(
+    tmp_path: Path,
+) -> None:
+    job = _oracle_job(tmp_path / "oracle")
+    result_path = job / "break-filter-js-from-html__oracle" / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["finished_at"] = ""
+    _write_json(result_path, result)
+
+    with pytest.raises(ValueError, match="completion"):
+        build_causal_qualification_lock(
+            job_dir=job,
+            config=_config(),
+            runtime_identity=_runtime(),
+            provider_identity_path=_provider_identity_path(tmp_path),
+            task_identity_resolver=_cached_task,
+        )
+
+
 def test_causal_qualification_configs_freeze_identity_and_per_task_invocation() -> None:
     project = Path(__file__).resolve().parents[1]
     oracle = yaml.safe_load(
@@ -511,9 +592,10 @@ def test_offline_cli_never_enters_live_job_validation(
 
 
 def test_reward_zero_conformant_trials_pass_live_qualification(tmp_path: Path) -> None:
+    lock_path = _write_lock(tmp_path)
     report = validate_causal_qualification_job(
-        lock_path=_write_lock(tmp_path),
-        job_dirs=_live_jobs(tmp_path / "live"),
+        lock_path=lock_path,
+        job_dirs=_live_jobs(tmp_path / "live", lock_path=lock_path),
         provider_identity_path=_provider_identity_path(tmp_path),
     )
 
@@ -554,7 +636,11 @@ def test_live_qualification_fails_independently_of_reward(
     expected_failure: str,
 ) -> None:
     lock_path = _write_lock(tmp_path)
-    jobs = _live_jobs(tmp_path / "live", rewards=(1.0, 1.0, 1.0))
+    jobs = _live_jobs(
+        tmp_path / "live",
+        lock_path=lock_path,
+        rewards=(1.0, 1.0, 1.0),
+    )
     task_id = FROZEN_GATE_TASK_IDS[0]
     slug = task_id.split("/", 1)[1]
     job = jobs[0]
@@ -627,7 +713,7 @@ def test_live_qualification_fails_independently_of_reward(
 
 def test_live_qualification_rejects_noncanonical_job_shape(tmp_path: Path) -> None:
     lock_path = _write_lock(tmp_path)
-    jobs = _live_jobs(tmp_path / "live")
+    jobs = _live_jobs(tmp_path / "live", lock_path=lock_path)
     provider_identity = _provider_identity_path(tmp_path)
 
     with pytest.raises(ValueError, match="exactly three"):
@@ -645,7 +731,7 @@ def test_live_qualification_rejects_noncanonical_job_shape(tmp_path: Path) -> No
             provider_identity_path=provider_identity,
         )
 
-    missing = _live_jobs(tmp_path / "missing")
+    missing = _live_jobs(tmp_path / "missing", lock_path=lock_path)
     shutil.rmtree(missing[1] / "cancel-async-tasks__qualification")
     with pytest.raises(ValueError, match="exactly one result"):
         validate_causal_qualification_job(
@@ -654,7 +740,7 @@ def test_live_qualification_rejects_noncanonical_job_shape(tmp_path: Path) -> No
             provider_identity_path=provider_identity,
         )
 
-    multi = _live_jobs(tmp_path / "multi")
+    multi = _live_jobs(tmp_path / "multi", lock_path=lock_path)
     shutil.copytree(
         multi[0] / "break-filter-js-from-html__qualification",
         multi[0] / "second-result",
@@ -672,6 +758,7 @@ def test_live_qualification_rejects_noncanonical_job_shape(tmp_path: Path) -> No
         )
     )
     unknown_result["task_name"] = "terminal-bench/unknown-task"
+    unknown_result["task_id"]["name"] = "unknown-task"
     _write_json(jobs[1] / "cancel-async-tasks__qualification" / "result.json", unknown_result)
     with pytest.raises(ValueError, match="unknown"):
         validate_causal_qualification_job(
@@ -681,11 +768,88 @@ def test_live_qualification_rejects_noncanonical_job_shape(tmp_path: Path) -> No
         )
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_config",
+        "job_name",
+        "dataset_revision",
+        "harbor_version",
+        "task_ref",
+        "task_timeout",
+        "hidden_retry",
+    ],
+)
+def test_live_qualification_binds_harbor_job_provenance(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    lock_path = _write_lock(tmp_path)
+    jobs = _live_jobs(tmp_path / "live", lock_path=lock_path)
+    job = jobs[0]
+
+    if case == "missing_config":
+        (job / "config.json").unlink()
+    elif case in {"job_name", "dataset_revision", "task_timeout", "hidden_retry"}:
+        config_path = job / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        if case == "job_name":
+            config["job_name"] = "unregistered-qualification-job"
+        elif case == "dataset_revision":
+            config["datasets"][0]["ref"] = "sha256:" + "9" * 64
+        elif case == "task_timeout":
+            config["agents"][0]["env"][
+                "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS"
+            ] = "1199"
+        else:
+            config["retry"]["max_retries"] = 1
+        _write_json(config_path, config)
+    else:
+        job_lock_path = job / "lock.json"
+        job_lock = json.loads(job_lock_path.read_text(encoding="utf-8"))
+        if case == "harbor_version":
+            job_lock["harbor"]["version"] = "0.17.0"
+        else:
+            job_lock["trials"][0]["task"]["digest"] = "sha256:" + "9" * 64
+        _write_json(job_lock_path, job_lock)
+
+    with pytest.raises(ValueError, match="job provenance"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=jobs,
+            provider_identity_path=_provider_identity_path(tmp_path),
+        )
+
+
+def test_live_qualification_binds_runtime_lock_hash(tmp_path: Path) -> None:
+    lock_path = _write_lock(tmp_path)
+    jobs = _live_jobs(tmp_path / "live", lock_path=lock_path)
+    summary_path = (
+        jobs[0]
+        / "break-filter-js-from-html__qualification"
+        / "agent"
+        / "bayesprobe"
+        / "summary.json"
+    )
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["runtime_lock_sha256"] = "sha256:" + "9" * 64
+    _write_json(summary_path, summary)
+
+    report = validate_causal_qualification_job(
+        lock_path=lock_path,
+        job_dirs=jobs,
+        provider_identity_path=_provider_identity_path(tmp_path),
+    )
+
+    assert report["qualification_passed"] is False
+    assert "runtime_lock_drift" in report["tasks"][0]["failures"]
+
+
 def test_live_qualification_rejects_provider_artifact_and_budget_drift(
     tmp_path: Path,
 ) -> None:
     lock_path = _write_lock(tmp_path)
-    jobs = _live_jobs(tmp_path / "live")
+    jobs = _live_jobs(tmp_path / "live", lock_path=lock_path)
     provider_identity = _provider_identity_path(tmp_path)
     summary_path = jobs[0] / "break-filter-js-from-html__qualification" / "agent" / "bayesprobe" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -772,7 +936,7 @@ def test_live_qualification_binds_provider_artifact_configuration(
     with pytest.raises(ValueError, match="provider identity artifact drift"):
         validate_causal_qualification_job(
             lock_path=lock_path,
-            job_dirs=_live_jobs(tmp_path / "live"),
+            job_dirs=_live_jobs(tmp_path / "live", lock_path=lock_path),
             provider_identity_path=artifact_path,
         )
 
@@ -802,6 +966,72 @@ def test_external_failure_is_retryable_exactly_once(
     assert retry_eligible(result, retries_used=1) is False
 
 
+def test_live_qualification_uses_prior_job_as_retry_history(tmp_path: Path) -> None:
+    lock_path = _write_lock(tmp_path)
+    current_jobs = _live_jobs(tmp_path / "current", lock_path=lock_path)
+    prior_jobs = _live_jobs(tmp_path / "prior", lock_path=lock_path)
+    task_slug = FROZEN_GATE_TASK_IDS[0].split("/", 1)[1]
+    external_failure = {
+        "category": "network_transport_error",
+        "exception_type": "NetworkTransportError",
+    }
+    for job in (prior_jobs[0], current_jobs[0]):
+        result_path = job / f"{task_slug}__qualification" / "result.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["exception_info"] = external_failure
+        result["verifier_result"] = None
+        _write_json(result_path, result)
+    current_config_path = current_jobs[0] / "config.json"
+    current_config = json.loads(current_config_path.read_text(encoding="utf-8"))
+    current_config["job_name"] += "-retry-1"
+    _write_json(current_config_path, current_config)
+
+    report = validate_causal_qualification_job(
+        lock_path=lock_path,
+        job_dirs=current_jobs,
+        prior_job_dirs=(prior_jobs[0],),
+        provider_identity_path=_provider_identity_path(tmp_path),
+    )
+
+    first = report["tasks"][0]
+    assert first["retries_used"] == 1
+    assert first["retry_eligible"] is False
+
+
+def test_live_qualification_rejects_retry_after_nonretryable_prior_job(
+    tmp_path: Path,
+) -> None:
+    lock_path = _write_lock(tmp_path)
+    current_jobs = _live_jobs(tmp_path / "current", lock_path=lock_path)
+    prior_jobs = _live_jobs(tmp_path / "prior", lock_path=lock_path)
+
+    with pytest.raises(ValueError, match="prior qualification result"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=current_jobs,
+            prior_job_dirs=(prior_jobs[0],),
+            provider_identity_path=_provider_identity_path(tmp_path),
+        )
+
+
+def test_live_qualification_rejects_retry_job_without_prior_history(
+    tmp_path: Path,
+) -> None:
+    lock_path = _write_lock(tmp_path)
+    current_jobs = _live_jobs(tmp_path / "current", lock_path=lock_path)
+    config_path = current_jobs[0] / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["job_name"] += "-retry-1"
+    _write_json(config_path, config)
+
+    with pytest.raises(ValueError, match="job provenance"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=current_jobs,
+            provider_identity_path=_provider_identity_path(tmp_path),
+        )
+
+
 @pytest.mark.parametrize(
     "exception",
     [
@@ -814,6 +1044,7 @@ def test_external_failure_is_retryable_exactly_once(
         {"category": "policy_error"},
         {"category": "causal_conformance_error"},
         {"exception_type": "AgentTimeoutError"},
+        {"exception_type": "DockerAgentPolicyError"},
     ],
 )
 def test_internal_or_policy_failure_is_never_retryable(

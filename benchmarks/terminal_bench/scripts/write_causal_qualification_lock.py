@@ -174,6 +174,9 @@ def _require_oracle_result(result: Mapping[str, object]) -> None:
         or agent_info.get("name") != "oracle"
     ):
         raise ValueError("Oracle agent provenance is invalid")
+    finished_at = result.get("finished_at")
+    if not isinstance(finished_at, str) or not finished_at.strip():
+        raise ValueError("Oracle result completion is invalid")
 
 
 def _resolved_tasks(job_lock: Mapping[str, object]) -> list[tuple[str, str]]:

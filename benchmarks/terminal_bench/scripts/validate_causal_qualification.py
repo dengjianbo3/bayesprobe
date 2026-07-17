@@ -13,7 +13,10 @@ from bayesprobe_terminal_bench.conformance import (
     TraceClassification,
     validate_trial_trace,
 )
-from bayesprobe_terminal_bench.experiment_lock import CausalQualificationLock
+from bayesprobe_terminal_bench.experiment_lock import (
+    CausalQualificationLock,
+    experiment_lock_sha256,
+)
 from capture_provider_identity import load_provider_identity_artifact
 from freeze_historical_traces import FROZEN_TASKS, HistoricalTraceManifest
 
@@ -38,6 +41,17 @@ _RETRYABLE_CATEGORIES = frozenset(
         "image_pull_error",
         "network_transport_error",
         "verifier_infrastructure_error",
+    }
+)
+_RETRYABLE_EXCEPTION_TYPES = frozenset(
+    {
+        "dockerimagebuilderror",
+        "dockerinfrastructureerror",
+        "harborinfrastructureerror",
+        "imagepullerror",
+        "networktransporterror",
+        "verifierinfrastructureerror",
+        "verifiertimeouterror",
     }
 )
 
@@ -113,6 +127,7 @@ def validate_causal_qualification_job(
     lock_path: Path,
     job_dirs: Sequence[Path],
     provider_identity_path: Path,
+    prior_job_dirs: Sequence[Path] = (),
 ) -> dict[str, object]:
     try:
         lock = CausalQualificationLock.model_validate_json(
@@ -124,15 +139,37 @@ def validate_causal_qualification_job(
         lock=lock,
         provider_identity_path=provider_identity_path,
     )
+    prior_results = _trial_results(
+        prior_job_dirs,
+        lock=lock,
+        expected_count=None,
+        label="prior",
+        retry_tasks=frozenset(),
+    )
+    current_roots = {Path(path).resolve() for path in job_dirs}
+    prior_roots = {Path(path).resolve() for path in prior_job_dirs}
+    if current_roots & prior_roots:
+        raise ValueError("prior qualification jobs must be distinct from current jobs")
+    for task_id, (_, result) in prior_results.items():
+        if not retry_eligible(result, retries_used=0):
+            raise ValueError(
+                f"prior qualification result is not retryable for {task_id}"
+            )
     results = _trial_results(
         job_dirs,
-        locked_task_ids=tuple(task.task_id for task in lock.tasks),
+        lock=lock,
+        expected_count=3,
+        label="current",
+        retry_tasks=frozenset(prior_results),
     )
+    runtime_lock_sha256 = experiment_lock_sha256(lock.model_dump(mode="json"))
     task_reports = [
         _validate_live_task(
             lock=lock,
             task=task,
             trial=results.get(task.task_id),
+            retries_used=1 if task.task_id in prior_results else 0,
+            runtime_lock_sha256=runtime_lock_sha256,
         )
         for task in lock.tasks
     ]
@@ -143,6 +180,7 @@ def validate_causal_qualification_job(
         "expected_provider_model": lock.expected_provider_model,
         "expected_system_fingerprint": lock.expected_system_fingerprint,
         "budgets": lock.budgets.model_dump(mode="json"),
+        "prior_retry_tasks": sorted(prior_results),
         "tasks": task_reports,
         "qualification_passed": all(
             report["passed"] is True for report in task_reports
@@ -155,6 +193,8 @@ def _validate_live_task(
     lock: CausalQualificationLock,
     task: object,
     trial: tuple[Path, Mapping[str, object]] | None,
+    retries_used: int,
+    runtime_lock_sha256: str,
 ) -> dict[str, object]:
     task_id = getattr(task, "task_id")
     failures: list[str] = []
@@ -169,6 +209,7 @@ def _validate_live_task(
             "provider_tokens": 0,
             "nonneutral_updates": 0,
             "discarded_evidence": 0,
+            "retries_used": retries_used,
             "retry_eligible": False,
             "failures": ["missing_result"],
             "passed": False,
@@ -220,6 +261,11 @@ def _validate_live_task(
         provider_tokens=provider_tokens,
     ):
         failures.append("runtime_budget_drift")
+    if not _runtime_lock_matches(
+        artifact_root / "summary.json",
+        expected_sha256=runtime_lock_sha256,
+    ):
+        failures.append("runtime_lock_drift")
     if (
         actions > lock.budgets.max_total_actions
         or model_calls > lock.budgets.max_model_calls
@@ -237,7 +283,8 @@ def _validate_live_task(
         "provider_tokens": provider_tokens,
         "nonneutral_updates": conformance.nonneutral_updates,
         "discarded_evidence": conformance.discarded_evidence,
-        "retry_eligible": retry_eligible(result, retries_used=0),
+        "retries_used": retries_used,
+        "retry_eligible": retry_eligible(result, retries_used=retries_used),
         "failures": list(dict.fromkeys(failures)),
         "passed": not failures,
     }
@@ -266,20 +313,8 @@ def retry_eligible(
     exception_type = exception.get("exception_type")
     if not isinstance(exception_type, str):
         return False
-    normalized = exception_type.casefold()
-    if "agenttimeout" in normalized:
-        return False
-    return any(
-        marker in normalized
-        for marker in (
-            "docker",
-            "harborinfrastructure",
-            "imagepull",
-            "networktransport",
-            "verifiertimeout",
-            "verifierinfrastructure",
-        )
-    )
+    normalized = exception_type.rsplit(".", 1)[-1].casefold()
+    return normalized in _RETRYABLE_EXCEPTION_TYPES
 
 
 def _verified_historical_manifest(root: Path) -> HistoricalTraceManifest:
@@ -360,14 +395,21 @@ def _verify_synthetic_fixture(fixture: Path) -> None:
 def _trial_results(
     job_dirs: Sequence[Path],
     *,
-    locked_task_ids: tuple[str, str, str],
+    lock: CausalQualificationLock,
+    expected_count: int | None,
+    label: str,
+    retry_tasks: frozenset[str],
 ) -> dict[str, tuple[Path, Mapping[str, object]]]:
-    if len(job_dirs) != 3:
+    if expected_count is not None and len(job_dirs) != expected_count:
         raise ValueError(
             "causal qualification requires exactly three --job directories"
         )
+    if len(job_dirs) > len(lock.tasks):
+        raise ValueError(f"too many {label} qualification job directories")
+    locked_tasks = {task.task_id: task for task in lock.tasks}
     results: dict[str, tuple[Path, Mapping[str, object]]] = {}
     for job_dir in job_dirs:
+        job_dir = Path(job_dir)
         if job_dir.is_symlink() or not job_dir.is_dir():
             raise ValueError("causal qualification job must be a real directory")
         paths = sorted(job_dir.glob("*/result.json"))
@@ -380,18 +422,117 @@ def _trial_results(
             raise ValueError("causal qualification result is invalid") from None
         if not isinstance(payload, Mapping):
             raise ValueError("causal qualification result is invalid")
-        task_id = payload.get("task_name")
-        if not isinstance(task_id, str):
+        task_id = _result_task_id(payload)
+        if task_id is None:
             raise ValueError("qualification result task is invalid")
-        if task_id not in locked_task_ids:
+        if task_id not in locked_tasks:
             raise ValueError("qualification result task is unknown")
         if task_id in results:
             raise ValueError(f"duplicate qualification result for {task_id}")
+        _validate_harbor_job_provenance(
+            job_dir=job_dir,
+            lock=lock,
+            task=locked_tasks[task_id],
+            is_retry=task_id in retry_tasks,
+        )
         results[task_id] = (path.parent, payload)
-    missing = set(locked_task_ids) - set(results)
-    if missing:
-        raise ValueError(f"missing qualification result for {sorted(missing)}")
+    if expected_count is not None:
+        missing = set(locked_tasks) - set(results)
+        if missing:
+            raise ValueError(f"missing qualification result for {sorted(missing)}")
     return results
+
+
+def _validate_harbor_job_provenance(
+    *,
+    job_dir: Path,
+    lock: CausalQualificationLock,
+    task: object,
+    is_retry: bool,
+) -> None:
+    config = _job_object(job_dir / "config.json")
+    job_lock = _job_object(job_dir / "lock.json")
+    task_id = getattr(task, "task_id")
+    task_ref = getattr(task, "task_ref")
+    timeout = getattr(task, "agent_timeout_seconds")
+    base_job_name = f"bayesprobe-causal-qualification-{task_id.split('/', 1)[-1]}"
+    expected_job_name = f"{base_job_name}-retry-1" if is_retry else base_job_name
+
+    datasets = config.get("datasets")
+    dataset = datasets[0] if isinstance(datasets, list) and len(datasets) == 1 else None
+    agents = config.get("agents")
+    agent = agents[0] if isinstance(agents, list) and len(agents) == 1 else None
+    retry = config.get("retry")
+    if (
+        config.get("job_name") != expected_job_name
+        or not _exact_int(config.get("n_attempts"), 1)
+        or not _exact_int(config.get("n_concurrent_trials"), 1)
+        or not isinstance(retry, Mapping)
+        or not _exact_int(retry.get("max_retries"), 0)
+        or not isinstance(dataset, Mapping)
+        or dataset.get("name") != lock.dataset_name
+        or dataset.get("ref") != lock.dataset_revision
+        or dataset.get("task_names") != [task_id]
+        or not _agent_matches_lock(agent, lock=lock, timeout=timeout)
+    ):
+        raise ValueError("qualification job provenance mismatch")
+
+    harbor = job_lock.get("harbor")
+    retry_lock = job_lock.get("retry")
+    trials = job_lock.get("trials")
+    trial = trials[0] if isinstance(trials, list) and len(trials) == 1 else None
+    trial_task = trial.get("task") if isinstance(trial, Mapping) else None
+    trial_agent = trial.get("agent") if isinstance(trial, Mapping) else None
+    if (
+        not isinstance(harbor, Mapping)
+        or harbor.get("version") != lock.harbor_version
+        or not _exact_int(job_lock.get("n_concurrent_trials"), 1)
+        or not isinstance(retry_lock, Mapping)
+        or not _exact_int(retry_lock.get("max_retries"), 0)
+        or not isinstance(trial_task, Mapping)
+        or trial_task.get("name") != task_id
+        or trial_task.get("digest") != task_ref
+        or trial_task.get("source") != lock.dataset_name
+        or not _agent_matches_lock(trial_agent, lock=lock, timeout=timeout)
+    ):
+        raise ValueError("qualification job provenance mismatch")
+
+
+def _agent_matches_lock(
+    agent: object,
+    *,
+    lock: CausalQualificationLock,
+    timeout: object,
+) -> bool:
+    if not isinstance(agent, Mapping):
+        return False
+    env = agent.get("env")
+    return (
+        agent.get("import_path") == _BAYESPROBE_AGENT
+        and agent.get("model_name") == lock.model
+        and isinstance(env, Mapping)
+        and env.get("BAYESPROBE_BENCH_MODEL") == lock.model
+        and env.get("BAYESPROBE_BENCH_BASE_URL") == lock.base_url
+        and env.get("BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS") == str(timeout)
+        and isinstance(env.get("BAYESPROBE_BENCH_LOCK_PATH"), str)
+        and bool(str(env["BAYESPROBE_BENCH_LOCK_PATH"]).strip())
+    )
+
+
+def _job_object(path: Path) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("qualification job provenance artifact is missing")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise ValueError("qualification job provenance artifact is invalid") from None
+    if not isinstance(payload, dict):
+        raise ValueError("qualification job provenance artifact is invalid")
+    return payload
+
+
+def _exact_int(value: object, expected: int) -> bool:
+    return type(value) is int and value == expected
 
 
 def _task_identity_matches(
@@ -402,11 +543,25 @@ def _task_identity_matches(
     identity = result.get("task_id")
     if not isinstance(identity, Mapping):
         return False
+    reported_name = result.get("task_name")
     return (
-        result.get("task_name") == task_id
+        reported_name in {task_id, task_id.split("/", 1)[-1]}
         and f"{identity.get('org')}/{identity.get('name')}" == task_id
         and identity.get("ref") == task_ref
     )
+
+
+def _result_task_id(result: Mapping[str, object]) -> str | None:
+    identity = result.get("task_id")
+    if not isinstance(identity, Mapping):
+        return None
+    org = identity.get("org")
+    name = identity.get("name")
+    if not isinstance(org, str) or not org.strip():
+        return None
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return f"{org.strip()}/{name.strip()}"
 
 
 def _official_reward(result: Mapping[str, object]) -> float | None:
@@ -499,6 +654,17 @@ def _runtime_budgets_match(
     )
 
 
+def _runtime_lock_matches(path: Path, *, expected_sha256: str) -> bool:
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(summary, Mapping)
+        and summary.get("runtime_lock_sha256") == expected_sha256
+    )
+
+
 def _validate_provider_identity_artifact(
     *,
     lock: CausalQualificationLock,
@@ -528,6 +694,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--offline-only", action="store_true")
     parser.add_argument("--lock", type=Path)
     parser.add_argument("--job", action="append", type=Path)
+    parser.add_argument("--prior-job", action="append", type=Path)
     parser.add_argument("--provider-identity", type=Path)
     args = parser.parse_args(argv)
     offline = replay_offline_gate(historical_fixtures=args.historical_fixtures)
@@ -535,6 +702,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if (
             args.lock is not None
             or args.job is not None
+            or args.prior_job is not None
             or args.provider_identity is not None
         ):
             parser.error("--offline-only cannot be combined with --lock or --job")
@@ -553,6 +721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         live = validate_causal_qualification_job(
             lock_path=args.lock,
             job_dirs=args.job,
+            prior_job_dirs=args.prior_job or (),
             provider_identity_path=args.provider_identity,
         )
         report = {

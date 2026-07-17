@@ -53,7 +53,7 @@ Task 10 must use the shared config with both `--dataset` and
 ```text
 BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS=1200 harbor run \
   --config configs/bayesprobe-causal-qualification.yaml \
-  --dataset terminal-bench/terminal-bench-2 \
+  --dataset terminal-bench/terminal-bench-2@<locked-dataset-revision> \
   --include-task-name terminal-bench/break-filter-js-from-html
 ```
 
@@ -305,19 +305,19 @@ with one frozen task and one unique Harbor job directory per invocation:
 BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS=1200 harbor run \
   --config configs/bayesprobe-causal-qualification.yaml \
   --job-name bayesprobe-causal-qualification-break-filter-js-from-html \
-  --dataset terminal-bench/terminal-bench-2 \
+  --dataset terminal-bench/terminal-bench-2@<locked-dataset-revision> \
   --include-task-name terminal-bench/break-filter-js-from-html
 
 BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS=900 harbor run \
   --config configs/bayesprobe-causal-qualification.yaml \
   --job-name bayesprobe-causal-qualification-cancel-async-tasks \
-  --dataset terminal-bench/terminal-bench-2 \
+  --dataset terminal-bench/terminal-bench-2@<locked-dataset-revision> \
   --include-task-name terminal-bench/cancel-async-tasks
 
 BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS=900 harbor run \
   --config configs/bayesprobe-causal-qualification.yaml \
   --job-name bayesprobe-causal-qualification-log-summary-date-ranges \
-  --dataset terminal-bench/terminal-bench-2 \
+  --dataset terminal-bench/terminal-bench-2@<locked-dataset-revision> \
   --include-task-name terminal-bench/log-summary-date-ranges
 ```
 
@@ -419,3 +419,72 @@ UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run --offline pytest \
 
 The fixture-only CLI was rerun after this correction and still emitted
 `offline_gate_passed=true` with no `qualification_passed` field.
+
+## Independent Review Corrective Cycle
+
+The next independent review approved the four earlier provenance and budget
+corrections, then found three additional ways that a future live qualification
+could be accepted without a complete audit chain:
+
+1. The validator consumed only trial results and adapter artifacts, without
+   binding them to Harbor job configuration and lock metadata.
+2. Live reports always assumed zero prior retries, so a failed retry could be
+   labeled retryable again.
+3. Oracle lock writing accepted an empty `finished_at` string.
+
+Tests first reproduced all three findings, plus the overly broad fallback that
+treated any exception type containing `docker` as retryable:
+
+```text
+13 failed, 9 passed in 0.85s
+```
+
+The correction now requires each current and prior job to carry one matching
+Harbor `config.json`, one matching `lock.json`, and one result. Harbor version,
+dataset revision, frozen task ref, agent identity, model, per-task timeout,
+attempt count, concurrency, and disabled internal retries must agree with the
+qualification lock. The successful agent summary records the canonical
+SHA-256 of the exact runtime lock, which binds the otherwise indirect image
+digest and all remaining frozen fields to the produced trace.
+
+External retries are explicit audit inputs. An initial job uses the fixed
+`bayesprobe-causal-qualification-<task-slug>` name. Its sole permitted retry
+uses the same name with `-retry-1` and live validation must also receive the
+failed original through `--prior-job`. A retry without its prior job, a second
+retry name, a non-retryable prior result, or Harbor's own internal retry setting
+is rejected. Exception-name fallback now uses a closed allowlist rather than a
+substring match.
+
+Inspection of the installed Harbor `0.18.0` source also showed that
+`result.json.task_name` is the short task slug, while package identity remains
+in `task_id.org`, `task_id.name`, and `task_id.ref`. Synthetic Oracle and live
+fixtures were corrected to that real shape; canonical identity is now derived
+from `task_id` instead of the display name. The pre-fix real-shape checks were
+RED (`2 failed`), then passed after the correction.
+
+Focused GREEN verification after this cycle is:
+
+```text
+179 passed in 2.35s
+```
+
+The fixture-only CLI still exits zero with the preregistered counts and emits
+only `offline_gate_passed=true`.
+
+For the only permitted external retry, retain the two unaffected current jobs,
+replace the failed task's current job with its `-retry-1` job, and pass the
+failed original separately:
+
+```text
+UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run --offline python \
+  scripts/validate_causal_qualification.py \
+  --historical-fixtures tests/fixtures/historical_traces \
+  --lock .runs/causal-qualification.lock.json \
+  --provider-identity .runs/provider-identity/<sha256>.json \
+  --job <unaffected-current-job-1> \
+  --job <unaffected-current-job-2> \
+  --job <retry-1-job> \
+  --prior-job <failed-original-job>
+```
+
+No live command was run during this corrective cycle.

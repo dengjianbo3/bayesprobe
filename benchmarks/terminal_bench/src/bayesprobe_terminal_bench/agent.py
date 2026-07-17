@@ -146,6 +146,7 @@ class BayesProbeHarborAgent(BaseAgent):
                 getattr(session.budget, "model_calls_used", None),
                 maximum=config.max_model_calls,
             ),
+            "runtime_lock_sha256": getattr(session, "runtime_lock_sha256", ""),
             "runtime_budgets": {
                 "max_total_actions": config.max_total_actions,
                 "max_model_calls": config.max_model_calls,

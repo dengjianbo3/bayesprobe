@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
@@ -38,6 +39,17 @@ PAIRED_GATE_ARMS = {
 }
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def experiment_lock_sha256(payload: Mapping[str, object]) -> str:
+    serialized = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return f"sha256:{sha256(serialized.encode('utf-8')).hexdigest()}"
 
 
 class GateTask(BaseModel):

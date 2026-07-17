@@ -30,6 +30,7 @@ _BAYESPROBE_METADATA = {
     "bayesprobe_cycles",
     "terminal_actions",
     "model_calls",
+    "runtime_lock_sha256",
     "runtime_budgets",
 }
 WORKTREE_DIR = Path(__file__).resolve().parents[3]
@@ -76,6 +77,7 @@ def _session(*, runner: object, artifacts: SpyArtifacts) -> object:
         runner=runner,
         input=SimpleNamespace(run_id="tb_harbor-run"),
         artifacts=artifacts,
+        runtime_lock_sha256="sha256:" + "9" * 64,
         budget=SimpleNamespace(
             provider_tokens_used=0,
             actions_used=3,
@@ -187,6 +189,7 @@ async def test_agent_runs_the_real_session_once_in_a_worker_and_records_safe_sum
         "bayesprobe_cycles": 2,
         "terminal_actions": 3,
         "model_calls": 4,
+        "runtime_lock_sha256": "sha256:" + "9" * 64,
         "runtime_budgets": {
             "max_total_actions": 24,
             "max_model_calls": 72,
@@ -206,6 +209,7 @@ async def test_agent_runs_the_real_session_once_in_a_worker_and_records_safe_sum
             "bayesprobe_cycles": 2,
             "terminal_actions": 3,
             "model_calls": 4,
+            "runtime_lock_sha256": "sha256:" + "9" * 64,
             "runtime_budgets": {
                 "max_total_actions": 24,
                 "max_model_calls": 72,

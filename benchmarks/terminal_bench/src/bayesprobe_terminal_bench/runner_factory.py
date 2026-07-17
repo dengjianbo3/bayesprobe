@@ -66,6 +66,7 @@ from bayesprobe_terminal_bench.deadline import (
     TrialDeadline,
 )
 from bayesprobe_terminal_bench.environment import ActionPolicy, HarborEnvironmentBridge
+from bayesprobe_terminal_bench.experiment_lock import experiment_lock_sha256
 from bayesprobe_terminal_bench.gateway import HarborProbeToolGateway
 from bayesprobe_terminal_bench.planning import OpenAICompatibleTerminalProbePlanner
 from bayesprobe_terminal_bench.provider_contract import TerminalContractModelGateway
@@ -369,6 +370,7 @@ class LiveSession:
     artifacts: TrialArtifactStore
     budget: RunBudget
     deadline: TrialDeadline
+    runtime_lock_sha256: str
 
 
 class ArtifactInvocationObserver:
@@ -1039,4 +1041,5 @@ def build_live_session(
         artifacts=artifacts,
         budget=budget,
         deadline=deadline,
+        runtime_lock_sha256=experiment_lock_sha256(runtime_lock),
     )
