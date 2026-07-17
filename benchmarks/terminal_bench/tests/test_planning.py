@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -22,12 +23,15 @@ from bayesprobe_terminal_bench.planning import (
 VALID_PLAN = json.dumps(
     {
         "mode": "inspect",
-        "actions": [
+        "steps": [
             {
-                "type": "shell",
-                "command": "pwd",
-                "timeout_seconds": 30,
-                "mutates_environment": False,
+                "role": "inspect",
+                "action": {
+                    "type": "shell",
+                    "command": "pwd",
+                    "timeout_seconds": 30,
+                    "mutates_environment": False,
+                },
             }
         ],
         "expected_observation": "The working directory is visible.",
@@ -130,7 +134,7 @@ def _planner(
     return (
         OpenAICompatibleTerminalProbePlanner(
             config=TerminalBenchConfig(model="test-model"),
-            budget=budget or RunBudget(max_actions=24, max_model_calls=2),
+            budget=budget or RunBudget(max_actions=24, max_model_calls=3),
             client=client,
             invocation_observer=None if telemetry is None else telemetry.append,
         ),
@@ -138,26 +142,42 @@ def _planner(
     )
 
 
-def test_planner_repairs_invalid_json_once(probe, execution_context) -> None:
+def test_planner_uses_initial_attempt_and_two_targeted_repairs(probe, execution_context) -> None:
     telemetry: list[dict[str, object]] = []
-    planner, client = _planner(["not-json", VALID_PLAN], telemetry=telemetry)
+    planner, client = _planner(["not-json", "still-not-json", VALID_PLAN], telemetry=telemetry)
 
     plan = planner.plan(probe=probe, context=execution_context, history=())
 
-    assert plan.actions[0].command == "pwd"
-    assert len(client.chat.completions.calls) == 2
-    assert [item["outcome"] for item in telemetry] == ["success", "success"]
-    assert [item["repair"] for item in telemetry] == [False, True]
-    assert [item["plan_validation"] for item in telemetry] == ["invalid", "valid"]
+    assert plan.steps[0].action.command == "pwd"
+    assert len(client.chat.completions.calls) == 3
+    assert [item["outcome"] for item in telemetry] == ["success"] * 3
+    assert [item["repair"] for item in telemetry] == [False, True, True]
+    assert [item["plan_validation"] for item in telemetry] == ["invalid", "invalid", "valid"]
+    assert [item["response_sha256"] for item in telemetry] == [
+        sha256(content.encode()).hexdigest()
+        for content in ("not-json", "still-not-json", VALID_PLAN)
+    ]
+
+    first_repair = json.loads(client.chat.completions.calls[1]["messages"][1]["content"])
+    second_repair = json.loads(client.chat.completions.calls[2]["messages"][1]["content"])
+    assert first_repair["schema_version"] == "terminal_probe_plan:v1"
+    assert first_repair["attempt_index"] == 1
+    assert second_repair["attempt_index"] == 2
+    assert first_repair["validation_error"]
+    assert all(":" in item for item in first_repair["validation_error"])
+    assert first_repair["invalid_response_sha256"] == sha256(b"not-json").hexdigest()
+    assert "not-json" not in json.dumps(first_repair["invalid_payload"])
 
 
 def test_planner_never_falls_back_to_an_imagined_action(probe, execution_context) -> None:
-    planner, client = _planner(["bad", "still bad", VALID_PLAN])
+    planner, client = _planner(["bad", "still bad", "bad a third time"])
 
-    with pytest.raises(TerminalPlanError, match="^terminal plan validation failed$"):
+    with pytest.raises(TerminalPlanError, match="provider contract failed after 3 attempts") as raised:
         planner.plan(probe=probe, context=execution_context, history=())
 
-    assert len(client.chat.completions.calls) == 2
+    assert raised.value.category == "provider_contract_error"
+    assert raised.value.attempts == 3
+    assert len(client.chat.completions.calls) == 3
 
 
 def test_empty_or_missing_choices_is_repaired_without_indexing_the_response(probe, execution_context) -> None:
@@ -167,7 +187,7 @@ def test_empty_or_missing_choices_is_repaired_without_indexing_the_response(prob
 
     plan = planner.plan(probe=probe, context=execution_context, history=())
 
-    assert plan.actions[0].command == "pwd"
+    assert plan.steps[0].action.command == "pwd"
     assert len(client.chat.completions.calls) == 2
     assert [item["outcome"] for item in telemetry] == ["empty_content", "success"]
     assert [item["plan_validation"] for item in telemetry] == ["invalid", "valid"]
@@ -188,10 +208,13 @@ def test_provider_failure_is_stable_and_telemetry_does_not_expose_error_text(pro
             "task": "terminal_probe_plan",
             "model": "test-model",
             "repair": False,
+            "attempt_index": 0,
             "logical_call_index": 1,
             "outcome": "error",
             "error_type": "RuntimeError",
             "plan_validation": "not_attempted",
+            "field_errors": [],
+            "response_sha256": None,
             "latency_seconds": pytest.approx(telemetry[0]["latency_seconds"]),
         }
     ]
@@ -208,14 +231,58 @@ def test_budget_exhaustion_is_preserved_before_the_provider_is_called(probe, exe
 
 
 def test_repair_consumes_the_same_shared_budget(probe, execution_context) -> None:
-    budget = RunBudget(max_actions=24, max_model_calls=1)
-    planner, client = _planner(["bad", VALID_PLAN], budget=budget)
+    budget = RunBudget(max_actions=24, max_model_calls=2)
+    planner, client = _planner(["bad", "still bad", VALID_PLAN], budget=budget)
 
     with pytest.raises(BudgetExhausted, match="^model call budget exhausted$"):
         planner.plan(probe=probe, context=execution_context, history=())
 
-    assert len(client.chat.completions.calls) == 1
-    assert budget.model_calls_used == 1
+    assert len(client.chat.completions.calls) == 2
+    assert budget.model_calls_used == 2
+
+
+def test_transition_predictions_must_cover_probe_targets(probe, execution_context) -> None:
+    incomplete_plan = json.dumps(
+        {
+            "mode": "intervene",
+            "steps": [
+                {
+                    "role": "intervene",
+                    "action": {"type": "write_file", "path": "/app/x", "content": "x"},
+                },
+                {
+                    "role": "verify",
+                    "action": {"type": "shell", "command": "cat /app/x"},
+                    "verification_target": "The file contains x.",
+                },
+            ],
+            "expected_observation": "The file changes.",
+            "transition_predictions": [
+                {"hypothesis_id": "H_other", "expected_transition": "The file changes."}
+            ],
+        }
+    )
+    planner, client = _planner([incomplete_plan, VALID_PLAN])
+
+    plan = planner.plan(probe=probe, context=execution_context, history=())
+
+    assert plan.mode == "inspect"
+    assert len(client.chat.completions.calls) == 2
+    repair = json.loads(client.chat.completions.calls[1]["messages"][1]["content"])
+    assert any("transition_predictions" in item for item in repair["validation_error"])
+
+
+def test_planner_instruction_states_causal_execution_semantics(probe, execution_context) -> None:
+    planner, client = _planner([VALID_PLAN])
+
+    planner.plan(probe=probe, context=execution_context, history=())
+
+    instruction = client.chat.completions.calls[0]["messages"][0]["content"]
+    assert "terminal_probe_plan:v1" in instruction
+    assert "Writes and patches are interventions" in instruction
+    assert "Successful mutation output is acknowledgement, not verification" in instruction
+    assert "Verification must follow the mutation" in instruction
+    assert "Transition predictions must be declared before execution" in instruction
 
 
 def test_planner_request_uses_the_existing_chat_completion_token_parameter(probe, execution_context) -> None:
@@ -526,7 +593,7 @@ def test_successful_response_with_exploding_metadata_still_emits_one_record(prob
 
     plan = planner.plan(probe=probe, context=execution_context, history=())
 
-    assert plan.actions[0].command == "pwd"
+    assert plan.steps[0].action.command == "pwd"
     assert len(client.chat.completions.calls) == 1
     assert len(telemetry) == 1
     assert telemetry[0]["outcome"] == "success"
@@ -584,49 +651,53 @@ def test_injected_sdk_client_is_derived_with_no_retries_and_used_once(probe, exe
 
     plan = planner.plan(probe=probe, context=execution_context, history=())
 
-    assert plan.actions[0].command == "pwd"
+    assert plan.steps[0].action.command == "pwd"
     assert client.with_options_calls == [{"max_retries": 0}]
     assert len(client.derived_client.chat.completions.calls) == 1
     assert budget.model_calls_used == 1
     assert len(telemetry) == 1
 
 
-def test_exploding_response_accessors_use_one_repair_and_emit_one_record_per_return(
+def test_exploding_response_accessors_use_two_repairs_and_emit_one_record_per_return(
     probe,
     execution_context,
 ) -> None:
     telemetry: list[dict[str, object]] = []
-    budget = RunBudget(max_actions=24, max_model_calls=2)
+    budget = RunBudget(max_actions=24, max_model_calls=3)
     planner, client = _planner(
-        [ExplodingContentResponse(), ExplodingContentResponse()],
+        [ExplodingContentResponse(), ExplodingContentResponse(), ExplodingContentResponse()],
         budget=budget,
         telemetry=telemetry,
     )
 
-    with pytest.raises(TerminalPlanError, match="^terminal plan validation failed$") as error:
+    with pytest.raises(TerminalPlanError, match="provider contract failed after 3 attempts") as error:
         planner.plan(probe=probe, context=execution_context, history=())
 
     assert "response-access-secret" not in str(error.value)
-    assert len(client.chat.completions.calls) == 2
-    assert budget.model_calls_used == 2
-    assert len(telemetry) == 2
-    assert [item["outcome"] for item in telemetry] == ["empty_content", "empty_content"]
-    assert [item["repair"] for item in telemetry] == [False, True]
+    assert len(client.chat.completions.calls) == 3
+    assert budget.model_calls_used == 3
+    assert len(telemetry) == 3
+    assert [item["outcome"] for item in telemetry] == ["empty_content"] * 3
+    assert [item["repair"] for item in telemetry] == [False, True, True]
     assert "response-access-secret" not in json.dumps(telemetry)
 
 
 def test_malformed_choice_sequences_cannot_escape_the_repair_path(probe, execution_context) -> None:
     telemetry: list[dict[str, object]] = []
     planner, client = _planner(
-        [MalformedChoiceSequenceResponse(), MalformedChoiceSequenceResponse()],
+        [
+            MalformedChoiceSequenceResponse(),
+            MalformedChoiceSequenceResponse(),
+            MalformedChoiceSequenceResponse(),
+        ],
         telemetry=telemetry,
     )
 
-    with pytest.raises(TerminalPlanError, match="^terminal plan validation failed$"):
+    with pytest.raises(TerminalPlanError, match="provider contract failed after 3 attempts"):
         planner.plan(probe=probe, context=execution_context, history=())
 
-    assert len(client.chat.completions.calls) == 2
-    assert len(telemetry) == 2
+    assert len(client.chat.completions.calls) == 3
+    assert len(telemetry) == 3
     assert "choice-sequence-secret" not in json.dumps(telemetry)
 
 
@@ -643,4 +714,4 @@ def test_observer_failure_does_not_change_planner_result(probe, execution_contex
         invocation_observer=fail_observer,
     )
 
-    assert planner.plan(probe=probe, context=execution_context, history=()).actions[0].command == "pwd"
+    assert planner.plan(probe=probe, context=execution_context, history=()).steps[0].action.command == "pwd"

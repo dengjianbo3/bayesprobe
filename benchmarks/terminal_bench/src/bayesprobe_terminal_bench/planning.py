@@ -6,9 +6,11 @@ import re
 import time
 import unicodedata
 from collections.abc import Callable, Mapping
+from hashlib import sha256
 from typing import Any, Protocol
 
 from openai import OpenAI
+from pydantic import ValidationError
 
 from bayesprobe import ProbeDesign, ProbeExecutionBrief
 from bayesprobe_terminal_bench.actions import (
@@ -22,7 +24,23 @@ from bayesprobe_terminal_bench.config import RunBudget, TerminalBenchConfig
 
 
 class TerminalPlanError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        category: str | None = None,
+        attempts: int | None = None,
+    ) -> None:
+        self.category = category
+        self.attempts = attempts
+        if message is None:
+            if category == "provider_contract_error":
+                message = f"terminal plan provider contract failed after {attempts} attempts"
+            elif category == "provider_error":
+                message = "terminal planner provider request failed"
+            else:
+                message = "terminal planner failed"
+        super().__init__(message)
 
 
 class TerminalProbePlanner(Protocol):
@@ -38,6 +56,7 @@ class TerminalProbePlanner(Protocol):
 _REDACTION_MARKER = "[REDACTED]"
 _HISTORY_MODEL_FACING_OUTPUT_LIMIT = 4_096
 _HISTORY_ACTION_TEXT_LIMIT = 4_096
+_TERMINAL_PLAN_SCHEMA_VERSION = "terminal_probe_plan:v1"
 _SECRET_VALUE_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}", re.IGNORECASE),
     re.compile(
@@ -226,28 +245,41 @@ class OpenAICompatibleTerminalProbePlanner:
         context: ProbeExecutionBrief,
         history: tuple[ActionObservation, ...],
     ) -> TerminalProbePlan:
-        payload = terminal_plan_input(probe=probe, context=context, history=history)
-        initial = self._complete(payload=payload, repair=False)
-        if initial is not None:
-            return initial
-
-        repaired = self._complete(
-            payload={
-                "original_input": payload,
-                "validation_error": "invalid terminal plan",
-            },
-            repair=True,
+        original_input = terminal_plan_input(
+            probe=probe,
+            context=context,
+            history=history,
         )
-        if repaired is not None:
-            return repaired
-        raise TerminalPlanError("terminal plan validation failed") from None
+        payload = original_input
+        for attempt_index in range(3):
+            plan, content, field_errors = self._complete(
+                payload=payload,
+                probe=probe,
+                repair=attempt_index > 0,
+                attempt_index=attempt_index,
+            )
+            if plan is not None:
+                return plan
+            if attempt_index < 2:
+                payload = _repair_payload(
+                    original_input=original_input,
+                    invalid_content=content,
+                    field_errors=field_errors,
+                    attempt_index=attempt_index + 1,
+                )
+        raise TerminalPlanError(
+            category="provider_contract_error",
+            attempts=3,
+        ) from None
 
     def _complete(
         self,
         *,
         payload: dict[str, Any],
+        probe: ProbeDesign,
         repair: bool,
-    ) -> TerminalProbePlan | None:
+        attempt_index: int,
+    ) -> tuple[TerminalProbePlan | None, str | None, tuple[str, ...]]:
         logical_call_index = self._budget.reserve_model_call()
         started = time.monotonic()
         response: Any = None
@@ -279,34 +311,51 @@ class OpenAICompatibleTerminalProbePlanner:
                 started=started,
                 outcome="error",
                 plan_validation="not_attempted",
+                attempt_index=attempt_index,
+                field_errors=(),
+                response_sha256=None,
                 error_type=type(error).__name__,
             )
-            raise TerminalPlanError("terminal planner provider request failed") from None
+            raise TerminalPlanError(
+                category="provider_error",
+                attempts=attempt_index + 1,
+            ) from None
 
         content = _chat_completion_content(response)
         if not _has_text_content(content):
+            field_errors = ("response:missing",)
             self._observe_attempt(
                 repair=repair,
                 logical_call_index=logical_call_index,
                 started=started,
                 outcome="empty_content",
                 plan_validation="invalid",
+                attempt_index=attempt_index,
+                field_errors=field_errors,
+                response_sha256=None,
                 response=response,
             )
-            return None
+            return None, None, field_errors
 
         try:
-            plan = TerminalProbePlan.model_validate_json(content)
-        except Exception:
+            plan = TerminalProbePlan.model_validate_json(
+                content,
+                context={"target_hypotheses": tuple(probe.target_hypotheses)},
+            )
+        except ValidationError as error:
+            field_errors = _safe_field_errors(error)
             self._observe_attempt(
                 repair=repair,
                 logical_call_index=logical_call_index,
                 started=started,
                 outcome="success",
                 plan_validation="invalid",
+                attempt_index=attempt_index,
+                field_errors=field_errors,
+                response_sha256=_content_sha256(content),
                 response=response,
             )
-            return None
+            return None, content, field_errors
 
         self._observe_attempt(
             repair=repair,
@@ -314,9 +363,12 @@ class OpenAICompatibleTerminalProbePlanner:
             started=started,
             outcome="success",
             plan_validation="valid",
+            attempt_index=attempt_index,
+            field_errors=(),
+            response_sha256=_content_sha256(content),
             response=response,
         )
-        return plan
+        return plan, content, ()
 
     def _observe_attempt(
         self,
@@ -326,6 +378,9 @@ class OpenAICompatibleTerminalProbePlanner:
         started: float,
         outcome: str,
         plan_validation: str,
+        attempt_index: int,
+        field_errors: tuple[str, ...],
+        response_sha256: str | None,
         response: Any = None,
         error_type: str | None = None,
     ) -> None:
@@ -333,9 +388,12 @@ class OpenAICompatibleTerminalProbePlanner:
             "task": "terminal_probe_plan",
             "model": _redact_sensitive_text(self._config.model),
             "repair": repair,
+            "attempt_index": attempt_index,
             "logical_call_index": logical_call_index,
             "outcome": outcome,
             "plan_validation": plan_validation,
+            "field_errors": list(field_errors),
+            "response_sha256": response_sha256,
             "latency_seconds": max(0.0, time.monotonic() - started),
         }
         if response is not None:
@@ -359,10 +417,75 @@ def _planner_instruction(*, repair: bool) -> str:
         if repair
         else "Plan one bounded terminal Probe. Return JSON only. Do not claim any command ran."
     )
-    return request + " Schema: " + json.dumps(
-        TerminalProbePlan.model_json_schema(),
-        sort_keys=True,
+    return (
+        request
+        + f" Schema version: {_TERMINAL_PLAN_SCHEMA_VERSION}."
+        + " Writes and patches are interventions."
+        + " Successful mutation output is acknowledgement, not verification."
+        + " Verification must follow the mutation."
+        + " Transition predictions must be declared before execution and must cover"
+        + " exactly the Probe target hypotheses with differentiated expected transitions."
+        + " Schema: "
+        + json.dumps(
+            TerminalProbePlan.model_json_schema(),
+            sort_keys=True,
+        )
     )
+
+
+def _repair_payload(
+    *,
+    original_input: dict[str, Any],
+    invalid_content: str | None,
+    field_errors: tuple[str, ...],
+    attempt_index: int,
+) -> dict[str, Any]:
+    return {
+        "schema_version": _TERMINAL_PLAN_SCHEMA_VERSION,
+        "original_input": original_input,
+        "invalid_payload": _redacted_content_shape(invalid_content),
+        "invalid_response_sha256": (
+            None if invalid_content is None else _content_sha256(invalid_content)
+        ),
+        "validation_error": list(field_errors),
+        "attempt_index": attempt_index,
+    }
+
+
+def _safe_field_errors(error: ValidationError) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                f"{'.'.join(str(part) for part in item['loc'])}:{item['type']}"
+                for item in error.errors(include_url=False, include_input=False)
+            }
+        )
+    )[:32]
+
+
+def _content_sha256(content: str) -> str:
+    return sha256(content.encode("utf-8")).hexdigest()
+
+
+def _redacted_content_shape(content: str | None) -> Any:
+    if content is None:
+        return None
+    try:
+        value = json.loads(content)
+    except (TypeError, ValueError):
+        return "[REDACTED]"
+    return _redacted_payload_shape(value)
+
+
+def _redacted_payload_shape(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            f"field_{index}": _redacted_payload_shape(item)
+            for index, item in enumerate(value.values())
+        }
+    if isinstance(value, list | tuple):
+        return [_redacted_payload_shape(item) for item in value]
+    return "[REDACTED]"
 
 
 def _history_action_input(observation: ActionObservation) -> dict[str, Any]:

@@ -1,272 +1,165 @@
-# Task 3 Report: Coverage-Aware Solver and Frame-Adequacy Policy
+# Task 3 Report: Make One Terminal Probe a Causally Attributable Plan
 
 ## Status
 
-Complete. Task 3 is implemented on `codex/epistemic-kernel-completion` from
-reviewed HEAD `3b0dde4`.
+Task 3 is implemented in the four owned benchmark files. The focused Task 3 suite and the required environment regression suite pass. The full nested suite was run once and has ten expected downstream migration failures because out-of-scope gateway and conformance tests still construct the removed `actions` schema.
 
-## Files
+Commit subject: `feat(terminal-bench): make probe plans causally attributable`
 
-Created:
-
-- `bayesprobe/kernel_config.py`
-- `bayesprobe/frame_policy.py`
-- `tests/test_frame_policy.py`
-- `.superpowers/sdd/task-3-report.md`
+## Scope
 
 Modified:
 
-- `bayesprobe/belief.py`
-- `bayesprobe/core.py`
-- `bayesprobe/initialization.py`
-- `bayesprobe/schemas.py`
-- `tests/test_belief.py`
-- `tests/test_core_cycles.py`
-- `tests/test_initialization.py`
+- `benchmarks/terminal_bench/src/bayesprobe_terminal_bench/actions.py`
+- `benchmarks/terminal_bench/src/bayesprobe_terminal_bench/planning.py`
+- `benchmarks/terminal_bench/tests/test_actions.py`
+- `benchmarks/terminal_bench/tests/test_planning.py`
 
-No Task 2 framing/admission semantics, WebUI files, probe files, provider files,
-or Task 5 probe replacement behavior were changed.
+No environment, budget, gateway, provider-contract, BayesProbe core, historical fixture, generated lock, plan/spec, or unrelated test file was modified. The pre-existing untracked `reports/` directory was preserved.
 
 ## Implementation
 
-- Added frozen, fully validated open-coverage, frame-adequacy, expansion, and
-  projection policy configuration. Boolean numerics, non-finite values,
-  out-of-range probabilities, invalid reserve ordering, and non-positive or
-  non-integer limits fail closed.
-- Added `CoverageAwareBeliefSolver.solve(...)` and `BeliefSolveResult` as the
-  native v0.2 belief-revision interface. Exclusive-open named hypotheses and
-  the private unresolved slot normalize together; exhaustive frames normalize
-  only named active choices; independent hypotheses retain separate log-odds
-  credences.
-- Used `effective_update_weight` exactly when present. `None` falls back to the
-  v0.1 quality product and explicit `0.0` remains zero. Missing unresolved
-  likelihood is neutral during the Task 3 compatibility window.
-- Added one-round distribution rounding, minimum unresolved reserve handling,
-  exact retirement-mass return before normalization, and `FrameMassUpdate`
-  audit records without creating an unresolved `BeliefUpdate`.
-- Added `FrameAdequacyPolicy.assess(...)` and all five status transitions.
-  Accepted-event filtering, high-verifiability external evidence, distinct
-  derivation roots, model-only limits, all-named disconfirmation, and
-  unresolved-mass dominance are deterministic.
-- Added optional `EvidenceEvent.epistemic_origin` and
-  `EvidenceEvent.derivation_root_id` compatibility fields. Missing provenance
-  cannot establish external inadequacy; Task 4 can make these fields mandatory.
-- Integrated solving, adequacy, legacy evolution, summaries, next-state
-  validation, and ledger persistence in core. Native record order is:
-  `external_signal`, `evidence_event`, `belief_update`, `frame_mass_update`,
-  `frame_adequacy_decision`, `hypothesis_evolution`, `probe_candidate`,
-  `belief_state`, with existing cycle/probe-set records retained.
-- Kept `solve_updates` as a v0.1-only deprecated migration wrapper. No native
-  production caller remains.
-- Initialization now marks exhaustive frames adequate and every open frame
-  provisional. Summaries include competition, coverage, named active mass,
-  unresolved mass, and frame adequacy without treating independent credences
-  as a categorical distribution.
+### Causal plan schema
 
-## RED Evidence
+- Replaced `TerminalProbePlan.actions` with immutable `steps` and removed compatibility with the old field.
+- Added strict, frozen `TerminalPlanStep` and `TransitionPrediction` models.
+- Added JSON-array-to-tuple normalization for steps and transition predictions.
+- Enforced inspect plans as inspect-role, provably read-only steps with no transition predictions.
+- Enforced verify plans as verify-role shell commands with non-empty verification targets and no transition predictions.
+- Enforced intervene order as optional inspect, exactly one intervention, and one or more trailing verification steps.
+- Enforced exactly one classifier-visible mutation, read-only inspection, and shell-only targeted verification.
+- Enforced optional transition predictions as exact Probe-target coverage with distinct NFKC/case-folded/whitespace-normalized transition texts.
 
-1. Initial solver/policy RED:
-   `PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_frame_policy.py tests/test_belief.py -q -p no:cacheprovider`
-   produced `2 errors` during collection because
-   `CoverageAwareBeliefSolver` did not exist.
-2. Core/initialization RED:
-   the exact Task 3 focused command produced `35 failed, 90 passed` because
-   core still called the legacy wrapper and initialization lacked the new
-   status/summary behavior.
-3. Native state invariant RED: `1 failed` because inconsistent named plus
-   unresolved mass was accepted.
-4. Provenance threshold RED: `1 failed` because external origin/root identity
-   was not yet represented on evidence.
-5. Retirement precision RED: `1 failed` because unresolved mass was rounded
-   before an evidence update.
-6. Accepted trigger audit RED: `1 failed` because all-named disconfirmation did
-   not retain its triggering event id.
+### Planner contract
 
-## GREEN Evidence
+- Locked the planner instruction and repair payloads to `terminal_probe_plan:v1`.
+- Replaced the single generic repair with an initial attempt plus at most two targeted repairs.
+- Charged every attempt through the shared `RunBudget.reserve_model_call()` path.
+- Added safe, bounded field diagnostics without validation inputs or exception text.
+- Added SHA-256 response-content hashes to attempt telemetry and repair payloads.
+- Added redacted invalid-payload shapes rather than forwarding raw invalid content.
+- Raised `TerminalPlanError(category="provider_contract_error", attempts=3)` after three invalid responses, with no fallback plan.
+- Preserved immediate, stable provider-error handling and SDK retry suppression.
+- Updated the instruction to state that writes and patches are interventions, mutation success is acknowledgement rather than verification, verification follows mutation, and transition predictions precede execution.
 
-- Final exact focused command:
-  `127 passed in 0.32s`.
-- Full offline Python suite:
-  `971 passed, 10 skipped in 7.86s`.
-- Node WebUI stream regression:
-  `15 passed, 0 failed`.
-- `git diff --check`: clean.
+## TDD Evidence
+
+All commands ran from `benchmarks/terminal_bench`.
+
+### RED
+
+Command:
+
+```text
+uv run pytest tests/test_actions.py tests/test_planning.py -q
+```
+
+The first sandboxed invocation could not access the shared uv cache and exited 2 before test execution. The approved rerun produced the intended feature RED:
+
+```text
+ERROR tests/test_actions.py
+ImportError: cannot import name 'TerminalPlanStep' from 'bayesprobe_terminal_bench.actions'
+1 error in 0.11s
+```
+
+This failed because the new role-aware schema did not exist; production code had not yet been changed.
+
+### Schema GREEN
+
+Command:
+
+```text
+uv run pytest tests/test_actions.py -q
+```
+
+Result:
+
+```text
+46 passed in 0.03s
+```
+
+### Integrated repair-loop iteration
+
+The first focused GREEN attempt found three test-side migration mistakes: one no-fallback test accidentally supplied a valid third response, one assertion still referenced `plan.actions`, and one exact telemetry expectation omitted the new safe diagnostic fields.
+
+```text
+3 failed, 65 passed in 0.16s
+```
+
+The tests were corrected to express the locked Task 3 contract; no production behavior was weakened.
+
+### Focused GREEN
+
+Command:
+
+```text
+uv run pytest tests/test_actions.py tests/test_planning.py -q
+```
+
+Result:
+
+```text
+68 passed in 0.09s
+```
+
+### Environment regression
+
+Command:
+
+```text
+uv run pytest tests/test_environment.py -q
+```
+
+Result:
+
+```text
+29 passed in 6.09s
+```
+
+### Full nested suite, run once
+
+Command:
+
+```text
+uv run pytest -q
+```
+
+Result:
+
+```text
+10 failed, 336 passed in 8.45s
+```
+
+All ten failures are downstream schema-migration failures outside Task 3 ownership:
+
+- `tests/test_conformance.py`: one failure constructing `TerminalProbePlan(actions=...)`.
+- `tests/test_gateway.py`: nine failures constructing `TerminalProbePlan(actions=...)`.
+
+The failures consistently report `steps` missing and `actions` forbidden. This is the expected consequence of replacing rather than preserving the old schema. Updating gateway execution to consume `plan.steps` and migrating those tests belongs to later integration work and was not implemented here.
+
+### Final owned-scope verification
+
+Command:
+
+```text
+uv run pytest tests/test_actions.py tests/test_planning.py tests/test_environment.py -q
+```
+
+Result:
+
+```text
+97 passed in 6.18s
+```
+
+## Checks
+
+- `git diff --check`: exit 0, no whitespace errors.
+- Changed-file check: exactly the four owned source/test files before adding this required report.
+- Changed-line secret scan: exit 1 from `rg`, meaning no matches.
+- Focused planner telemetry tests confirm provider error text, malformed response accessor text, response IDs, and invalid response bodies are not leaked.
 
 ## Self-Review
 
-- Atomicity/order: the complete next `BeliefState` is schema-revalidated before
-  any cycle ledger append. Native frame mass and adequacy records precede
-  evolution/candidates and the final state. Legacy migrated frames omit only a
-  no-op adequacy record to preserve their reviewed ledger layout; actual legacy
-  challenge/expansion transitions are recorded.
-- Duplicate evidence: prior-cycle and same-cycle duplicate ids remain discarded,
-  produce no second belief or frame-mass movement, and persist one canonical
-  evidence record.
-- Distribution semantics: exclusive-open named plus unresolved mass is one;
-  exhaustive MCQ named mass is one; independent credences do not cross-normalize.
-  Retirement returns exact pre-rounding mass to unresolved.
-- Compatibility: `solve_updates` accepts only v0.1 state, migrates explicitly,
-  and delegates. `None` weight uses the legacy quality product; explicit zero
-  is not replaced by fallback weight.
-- Scope: generic initialization probes were not replaced, and admission,
-  framing, provider, probe, and WebUI behavior was not changed.
+Reviewed the final diff against every Task 3 brief item. No Critical or Important owned-file issue was found.
 
-## Concerns
-
-No blocking concerns. Until Task 4 populates provenance on native evidence,
-events without explicit origin/root metadata can challenge and request
-expansion but cannot establish externally verified frame inadequacy. Legacy
-hypothesis evolution remains bypassed for exclusive-open frames because it
-normalizes named hypotheses without the private unresolved slot; bounded open
-frame expansion belongs to the later expansion task.
-
-## Review Fix 1
-
-Reviewed base: `0c60121f37a453ebd7a003ba6b1cb9320d0a8b08`.
-This section supersedes the earlier exclusive-open retirement concern.
-
-### Changes
-
-- Exclusive-open public cycles now run the existing evolution engine's
-  retirement rule against accepted current-cycle evidence. The open path does
-  not run anomaly spawning, reframing, or candidate creation.
-- Added coverage-aware retirement reconciliation after evolution determines a
-  retirement. The retired hypothesis retains its solver posterior and retired
-  audit state, leaves `active_hypothesis_ids`, and transfers that posterior to
-  unresolved mass in the same returned `BeliefState` without named-only
-  renormalization.
-- Every retirement transfer creates a stable per-hypothesis `FrameMassUpdate`
-  with sequential prior/posterior unresolved values and the final accepted
-  retirement-triggering evidence id. Available derivation-root context is
-  retained in the reason. A transfer without evolution/evidence audit context
-  fails closed.
-- Retirement frame-mass records remain after event belief/frame updates and
-  before frame adequacy, hypothesis evolution, candidates, and final state.
-  The public-cycle regression asserts the complete relevant ledger order.
-- Distribution rounding now applies configured minimums on the same decimal
-  grid as the final distribution and assigns the residual only to an eligible
-  slot. A custom reserve of `0.05001` finishes at or above reserve while named
-  plus unresolved mass remains exactly one.
-- Inadequacy decisions now report only the unresolved-support events that
-  satisfy the qualifying high-verifiability or distinct-root rule. Mixed
-  qualifying/non-qualifying coverage is asserted precisely.
-
-### RED Evidence
-
-`PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_frame_policy.py tests/test_belief.py tests/test_core_cycles.py tests/test_initialization.py -q -p no:cacheprovider`
-produced `4 failed, 126 passed in 0.36s`. The failures were the unaudited
-synthetic retirement transfer, non-grid reserve rounding down to `0.05`, mixed
-trigger ids including a non-qualifying event, and production open-cycle
-retirement remaining unreachable.
-
-### GREEN Evidence
-
-- Exact Task 3 focused suite: `130 passed in 0.32s`.
-- Full offline Python suite: `974 passed, 10 skipped in 7.82s`.
-- Node stream regression: `15 passed, 0 failed`.
-- `git diff --check`: clean.
-
-### Concerns
-
-No blocking concerns. Open-cycle evolution intentionally reaches only the
-existing retirement rule in Task 3; semantic expansion, reframing, anomaly
-spawning, and new probe candidates remain deferred to Task 6.
-
-## Review Fix 2
-
-Reviewed base: `b6165fd40866a93827ce3e8af3c961cf7e80b44c`.
-
-### Changes
-
-- A native exclusive-open `FrameState` may now have zero active hypothesis ids
-  only when unresolved alternative mass is fully conserved at one. Initial
-  `HypothesisFrame` construction still requires one to six hypotheses, and all
-  other empty-active-id combinations fail validation.
-- `FrameAdequacyPolicy` now treats a fully unresolved frame with no active named
-  hypotheses as challenged, requests expansion, and records the accepted
-  disconfirming retirement triggers. Already-qualified inadequate or expanding
-  rules retain precedence.
-- Added public
-  `HypothesisEvolutionEngine.retire_stale_hypotheses(...) -> HypothesisEvolutionResult`.
-  It returns only updated hypotheses and `RETIRE` audits, always has no probe
-  candidates, and performs no spawning, reframing, splitting, or candidate
-  creation. Normal evolution reuses the same method, and core no longer calls a
-  private retirement helper.
-- Retirement eligibility is limited to active and weakened hypotheses. Reframed,
-  split, retired, and archived terminal states are ignored, preventing duplicate
-  retirement evolutions on later evidence.
-- Added a public core-cycle regression that retires every active named
-  hypothesis, transfers each posterior into unresolved mass with one audit
-  update per hypothesis, returns a schema-valid fully unresolved state, and
-  preserves frame-mass, adequacy, evolution, and final-state ledger ordering.
-- Added a two-cycle public regression proving fresh counterevidence targeted at
-  an already retired hypothesis creates no second retirement evolution, no
-  retirement `FrameMassUpdate`, and no additional unresolved transfer.
-
-### RED Evidence
-
-1. Schema lifecycle tests produced `4 failed, 1 passed`: empty active ids were
-   rejected unconditionally.
-2. Adequacy tests produced `1 failed, 1 passed`: the all-retired frame remained
-   provisional while the stronger external inadequacy rule already passed.
-3. Retirement-only engine tests produced `5 failed`: the public method did not
-   exist.
-4. Public core regressions produced `2 failed`: core called the private helper,
-   and a second cycle emitted a duplicate `RETIRE` evolution.
-
-### GREEN Evidence
-
-- Exact Task 3 focused suite plus hypothesis-evolution/schema coverage:
-  `261 passed in 0.43s`.
-- Full offline Python suite: `988 passed, 10 skipped in 7.89s`.
-- Node stream regression: `15 passed, 0 failed`.
-- `git diff --check`: clean.
-- Production private-helper scan: no `_retire_stale_hypotheses` references.
-
-### Concerns
-
-No blocking concerns. This fix exposes and integrates retirement only. Semantic
-expansion, anomaly spawning, reframing, and candidate creation remain deferred
-to Task 6, and no Task 4/5, provider, probe, or WebUI behavior was added.
-
-## Review Fix 3
-
-Reviewed base: `49a5276`.
-
-### Changes
-
-- Exclusive-open solving now emits an ordinary `FrameMassUpdate` only when the
-  final rounded unresolved posterior differs from the final rounded prior.
-  Meaningful unresolved movement keeps its existing ids, reasons, and ordering.
-- Strengthened the two-cycle public retirement regression so neutral evidence
-  targeting an already-retired hypothesis must return no frame-mass updates and
-  append no cycle-two `frame_mass_update` ledger record.
-- Final cycle state construction now dumps evolved hypotheses and `FrameState`
-  to plain data before a dedicated deep-revalidation helper reconstructs the
-  `BeliefState`. Validation failures are surfaced through the stable
-  `final belief state failed recursive validation` exception boundary.
-- Added a public independent-frame cycle regression where ordinary evolution
-  retires every active hypothesis. The invalid empty non-open `FrameState` is
-  rejected before the ledger receives any record for the cycle.
-- The existing public all-retired exclusive-open regression continues to prove
-  that zero active hypotheses with unresolved mass one remains valid.
-
-### RED Evidence
-
-The two targeted public regressions produced `2 failed`: cycle two returned two
-neutral ordinary frame-mass updates, and final-state validation did not expose
-the required stable recursive-validation boundary.
-
-### GREEN Evidence
-
-- Targeted regressions: `2 passed in 0.18s`.
-- Exact Task 3 focused suite: `135 passed in 0.34s`.
-- Full offline Python suite: `989 passed, 10 skipped in 8.00s`.
-- Node stream regression: `15 passed, 0 failed`.
-- `git diff --check`: clean.
-
-### Concerns
-
-No blocking concerns. The recursive final-state check remains immediately
-before ledger persistence, so failed cycles append nothing while valid
-exclusive-open fully unresolved states retain their reviewed semantics.
+Residual concern: the nested suite cannot be fully green until the out-of-scope gateway/conformance consumers migrate from the removed `actions` field to role-aware `steps`. Adding an `actions` compatibility property or accepting the old input would violate the explicit Task 3 schema replacement requirement, so no compatibility shim was added.
