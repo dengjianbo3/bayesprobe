@@ -1179,18 +1179,24 @@ def _decision_lineage(
 
 def _judgment_response_sha256(response: Mapping[str, Any]) -> str:
     try:
-        serialized = canonical_json(response)
-    except (TypeError, ValueError):
-        serialized = _malformed_judgment_json(response)
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        encoded = canonical_json(response).encode("utf-8")
+    except Exception:
+        encoded = _malformed_judgment_json(response).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _malformed_judgment_json(response: Mapping[str, Any]) -> str:
     try:
         tagged = _type_tagged_canonical_value(response, active_ids=set())
-        return canonical_json(tagged)
+        return json.dumps(
+            tagged,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
     except Exception:
-        return canonical_json(["unserializable", _stable_type_name(response)])
+        return '["mapping","unserializable"]'
 
 
 def _type_tagged_canonical_value(

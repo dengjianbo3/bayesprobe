@@ -1809,6 +1809,92 @@ def test_mixed_likelihood_key_types_record_one_stable_target_mismatch_decision(
     assert judgment_hashes[0] == judgment_hashes[1]
 
 
+def _target_mismatch_decision_hash(
+    *,
+    registry: CausalTraceRegistry,
+    request: StructuredModelRequest,
+    response: dict[str, Any],
+) -> str:
+    events: list[str] = []
+    delegate = _RecordingDelegate(response, events=events)
+    artifacts = _RecordingDecisionSink(events)
+    gateway = causal_module.CausalEvidenceModelGateway(
+        delegate=delegate,
+        registry=registry,
+        artifacts=artifacts,
+    )
+
+    with pytest.raises(ModelGatewayValidationError) as raised:
+        gateway.complete_structured(request)
+
+    assert str(raised.value) == "causal_admissibility:target_mismatch"
+    assert events == ["delegate", "decision"]
+    assert delegate.requests == [request]
+    assert len(artifacts.decisions) == 1
+    decision = artifacts.decisions[0]
+    assert decision["decision"] == "discard"
+    assert decision["reason_code"] == "target_mismatch"
+    response_sha256 = decision["judgment_response_sha256"]
+    assert len(response_sha256) == 64
+    return response_sha256
+
+
+def test_deeply_nested_malformed_judgment_records_one_stable_causal_decision(
+    probe,
+    execution_context,
+) -> None:
+    registry, request, _ = _current_case(
+        probe=probe,
+        execution_context=execution_context,
+        role="inspect",
+        hypothesis_types={"H1": "root_cause"},
+    )
+    hashes: list[str] = []
+
+    for _ in range(2):
+        nested: object = "leaf"
+        for _ in range(10_000):
+            nested = {"child": [nested]}
+        response = _judgment(["unexpected_target"])
+        response["quality_overrides"] = nested
+        hashes.append(
+            _target_mismatch_decision_hash(
+                registry=registry,
+                request=request,
+                response=response,
+            )
+        )
+
+    assert hashes[0] == hashes[1]
+
+
+def test_unpaired_surrogate_judgment_records_one_stable_causal_decision(
+    probe,
+    execution_context,
+) -> None:
+    registry, request, _ = _current_case(
+        probe=probe,
+        execution_context=execution_context,
+        role="inspect",
+        hypothesis_types={"H1": "root_cause"},
+    )
+    likelihood_orders = (
+        {"H1": "strongly_confirming", "\ud800": "neutral"},
+        {"\ud800": "neutral", "H1": "strongly_confirming"},
+    )
+
+    hashes = [
+        _target_mismatch_decision_hash(
+            registry=registry,
+            request=request,
+            response=_judgment(["H1"], likelihoods=likelihoods),
+        )
+        for likelihoods in likelihood_orders
+    ]
+
+    assert hashes[0] == hashes[1]
+
+
 @pytest.mark.parametrize(
     ("request_initial_type", "expected_reason"),
     [
