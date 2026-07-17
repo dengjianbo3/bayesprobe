@@ -4,7 +4,7 @@ import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -27,6 +27,11 @@ FROZEN_GATE_TASK_REFS = {
         "sha256:bd0eb5e8434840a46c623c8d29c71b4a6d0fc5c7bcbf637b6d1aef36b98f5cc5"
     ),
 }
+FROZEN_GATE_TASK_TIMEOUTS = {
+    "terminal-bench/break-filter-js-from-html": 1200,
+    "terminal-bench/cancel-async-tasks": 900,
+    "terminal-bench/log-summary-date-ranges": 900,
+}
 PAIRED_GATE_ARMS = {
     "direct": "bayesprobe_terminal_bench.direct_agent:DirectHarborAgent",
     "bayesprobe": "bayesprobe_terminal_bench.agent:BayesProbeHarborAgent",
@@ -41,6 +46,11 @@ class GateTask(BaseModel):
     task_id: str
     task_ref: str
     image_digest: str
+    agent_timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        exclude_if=lambda value: value is None,
+    )
 
     @field_validator("task_ref", "image_digest")
     @classmethod
@@ -48,6 +58,120 @@ class GateTask(BaseModel):
         if not _SHA256.fullmatch(value):
             raise ValueError("digest must be sha256")
         return value
+
+
+class LockedBudgets(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    max_total_actions: int = Field(ge=1)
+    max_model_calls: int = Field(ge=1)
+    max_provider_tokens: int = Field(ge=1)
+    max_output_tokens: int = Field(ge=256)
+    command_timeout_seconds: int = Field(ge=1, le=120)
+    provider_timeout_seconds: int = Field(ge=1)
+    signal_output_bytes: int = Field(ge=1)
+
+
+_STAGE0_BUDGETS = LockedBudgets(
+    max_total_actions=24,
+    max_model_calls=72,
+    max_provider_tokens=160_000,
+    max_output_tokens=8_192,
+    command_timeout_seconds=120,
+    provider_timeout_seconds=360,
+    signal_output_bytes=32_768,
+)
+
+
+class CausalQualificationLock(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["terminal_bench_causal_qualification:v1"]
+    harbor_version: Literal["0.18.0"]
+    dataset_name: Literal["terminal-bench/terminal-bench-2"]
+    dataset_revision: str
+    tasks: tuple[GateTask, GateTask, GateTask]
+    root_git_sha: str
+    adapter_tree_sha: str
+    model: str
+    base_url: str | None
+    provider_protocol: Literal["openai_chat_completions"]
+    temperature: Literal[0]
+    budgets: LockedBudgets
+    prompt_schema_hashes: dict[str, str]
+    expected_provider_model: str
+    expected_system_fingerprint: str | None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_tasks(cls, value: object) -> object:
+        if isinstance(value, Mapping) and isinstance(value.get("tasks"), list):
+            return {**value, "tasks": tuple(value["tasks"])}
+        return value
+
+    @field_validator("dataset_revision")
+    @classmethod
+    def require_dataset_digest(cls, value: str) -> str:
+        if not _SHA256.fullmatch(value):
+            raise ValueError("dataset revision must be sha256")
+        return value
+
+    @field_validator("root_git_sha", "adapter_tree_sha")
+    @classmethod
+    def require_git_object_id(cls, value: str) -> str:
+        if not _GIT_OBJECT_ID.fullmatch(value):
+            raise ValueError("Git identity must be an object id")
+        return value
+
+    @field_validator("model", "expected_provider_model")
+    @classmethod
+    def require_nonempty_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("model identity must be non-empty")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def require_nonempty_base_url(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("base URL must be non-empty")
+        return value
+
+    @field_validator("expected_system_fingerprint")
+    @classmethod
+    def require_valid_fingerprint(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provider fingerprint must be non-empty")
+        return value
+
+    @model_validator(mode="after")
+    def require_frozen_contract(self) -> CausalQualificationLock:
+        if tuple(task.task_id for task in self.tasks) != FROZEN_GATE_TASK_IDS:
+            raise ValueError("causal qualification requires the frozen task order")
+        if any(
+            task.task_ref != FROZEN_GATE_TASK_REFS[task.task_id]
+            for task in self.tasks
+        ):
+            raise ValueError("causal qualification requires the frozen task refs")
+        if any(
+            task.agent_timeout_seconds is None
+            or task.agent_timeout_seconds
+            != FROZEN_GATE_TASK_TIMEOUTS[task.task_id]
+            for task in self.tasks
+        ):
+            raise ValueError("causal qualification requires the official agent timeout")
+        if self.budgets != _STAGE0_BUDGETS:
+            raise ValueError("causal qualification requires the Stage 0 budgets")
+        from bayesprobe_terminal_bench.planning import plan_contract_identity
+        from bayesprobe_terminal_bench.provider_contract import contract_identity
+
+        expected_identities = {
+            **contract_identity(),
+            **plan_contract_identity(),
+        }
+        if self.prompt_schema_hashes != expected_identities:
+            raise ValueError("causal qualification prompt/schema identity drift")
+        return self
 
 
 class PairedGateLock(BaseModel):

@@ -560,6 +560,54 @@ def _response_sha256(response: Any) -> str:
     return sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _identity_sha256(value: Any) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return f"sha256:{sha256(serialized.encode('utf-8')).hexdigest()}"
+
+
+def contract_identity() -> dict[str, str]:
+    """Return canonical hashes for the adapter-owned provider contracts."""
+    frame_prompt = {
+        "max_attempts": 3,
+        "policy": _terminal_policy("terminal_task_frame", {}),
+        "repair_task": "repair_task_frame",
+        "required_fields": sorted(_FRAME_REQUIRED_KEYS),
+    }
+    probe_prompt = {
+        "max_attempts": 3,
+        "policy": _terminal_policy(
+            "terminal_probe_design",
+            {
+                "available_capabilities": [
+                    {"available": True, "kind": "repository_read"},
+                    {"available": True, "kind": "test_execution"},
+                ],
+                "cycle_id": "cycle_0",
+                "hypotheses": [{"id": "<target_hypothesis>"}],
+                "task_frame": {"coverage": "open"},
+            },
+        ),
+        "repair_task": "repair_probe_design",
+        "required_fields": sorted(_PROBE_REQUIRED_KEYS),
+    }
+    return {
+        "terminal_task_frame:v1:prompt": _identity_sha256(frame_prompt),
+        "terminal_task_frame:v1:schema": _identity_sha256(
+            _TerminalTaskFrame.model_json_schema()
+        ),
+        "terminal_probe_design:v1:prompt": _identity_sha256(probe_prompt),
+        "terminal_probe_design:v1:schema": _identity_sha256(
+            _TerminalProbeResponse.model_json_schema()
+        ),
+    }
+
+
 def _redacted_payload_shape(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -576,5 +624,6 @@ __all__ = [
     "ProviderContractError",
     "TERMINAL_HYPOTHESIS_TYPES",
     "TerminalContractModelGateway",
+    "contract_identity",
     "safe_field_errors",
 ]

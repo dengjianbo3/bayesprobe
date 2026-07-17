@@ -1,0 +1,24 @@
+job_name: bayesprobe-terminal-bench-causal-qualification
+jobs_dir: .runs/harbor/causal-qualification/bayesprobe
+n_attempts: 1
+datasets:
+  - name: terminal-bench/terminal-bench-2
+    task_names:
+      - terminal-bench/break-filter-js-from-html
+      - terminal-bench/cancel-async-tasks
+      - terminal-bench/log-summary-date-ranges
+agents:
+  - import_path: bayesprobe_terminal_bench.agent:BayesProbeHarborAgent
+    model_name: deepseek-v4-flash
+    env:
+      BAYESPROBE_BENCH_API_KEY: ${BAYESPROBE_BENCH_API_KEY}
+      BAYESPROBE_BENCH_BASE_URL: https://api.deepseek.com
+      BAYESPROBE_BENCH_LOCK_PATH: .runs/causal-qualification.lock.json
+      BAYESPROBE_BENCH_MODEL: deepseek-v4-flash
+      BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS: ${BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS}
+environment:
+  type: docker
+  delete: true
+orchestrator:
+  type: local
+  n_concurrent_trials: 1

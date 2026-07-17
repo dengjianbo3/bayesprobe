@@ -1,0 +1,17 @@
+job_name: bayesprobe-terminal-bench-oracle-causal-qualification
+jobs_dir: .runs/harbor/causal-qualification/oracle
+n_attempts: 1
+datasets:
+  - name: terminal-bench/terminal-bench-2
+    task_names:
+      - terminal-bench/break-filter-js-from-html
+      - terminal-bench/cancel-async-tasks
+      - terminal-bench/log-summary-date-ranges
+agents:
+  - name: oracle
+environment:
+  type: docker
+  delete: true
+orchestrator:
+  type: local
+  n_concurrent_trials: 1

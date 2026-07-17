@@ -619,6 +619,14 @@ def validate_runtime_lock(
             session_id=session_id,
             runtime_git_identity=runtime_git_identity,
         )
+    if schema_version == "terminal_bench_causal_qualification:v1":
+        return _validate_active_causal_qualification_lock(
+            payload,
+            config,
+            arm=arm,
+            session_id=session_id,
+            runtime_git_identity=runtime_git_identity,
+        )
     raise ValueError("active runtime lock mismatch: ['schema_version']")
 
 
@@ -733,6 +741,67 @@ def _validate_active_paired_lock(
         raise ValueError(f"active runtime lock mismatch: {sorted(mismatches)}")
     _validate_runtime_git_identity(payload, runtime_git_identity)
     return dict(payload)
+
+
+def _validate_active_causal_qualification_lock(
+    payload: Mapping[str, Any],
+    config: TerminalBenchConfig,
+    *,
+    arm: str,
+    session_id: str | None,
+    runtime_git_identity: RepositoryGitIdentity | None,
+) -> dict[str, object]:
+    from bayesprobe_terminal_bench.experiment_lock import CausalQualificationLock
+
+    try:
+        lock = CausalQualificationLock.model_validate(payload)
+    except Exception:
+        raise ValueError(
+            "active runtime lock mismatch: ['causal_qualification_lock']"
+        ) from None
+
+    mismatches: set[str] = set()
+    if arm != "bayesprobe":
+        mismatches.add("arm")
+    task = next(
+        (
+            item
+            for item in lock.tasks
+            if isinstance(session_id, str)
+            and session_id.startswith(f"{item.task_id.split('/', 1)[1]}__")
+        ),
+        None,
+    )
+    if task is None:
+        mismatches.add("session_id")
+    elif config.task_timeout_seconds != task.agent_timeout_seconds:
+        mismatches.add("agent_timeout_seconds")
+
+    expected = {
+        "model": config.model,
+        "base_url": config.base_url,
+        "max_total_actions": config.max_total_actions,
+        "max_model_calls": config.max_model_calls,
+        "max_provider_tokens": config.max_provider_tokens,
+        "max_output_tokens": config.max_output_tokens,
+        "command_timeout_seconds": config.command_timeout_seconds,
+        "provider_timeout_seconds": config.provider_timeout_seconds,
+        "signal_output_bytes": config.signal_output_bytes,
+    }
+    actual = {
+        "model": lock.model,
+        "base_url": lock.base_url,
+        **lock.budgets.model_dump(mode="python"),
+    }
+    mismatches.update(
+        key for key, expected_value in expected.items() if actual[key] != expected_value
+    )
+    if mismatches:
+        raise ValueError(f"active runtime lock mismatch: {sorted(mismatches)}")
+
+    result = lock.model_dump(mode="json")
+    _validate_runtime_git_identity(result, runtime_git_identity)
+    return result
 
 
 def _active_common_mismatches(

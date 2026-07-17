@@ -12,7 +12,7 @@ from typing import Any, Protocol
 from openai import OpenAI
 from pydantic import ValidationError
 
-from bayesprobe import ProbeDesign, ProbeExecutionBrief
+from bayesprobe import ExternalSignal, ProbeDesign, ProbeExecutionBrief
 from bayesprobe_terminal_bench.actions import (
     ActionObservation,
     ApplyPatchAction,
@@ -454,6 +454,51 @@ def _planner_instruction(*, repair: bool) -> str:
             sort_keys=True,
         )
     )
+
+
+def _identity_sha256(value: Any) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return f"sha256:{sha256(serialized.encode('utf-8')).hexdigest()}"
+
+
+def plan_contract_identity() -> dict[str, str]:
+    """Return canonical hashes for terminal planning and Signal schemas."""
+    return {
+        "terminal_probe_plan:v1:prompt": _identity_sha256(
+            _planner_instruction(repair=False)
+        ),
+        "terminal_probe_plan:v1:repair_prompt": _identity_sha256(
+            _planner_instruction(repair=True)
+        ),
+        "terminal_probe_plan:v1:schema": _identity_sha256(
+            {
+                "schema": TerminalProbePlan.model_json_schema(),
+                "schema_version": _TERMINAL_PLAN_SCHEMA_VERSION,
+            }
+        ),
+        "harbor-observation:v3:schema": _identity_sha256(
+            {
+                "causal_binding_fields": [
+                    "action_id",
+                    "action_role",
+                    "plan_id",
+                    "policy_attempt_id",
+                    "request_fingerprint",
+                    "subject_environment_state_id",
+                    "verification_target",
+                ],
+                "max_observation_bytes": 32_768,
+                "schema": ExternalSignal.model_json_schema(),
+                "schema_version": "harbor-observation:v3",
+            }
+        ),
+    }
 
 
 def _repair_payload(
