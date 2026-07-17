@@ -11,6 +11,7 @@ from bayesprobe import (
     AutonomousQuestionProgressKind,
     DeterministicModelGateway,
     EpistemicOrigin,
+    EvidenceJudgmentRepairPolicy,
     HypothesisRelation,
     HypothesisSeed,
     InitializeRunInput,
@@ -46,7 +47,7 @@ class ScriptedTerminalPlanner:
     ) -> TerminalProbePlan:
         self.plan_calls += 1
         assert history == ()
-        if self.scenario == "inspect":
+        if self.scenario in {"inspect", "repair_causal_discard"}:
             return TerminalProbePlan(
                 mode="inspect",
                 steps=(
@@ -106,7 +107,7 @@ class SupportingObservationBridge:
         if isinstance(action, WriteFileAction):
             output = "ACKNOWLEDGED: the Semaphore implementation was written."
             before, after = "env:0", "env:1"
-        elif self.scenario == "inspect":
+        elif self.scenario in {"inspect", "repair_causal_discard"}:
             output = "SUPPORTS H1: ls reports that the expected file is missing."
             before, after = "env:0", "env:0"
         else:
@@ -165,6 +166,18 @@ class TerminalEvidenceDelegate:
             }
         if request.task == "judge_evidence":
             return self._judgment(request)
+        if request.task == "repair_evidence_judgment":
+            if self.scenario != "repair_causal_discard":
+                raise AssertionError(f"unexpected model task: {request.task}")
+            return {
+                "evidence_type": "supporting",
+                "likelihoods": {"H_unbound_target": "strongly_confirming"},
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
+                "interpretation": "A repair response with a mismatched target.",
+                "quality_overrides": {},
+            }
         if request.task == "project_answer":
             return {
                 "answer": "The terminal evidence supports the recorded result.",
@@ -239,6 +252,18 @@ class TerminalEvidenceDelegate:
         raw = json.loads(request.input["signal"]["raw_content"])
         role = raw["causal_binding"]["action_role"]
         targets = request.input["target_hypotheses"]
+        if self.scenario == "repair_causal_discard":
+            return {
+                "evidence_type": "not_a_valid_evidence_type",
+                "likelihoods": {
+                    target: "moderately_confirming" for target in targets
+                },
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
+                "interpretation": "The initial semantic judgment requires repair.",
+                "quality_overrides": {},
+            }
         if role == "intervene" and self.scenario != "policy_discard":
             return {
                 "evidence_type": "neutral",
@@ -340,6 +365,10 @@ def _guarded_scenario(
         ledger_path=tmp_path / scenario / "ledger.jsonl",
         config=TerminalBenchConfig(model="scripted", max_cycles=1),
     )
+    if scenario == "repair_causal_discard":
+        runner.core._evidence_gate._judgment_repair_policy = (
+            EvidenceJudgmentRepairPolicy(max_attempts=2)
+        )
     return runner, delegate, artifacts
 
 
@@ -425,6 +454,49 @@ def test_policy_acknowledgement_discard_leaves_public_core_posterior_unchanged(
     assert "TaskGroup policy" not in (
         artifacts.root / "causal_decisions.jsonl"
     ).read_text(encoding="utf-8")
+
+
+def test_causally_rejected_repairs_never_reach_the_public_core_posterior(
+    tmp_path: Path,
+) -> None:
+    runner, delegate, artifacts = _guarded_scenario(
+        tmp_path,
+        "repair_causal_discard",
+    )
+
+    result = runner.run_question(_terminal_run_input("terminal_repair_discard"))
+
+    cycle = result.cycle_results[0]
+    assert len(cycle.evidence_events) == 1
+    event = cycle.evidence_events[0]
+    assert event.discard_reason == (
+        "schema_violation: repair failed after 2 attempt(s): "
+        "causal_admissibility:target_mismatch"
+    )
+    assert event.model_trace["task"] == "repair_evidence_judgment"
+    assert event.model_trace["repair_attempt_index"] == 2
+    assert cycle.contribution_deltas == []
+    assert cycle.belief_updates == []
+    assert _posterior_by_id(result.final_belief_state) == _posterior_by_id(
+        result.initial_belief_state
+    )
+    assert [
+        request.task
+        for request in delegate.requests
+        if request.task in {"judge_evidence", "repair_evidence_judgment"}
+    ] == [
+        "judge_evidence",
+        "repair_evidence_judgment",
+        "repair_evidence_judgment",
+    ]
+    assert [
+        (decision["decision"], decision["reason_code"])
+        for decision in _causal_decisions(artifacts)
+    ] == [
+        ("admit", "state_scoped_inspection"),
+        ("discard", "target_mismatch"),
+        ("discard", "target_mismatch"),
+    ]
 
 
 @pytest.mark.parametrize(
