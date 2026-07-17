@@ -8,12 +8,12 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from harbor.utils.trajectory_validator import TrajectoryValidator
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from bayesprobe import ExternalSignal, ProbeDesign
+from bayesprobe import EvidenceContributionDelta, ExternalSignal, ProbeDesign
 from bayesprobe_terminal_bench.actions import ActionObservation, TerminalProbePlan
 from bayesprobe_terminal_bench.causal import (
     CausalActionRecord,
@@ -63,6 +63,254 @@ class _PlanArtifact(BaseModel):
     plan: TerminalProbePlan
 
 
+class _StrictEvidenceEvent(BaseModel):
+    model_config = ConfigDict(
+        allow_inf_nan=False,
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )
+
+    schema_version: Literal["v0.2"]
+    id: str
+    derived_from_signal: str
+    epistemic_origin: Literal["tool_result"]
+    derivation_root_id: str
+    contribution_root_id: str | None
+    target_hypotheses: list[str]
+    evidence_type: Literal[
+        "supporting",
+        "counterevidence",
+        "boundary_condition",
+        "anomaly",
+        "neutral",
+        "source_claim",
+        "sender_judgment",
+    ]
+    content: str
+    reliability: float = Field(ge=0.0, le=1.0)
+    independence: float = Field(ge=0.0, le=1.0)
+    relevance: float = Field(ge=0.0, le=1.0)
+    novelty: float = Field(ge=0.0, le=1.0)
+    specificity: float = Field(ge=0.0, le=1.0)
+    verifiability: float = Field(ge=0.0, le=1.0)
+    likelihoods: dict[
+        str,
+        Literal[
+            "strongly_disconfirming",
+            "moderately_disconfirming",
+            "weakly_disconfirming",
+            "neutral",
+            "weakly_confirming",
+            "moderately_confirming",
+            "strongly_confirming",
+        ],
+    ]
+    unresolved_likelihood: Literal[
+        "strongly_disconfirming",
+        "moderately_disconfirming",
+        "weakly_disconfirming",
+        "neutral",
+        "weakly_confirming",
+        "moderately_confirming",
+        "strongly_confirming",
+    ] | None
+    frame_fit: Literal[
+        "explained_by_named",
+        "underdetermined",
+        "supports_unresolved",
+    ]
+    unexplained_observation: str | None
+    correlation_status: Literal[
+        "novel",
+        "duplicate_exact",
+        "correlated_restatement",
+        "correlated_novel",
+    ]
+    effective_update_weight: float | None = Field(ge=0.0, le=1.0)
+    interpretation: str
+    discard_reason: str | None
+    model_trace: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_target_shape(self) -> "_StrictEvidenceEvent":
+        if (
+            not self.id
+            or not self.derived_from_signal
+            or not self.derivation_root_id
+            or not self.content
+            or not self.target_hypotheses
+            or any(not item for item in self.target_hypotheses)
+            or len(self.target_hypotheses) != len(set(self.target_hypotheses))
+            or not set(self.likelihoods).issubset(self.target_hypotheses)
+        ):
+            raise ValueError("EvidenceEvent identifiers and targets are invalid")
+        return self
+
+
+class _StrictEvidenceContributionDelta(EvidenceContributionDelta):
+    model_config = ConfigDict(
+        allow_inf_nan=False,
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )
+
+
+class _StrictUpdateSensitivity(BaseModel):
+    model_config = ConfigDict(
+        allow_inf_nan=False,
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )
+
+    contribution_mode: Literal[
+        "new_root",
+        "revise_root",
+        "retract_root",
+        "no_change",
+    ]
+    caused_by_event_ids: list[str]
+    log_likelihood_delta: float
+    complexity_penalty: float
+    ad_hoc_penalty: float
+    complexity_penalty_delta: float
+    ad_hoc_penalty_delta: float
+
+    @model_validator(mode="after")
+    def validate_causes(self) -> "_StrictUpdateSensitivity":
+        if (
+            not self.caused_by_event_ids
+            or any(not item for item in self.caused_by_event_ids)
+            or len(self.caused_by_event_ids) != len(set(self.caused_by_event_ids))
+        ):
+            raise ValueError("caused_by_event_ids must be unique nonempty text")
+        return self
+
+
+class _StrictBeliefUpdate(BaseModel):
+    model_config = ConfigDict(
+        allow_inf_nan=False,
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )
+
+    update_id: str
+    cycle_id: str
+    evidence_id: str
+    hypothesis_id: str
+    prior: float = Field(ge=0.0, le=1.0)
+    posterior: float = Field(ge=0.0, le=1.0)
+    direction: Literal["strengthened", "weakened", "neutral"]
+    reason: str
+    sensitivity: _StrictUpdateSensitivity
+
+    @model_validator(mode="after")
+    def validate_identifiers(self) -> "_StrictBeliefUpdate":
+        if any(
+            not item
+            for item in (
+                self.update_id,
+                self.cycle_id,
+                self.evidence_id,
+                self.hypothesis_id,
+                self.reason,
+            )
+        ):
+            raise ValueError("BeliefUpdate identifiers and reason must be nonempty")
+        return self
+
+
+class _CausalDiagnosticRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    category: Literal[
+        "plan_error",
+        "provider_contract_error",
+        "provider_error",
+        "budget_exhausted",
+        "policy_error",
+        "causal_adapter_error",
+    ]
+    cycle_id: str
+    probe_id: str
+    run_id: str
+    stage: Literal[
+        "planning",
+        "plan_action_budget",
+        "action_budget",
+        "action_policy",
+        "action_observation",
+    ]
+    action_index: int | None = None
+    error_type: str | None = None
+    observed_action_index: int | None = None
+    plan_id: str | None = None
+    remaining_actions: int | None = None
+    required_actions: int | None = None
+    step_index: int | None = None
+
+    @model_validator(mode="after")
+    def validate_stage_shape(self) -> "_CausalDiagnosticRecord":
+        base = {"category", "cycle_id", "probe_id", "run_id", "stage"}
+        requirements: dict[str, tuple[set[str], set[str], set[str]]] = {
+            "planning": (
+                {
+                    "plan_error",
+                    "provider_contract_error",
+                    "provider_error",
+                    "budget_exhausted",
+                },
+                set(),
+                {"error_type"},
+            ),
+            "plan_action_budget": (
+                {"budget_exhausted"},
+                {"remaining_actions", "required_actions"},
+                set(),
+            ),
+            "action_budget": (
+                {"budget_exhausted"},
+                {"plan_id", "step_index"},
+                set(),
+            ),
+            "action_policy": (
+                {"policy_error"},
+                {"action_index", "error_type", "plan_id", "step_index"},
+                set(),
+            ),
+            "action_observation": (
+                {"causal_adapter_error"},
+                {
+                    "action_index",
+                    "error_type",
+                    "observed_action_index",
+                    "plan_id",
+                    "step_index",
+                },
+                set(),
+            ),
+        }
+        categories, required, optional = requirements[self.stage]
+        if self.category not in categories:
+            raise ValueError("diagnostic category does not match stage")
+        if not required.issubset(self.model_fields_set):
+            raise ValueError("diagnostic stage lacks required fields")
+        if not self.model_fields_set.issubset(base | required | optional):
+            raise ValueError("diagnostic stage has unrelated fields")
+        for field in ("action_index", "observed_action_index", "required_actions"):
+            value = getattr(self, field)
+            if value is not None and value < 1:
+                raise ValueError(f"{field} must be positive")
+        for field in ("remaining_actions", "step_index"):
+            value = getattr(self, field)
+            if value is not None and value < 0:
+                raise ValueError(f"{field} must be nonnegative")
+        return self
+
+
 class _ViolationBuckets:
     def __init__(self) -> None:
         self.security: set[str] = set()
@@ -103,6 +351,17 @@ _SIGNAL_SCHEMA_VERSION = "harbor-observation:v3"
 _DEFAULT_MAX_ACTIONS = 24
 _DEFAULT_MAX_MODEL_CALLS = 72
 _DEFAULT_MAX_PROVIDER_TOKENS = 160_000
+_TRACE_ENVELOPE_FILES = (
+    "bayesprobe_ledger.jsonl",
+    "provider_contract.jsonl",
+    "provider_telemetry.jsonl",
+    "plans.jsonl",
+    "environment_actions.jsonl",
+    "causal_actions.jsonl",
+    "causal_decisions.jsonl",
+    "errors.jsonl",
+    "summary.json",
+)
 _ADMIT_REASONS = frozenset(
     {
         "state_scoped_inspection",
@@ -145,6 +404,10 @@ def validate_trial_trace(artifact_root: Path) -> ConformanceReport:
 
     trajectory_path = _trajectory_path(root)
     _scan_artifacts(root, trajectory_path=trajectory_path, violations=violations)
+    if trajectory_path is None and not any(
+        (root / name).is_file() for name in _TRACE_ENVELOPE_FILES
+    ):
+        violations.add("adapter", "trace envelope is absent")
     errors = _read_jsonl(root / "errors.jsonl", violations, "adapter", required=False)
     _classify_recorded_errors(errors, violations=violations)
     denied_actions = _policy_denied_action_count(errors, violations=violations)
@@ -202,7 +465,15 @@ def validate_trial_trace(artifact_root: Path) -> ConformanceReport:
         required=False,
     )
 
-    substantive_trace = bool(plan_records or action_records)
+    substantive_trace = bool(
+        plan_records
+        or action_records
+        or causal_records
+        or by_type.get("external_signal")
+        or by_type.get("evidence_event")
+    )
+    if (attempts or substantive_trace or complete_cycles) and not provider_records:
+        violations.add("provider", "required provider telemetry is missing")
     if substantive_trace and not attempts:
         violations.add("provider", "provider contract attempts are missing")
     if provider_records and not attempts:
@@ -215,15 +486,24 @@ def validate_trial_trace(artifact_root: Path) -> ConformanceReport:
     causal_actions = _parse_models(
         causal_records, CausalActionRecord, violations, "causal", "causal action"
     )
-    decisions = _parse_decisions(decision_records, violations=violations)
+    decisions, diagnostics = _parse_decisions(
+        decision_records,
+        violations=violations,
+    )
+    denied_steps = _policy_denied_steps(
+        diagnostics,
+        denied_actions=denied_actions,
+        violations=violations,
+    )
     signals = _parse_signals(by_type.get("external_signal", []), violations=violations)
 
-    if substantive_trace:
+    if substantive_trace or complete_cycles:
         _require_current_causal_artifacts(
             plans=plans,
             actions=actions,
             causal_actions=causal_actions,
             signals=signals,
+            denied_steps=denied_steps,
             violations=violations,
         )
     probes = _probes_by_id(by_type, violations=violations)
@@ -233,6 +513,7 @@ def validate_trial_trace(artifact_root: Path) -> ConformanceReport:
         causal_actions=causal_actions,
         signals=signals,
         probes=probes,
+        denied_steps=denied_steps,
         violations=violations,
     )
     _validate_decisions(
@@ -543,7 +824,8 @@ def _validate_provider_telemetry(
 ) -> tuple[int, int, str | None]:
     tokens = 0
     successful = 0
-    identities: set[tuple[object, object]] = set()
+    models: set[str] = set()
+    fingerprints: set[str | None] = set()
     for index, record in enumerate(records, start=1):
         task = record.get("task")
         outcome = record.get("outcome")
@@ -554,10 +836,26 @@ def _validate_provider_telemetry(
             continue
         successful += 1
         model = record.get("model")
-        fingerprint = record.get("system_fingerprint")
         if not isinstance(model, str) or not model:
             violations.add("provider", f"provider call {index} lacks model identity")
-        identities.add((model, fingerprint))
+        else:
+            models.add(model)
+        if "system_fingerprint" not in record:
+            violations.add(
+                "provider",
+                f"provider call {index} lacks system fingerprint key",
+            )
+        else:
+            fingerprint = record["system_fingerprint"]
+            if fingerprint is not None and (
+                not isinstance(fingerprint, str) or not fingerprint
+            ):
+                violations.add(
+                    "provider",
+                    f"provider call {index} has invalid system fingerprint",
+                )
+            else:
+                fingerprints.add(fingerprint)
         usage = record.get("usage")
         if not isinstance(usage, Mapping):
             violations.add("provider", f"provider call {index} lacks usage")
@@ -588,21 +886,64 @@ def _validate_provider_telemetry(
                 violations.add("provider", f"terminal plan call {index} lacks validation")
         else:
             violations.add("provider", f"provider call {index} has unknown task {task!r}")
-    if len(identities) > 1:
+    if len(models) > 1 or len(fingerprints) > 1:
         violations.add("provider", "provider model or fingerprint identity drift")
-    model_identity = next(iter(identities))[0] if len(identities) == 1 else None
-    return tokens, successful, model_identity if isinstance(model_identity, str) else None
+    model_identity = next(iter(models)) if len(models) == 1 else None
+    return tokens, successful, model_identity
 
 
 def _parse_decisions(
     records: Sequence[Mapping[str, Any]],
     *,
     violations: _ViolationBuckets,
-) -> list[CausalDecision]:
-    typed = [record for record in records if "decision" in record]
-    return _parse_models(
-        typed, CausalDecision, violations, "causal", "causal decision"
-    )
+) -> tuple[list[CausalDecision], list[_CausalDiagnosticRecord]]:
+    decisions: list[CausalDecision] = []
+    diagnostics: list[_CausalDiagnosticRecord] = []
+    for index, record in enumerate(records, start=1):
+        model: type[BaseModel]
+        if "decision" in record:
+            model = CausalDecision
+        elif "category" in record:
+            model = _CausalDiagnosticRecord
+        else:
+            violations.add("causal", f"invalid causal decision record {index}")
+            continue
+        try:
+            parsed = model.model_validate_json(canonical_json(record))
+        except (ValidationError, ValueError, TypeError):
+            violations.add("causal", f"invalid causal decision record {index}")
+            continue
+        if isinstance(parsed, CausalDecision):
+            decisions.append(parsed)
+        else:
+            diagnostics.append(parsed)
+            _classify_recorded_errors(
+                [parsed.model_dump(mode="json", exclude_none=True)],
+                violations=violations,
+            )
+    return decisions, diagnostics
+
+
+def _policy_denied_steps(
+    diagnostics: Sequence[_CausalDiagnosticRecord],
+    *,
+    denied_actions: int,
+    violations: _ViolationBuckets,
+) -> set[tuple[str, int]]:
+    rows = [item for item in diagnostics if item.stage == "action_policy"]
+    keys = [
+        (item.plan_id, item.step_index)
+        for item in rows
+        if item.plan_id is not None and item.step_index is not None
+    ]
+    if len(rows) != denied_actions:
+        violations.add(
+            "causal",
+            "policy-denied errors and causal diagnostics do not correspond",
+        )
+    if len(keys) != len(set(keys)):
+        violations.add("causal", "duplicate policy-denied plan step")
+    return set(keys)
 
 
 def _parse_signals(
@@ -619,16 +960,22 @@ def _require_current_causal_artifacts(
     actions: Sequence[ActionObservation],
     causal_actions: Sequence[CausalActionRecord],
     signals: Sequence[ExternalSignal],
+    denied_steps: set[tuple[str, int]],
     violations: _ViolationBuckets,
 ) -> None:
-    for name, records in (
-        ("plans", plans),
-        ("executed actions", actions),
-        ("causal actions", causal_actions),
-        ("Signals", signals),
-    ):
-        if not records:
-            violations.add("causal", f"current trace has no {name}")
+    if not plans:
+        violations.add("causal", "current trace has no plans")
+    observations_required = not denied_steps or bool(
+        actions or causal_actions or signals
+    )
+    if observations_required:
+        for name, records in (
+            ("executed actions", actions),
+            ("causal actions", causal_actions),
+            ("Signals", signals),
+        ):
+            if not records:
+                violations.add("causal", f"current trace has no {name}")
     if len(actions) != len(causal_actions) or len(actions) != len(signals):
         violations.add("causal", "executed action/causal action/Signal cardinality differs")
 
@@ -663,6 +1010,7 @@ def _validate_causal_lineage(
     causal_actions: Sequence[CausalActionRecord],
     signals: Sequence[ExternalSignal],
     probes: Mapping[str, ProbeDesign],
+    denied_steps: set[tuple[str, int]],
     violations: _ViolationBuckets,
 ) -> tuple[dict[str, CausalActionRecord], dict[str, ExternalSignal]]:
     plan_by_id = _unique_by(plans, "plan_id", violations=violations, label="plan")
@@ -677,6 +1025,11 @@ def _validate_causal_lineage(
     prior_state_by_run: dict[str, str] = {}
     generation_by_run: dict[str, int] = defaultdict(int)
     bound_signal_ids: set[str] = set()
+
+    for plan_id, step_index in denied_steps:
+        plan = plan_by_id.get(plan_id)
+        if plan is None or step_index >= len(plan.plan.steps):
+            violations.add("causal", f"policy-denied plan step {(plan_id, step_index)} is invalid")
 
     for record in sorted(causal_actions, key=lambda item: item.observation.action_index):
         plan = plan_by_id.get(record.plan_id)
@@ -765,7 +1118,12 @@ def _validate_causal_lineage(
         violations.add("causal", "one or more Signals are not uniquely action-bound")
     for plan in plans:
         completed = {index for plan_id, index in step_keys if plan_id == plan.plan_id}
-        if completed != set(range(len(plan.plan.steps))):
+        denied = {
+            index for plan_id, index in denied_steps if plan_id == plan.plan_id
+        }
+        if completed & denied:
+            violations.add("causal", f"plan {plan.plan_id} step is both executed and denied")
+        if completed | denied != set(range(len(plan.plan.steps))):
             violations.add("causal", f"plan {plan.plan_id} is not exactly executed")
         probe = probes.get(plan.probe_id)
         run_ids = {
@@ -948,12 +1306,30 @@ def _validate_epistemic_lineage(
     decisions: Sequence[CausalDecision],
     violations: _ViolationBuckets,
 ) -> tuple[dict[str, Mapping[str, Any]], int, int, int]:
+    evidence_records = _strict_epistemic_payloads(
+        by_type.get("evidence_event", []),
+        model=_StrictEvidenceEvent,
+        label="EvidenceEvent",
+        violations=violations,
+    )
+    contribution_records = _strict_epistemic_payloads(
+        by_type.get("evidence_contribution_delta", []),
+        model=_StrictEvidenceContributionDelta,
+        label="EvidenceContributionDelta",
+        violations=violations,
+    )
+    update_records = _strict_epistemic_payloads(
+        by_type.get("belief_update", []),
+        model=_StrictBeliefUpdate,
+        label="BeliefUpdate",
+        violations=violations,
+    )
     decisions_by_signal: dict[str, list[CausalDecision]] = defaultdict(list)
     for decision in decisions:
         decisions_by_signal[decision.signal_id].append(decision)
     evidence: dict[str, Mapping[str, Any]] = {}
     evidence_by_signal: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    for item in by_type.get("evidence_event", []):
+    for item in evidence_records:
         evidence_id = item.get("id")
         signal_id = item.get("derived_from_signal")
         if not isinstance(evidence_id, str) or not evidence_id or evidence_id in evidence:
@@ -984,26 +1360,25 @@ def _validate_epistemic_lineage(
     for evidence_id, item in evidence.items():
         signal_id = item.get("derived_from_signal")
         route = decisions_by_signal.get(signal_id, []) if isinstance(signal_id, str) else []
-        if not route:
-            violations.add("causal", f"Evidence {evidence_id} lacks causal decision")
+        if len(route) != 1:
+            violations.add(
+                "causal",
+                f"Evidence {evidence_id} does not have exactly one causal decision",
+            )
             continue
-        final = route[-1]
+        final = route[0]
         final_decision_by_evidence[evidence_id] = final
         discard_reason = item.get("discard_reason")
         is_discarded = discard_reason is not None
         admitted += int(not is_discarded)
         discarded += int(is_discarded)
-        is_causal_discard = (
-            isinstance(discard_reason, str)
-            and "causal_admissibility:" in discard_reason
-        )
-        if is_causal_discard and final.decision != "discard":
+        if is_discarded and final.decision != "discard":
             violations.add("causal", f"discarded Evidence {evidence_id} lacks guard discard")
         if not is_discarded and final.decision != "admit":
             violations.add("causal", f"admitted Evidence {evidence_id} lacks admitted route")
 
     contributions: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    for item in by_type.get("evidence_contribution_delta", []):
+    for item in contribution_records:
         root = item.get("contribution_root_id")
         causes = _string_list(item.get("caused_by_event_ids"))
         if not isinstance(root, str) or not root or causes is None:
@@ -1020,7 +1395,7 @@ def _validate_epistemic_lineage(
             )
 
     nonneutral_updates = 0
-    for item in by_type.get("belief_update", []):
+    for item in update_records:
         sensitivity = item.get("sensitivity")
         causes = _string_list(
             sensitivity.get("caused_by_event_ids")
@@ -1058,11 +1433,11 @@ def _validate_epistemic_lineage(
         for evidence_id, item in evidence.items()
         if item.get("discard_reason") is not None
     }
-    for item in by_type.get("evidence_contribution_delta", []):
+    for item in contribution_records:
         causes = _string_list(item.get("caused_by_event_ids")) or []
         if discarded_ids.intersection(causes):
             violations.add("causal", "discarded Evidence has an accepted contribution")
-    for item in by_type.get("belief_update", []):
+    for item in update_records:
         sensitivity = item.get("sensitivity")
         causes = _string_list(
             sensitivity.get("caused_by_event_ids")
@@ -1072,6 +1447,31 @@ def _validate_epistemic_lineage(
         if discarded_ids.intersection(causes):
             violations.add("causal", "discarded Evidence caused an Update")
     return evidence, admitted, discarded, nonneutral_updates
+
+
+def _strict_epistemic_payloads(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    model: type[BaseModel],
+    label: str,
+    violations: _ViolationBuckets,
+) -> list[Mapping[str, Any]]:
+    expected_keys = set(model.model_fields)
+    parsed_records: list[Mapping[str, Any]] = []
+    for index, record in enumerate(records, start=1):
+        if set(record) != expected_keys:
+            violations.add("causal", f"invalid {label} payload {index}")
+            continue
+        try:
+            parsed = model.model_validate_json(
+                canonical_json(record),
+                strict=True,
+            )
+        except (ValidationError, ValueError, TypeError):
+            violations.add("causal", f"invalid {label} payload {index}")
+            continue
+        parsed_records.append(parsed.model_dump(mode="json"))
+    return parsed_records
 
 
 def _validate_exact_admitted_route(
@@ -1265,6 +1665,19 @@ def _validate_atif(
         calls = step.get("tool_calls")
         observation = step.get("observation")
         results = observation.get("results") if isinstance(observation, Mapping) else None
+        expected_call_id = f"tool:{action_id}"
+        expected_arguments = action.observation.action.model_dump(mode="json")
+        expected_result_extra = {
+            "action_index": action.observation.action_index,
+            "return_code": action.observation.return_code,
+            "timed_out": action.observation.timed_out,
+            "pre_environment_state_id": (
+                action.observation.pre_environment_state_id
+            ),
+            "post_environment_state_id": (
+                action.observation.post_environment_state_id
+            ),
+        }
         if (
             not isinstance(calls, Sequence)
             or isinstance(calls, str | bytes)
@@ -1274,10 +1687,18 @@ def _validate_atif(
             or len(results) != 1
             or not isinstance(calls[0], Mapping)
             or not isinstance(results[0], Mapping)
-            or results[0].get("source_call_id") != calls[0].get("tool_call_id")
+            or calls[0].get("tool_call_id") != expected_call_id
+            or calls[0].get("function_name")
+            != f"terminal.{expected_arguments['type']}"
+            or calls[0].get("arguments") != expected_arguments
+            or results[0].get("source_call_id") != expected_call_id
+            or results[0].get("content") != action.observation.model_facing_output
+            or results[0].get("extra") != expected_result_extra
+            or extra.get("plan_id") != action.plan_id
+            or extra.get("policy_attempt_id") != action.policy_attempt_id
+            or extra.get("probe_id") != action.probe_id
             or extra.get("request_fingerprint") != action.request_fingerprint
             or extra.get("signal_id") != signal_id_by_action.get(action_id)
-            or results[0].get("content") != action.observation.model_facing_output
         ):
             violations.add("adapter", f"trajectory linkage mismatch {action_id}")
     if seen_actions != set(action_by_id):

@@ -11,12 +11,19 @@ causal trace judgment to it. The 39 previously deferred
 synthetic artifact helper to the current registry-bound causal and ATIF
 contract; experiment-lock assertions and semantics were not weakened.
 
+The independent-review follow-up is also complete. It closes the empty-trace,
+decision-routing, provider-identity, exact-ATIF, strict-epistemic-payload, and
+precedence-test findings without changing the public API or broadening the
+Task 8 architecture.
+
 No live provider, network, Harbor or Docker job, credentials, official reward,
 or `.runs` generation was used. No file under `bayesprobe/` was changed, and
 the pre-existing untracked `reports/` directory was left untouched.
 
-Commit subject:
-`feat(terminal-bench): validate causal trace conformance`
+Commit subjects:
+
+- `feat(terminal-bench): validate causal trace conformance`
+- `fix(terminal-bench): harden causal conformance validation`
 
 ## Scope
 
@@ -163,24 +170,87 @@ completed with:
 The focused set includes conformance, historical replay, benchmark-lock, smoke
 wrapper, and paired-gate coverage.
 
-## Final Verification
+## Independent Review Follow-Up
 
-Fresh final commands produced:
+The review fixes were implemented test-first in the same worktree and remain
+inside Task 8 ownership:
+
+1. Empty artifact directories now fail closed as `adapter_error`. Completed or
+   otherwise substantive traces with an incomplete causal envelope are checked
+   independently and classify causally, while historical provider failures
+   retain provider precedence.
+2. Every `causal_decisions.jsonl` row must validate as either a final
+   `CausalDecision` or the adapter's explicit diagnostic/action-failure shape.
+   Unknown and malformed rows fail closed. Every Signal/Evidence route requires
+   exactly one final decision, and every admitted or discarded Evidence event
+   must agree with that decision regardless of free-text discard wording.
+3. Provider telemetry is required whenever attempts, a substantive trace, or a
+   completed ledger trace exists. Successful calls require the
+   `system_fingerprint` key; explicit null remains legal, and model/fingerprint
+   availability and values must remain consistent across calls.
+4. Each ATIF terminal tool call/result is recomputed from its executed
+   `ActionObservation`/`CausalActionRecord`. Call ID, function, complete action
+   arguments, result source/content, and all result metadata must match exactly.
+5. EvidenceEvent, EvidenceContributionDelta, and BeliefUpdate ledger payloads
+   are validated before causal reasoning with exact required fields, forbidden
+   extras, strict finite numbers, and typed collections. The public root-exported
+   `EvidenceContributionDelta` model is reused in strict mode. EvidenceEvent and
+   BeliefUpdate use narrow adapter-local strict models because their core models
+   are not public root exports. Invalid rows are excluded from downstream
+   neutrality and route logic, so a malformed contribution cannot appear
+   neutral.
+6. Classification precedence tests now activate real security, causal,
+   provider, budget, and adapter detectors in representative collisions. They
+   no longer rely on injected category labels in `errors.jsonl`.
+
+The strict epistemic mutation matrix was RED before implementation:
 
 ```text
-Nested benchmark suite: 544 passed
-Root public/paradigm suite: 50 passed
-Broad root suite: 1766 passed, 11 skipped
+uv run pytest tests/test_conformance.py -q \
+  -k epistemic_payloads_are_strict_before_causal_reasoning --tb=short
+12 failed
+```
+
+The malformed string-valued zero contribution was initially accepted as
+conformant, directly demonstrating the neutral-fallback defect. After the
+adapter-local validators were added, the same matrix produced `12 passed`.
+The first complete nested-suite run then exposed an internal-core import in
+`test_public_reuse.py`; replacing it with the public root export plus local
+models changed that result from `1 failed, 574 passed` to a fully green nested
+suite.
+
+## Final Verification
+
+Fresh post-review commands produced:
+
+```text
+cd benchmarks/terminal_bench
+uv run pytest tests/test_conformance.py tests/test_historical_fixtures.py \
+  tests/test_benchmark_lock.py tests/test_paired_gate.py -q --tb=short
+133 passed in 1.37s
+
+uv run pytest -q --tb=short
+575 passed in 9.84s
+
+cd ../..
+uv run pytest tests/test_public_api_and_config.py \
+  tests/test_paradigm_conformance.py \
+  tests/evaluation/test_paradigm_checkpoint.py -q --tb=short
+50 passed in 0.42s
+
+uv run pytest -q --tb=short
+1766 passed, 11 skipped in 13.85s
 ```
 
 Additional checks completed successfully:
 
-- `python -m compileall -q src scripts tests`
+- `uv run python -m compileall -q src scripts tests`
 - `git diff --check`
 - `git diff --name-only -- bayesprobe` returned no paths
 - causal fixture secret/evaluator scan returned no matches
 - causal fixture symlink scan returned no paths
 - manifest integrity and portability tests passed in the nested suite
+- the task-generated worktree-root `uv.lock` was removed before staging
 
 ## Self-Review
 
@@ -189,5 +259,8 @@ validator does not introduce an evidence integrator, posterior updater, task
 loop, or core-control-flow change. It does not read official reward. The
 scripts contain no second generic validator, active Task 7 ATIF identities are
 unchanged, and fixture helper updates preserve the benchmark lock's assertions.
+The cumulative follow-up diff imports production schemas only from the
+`bayesprobe` package root, and the public-reuse guard passes. The only untracked
+path left in the worktree is the pre-existing user-owned `reports/` directory.
 
 No unresolved correctness finding remains from self-review.

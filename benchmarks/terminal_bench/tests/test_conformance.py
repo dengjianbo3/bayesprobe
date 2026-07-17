@@ -44,6 +44,26 @@ CAUSAL_FIXTURES = Path(__file__).parent / "fixtures" / "causal_traces"
 HISTORICAL_FIXTURES = Path(__file__).parent / "fixtures" / "historical_traces"
 
 
+def _copy_conformant_fixture(tmp_path: Path, name: str) -> Path:
+    fixture = tmp_path / name
+    shutil.copytree(
+        CAUSAL_FIXTURES / "conformant-inspect-intervene-verify",
+        fixture,
+    )
+    return fixture
+
+
+def _read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _write_jsonl_objects(path: Path, records: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
 class ScriptedTerminalPlanner:
     def __init__(self, scenario: str = "inspect") -> None:
         self.scenario = scenario
@@ -675,6 +695,352 @@ def test_guard_discard_is_observable_without_becoming_a_causal_error() -> None:
     assert not report.violations
 
 
+def test_empty_artifact_directory_is_adapter_error(tmp_path: Path) -> None:
+    report = validate_trial_trace(tmp_path)
+
+    assert report.classification is TraceClassification.ADAPTER_ERROR
+    assert any("envelope" in violation for violation in report.violations)
+
+
+def test_completed_trace_without_plans_or_actions_is_causal_error(
+    tmp_path: Path,
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "completed-without-causal-envelope")
+    ledger_path = fixture / "bayesprobe_ledger.jsonl"
+    retained_types = {
+        "task_admission",
+        "task_frame",
+        "run",
+        "belief_state",
+        "cycle",
+        "answer_projection",
+    }
+    _write_jsonl_objects(
+        ledger_path,
+        [
+            record
+            for record in _read_jsonl_objects(ledger_path)
+            if record["record_type"] in retained_types
+        ],
+    )
+    for name in (
+        "plans.jsonl",
+        "environment_actions.jsonl",
+        "causal_actions.jsonl",
+        "causal_decisions.jsonl",
+        "trajectory.json",
+    ):
+        (fixture / name).unlink()
+    summary_path = fixture / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["terminal_actions"] = 0
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.CAUSAL_CONFORMANCE_ERROR
+    assert any("plans" in violation for violation in report.violations)
+    assert any("executed actions" in violation for violation in report.violations)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"unexpected": "previously ignored"},
+        {"category": "policy_error", "stage": "action_policy"},
+    ],
+)
+def test_unknown_or_malformed_causal_decision_record_is_causal_error(
+    tmp_path: Path,
+    record: dict[str, str],
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "malformed-causal-decision")
+    decisions_path = fixture / "causal_decisions.jsonl"
+    records = _read_jsonl_objects(decisions_path)
+    records.append(record)
+    _write_jsonl_objects(decisions_path, records)
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.CAUSAL_CONFORMANCE_ERROR
+    assert any("decision record" in violation for violation in report.violations)
+
+
+def test_duplicate_final_causal_decision_is_causal_error(tmp_path: Path) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "duplicate-final-decision")
+    decisions_path = fixture / "causal_decisions.jsonl"
+    records = _read_jsonl_objects(decisions_path)
+    records.append(records[0])
+    _write_jsonl_objects(decisions_path, records)
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.CAUSAL_CONFORMANCE_ERROR
+    assert any("exactly one" in violation for violation in report.violations)
+
+
+def test_discarded_evidence_requires_guard_discard_independent_of_reason_text(
+    tmp_path: Path,
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "discard-with-admit-decision")
+    ledger_path = fixture / "bayesprobe_ledger.jsonl"
+    ledger = _read_jsonl_objects(ledger_path)
+    discarded = next(
+        record["payload"]
+        for record in ledger
+        if record["record_type"] == "evidence_event"
+        and record["payload"]["discard_reason"] is not None
+    )
+    discarded["discard_reason"] = "guard rejected the judgment"
+    _write_jsonl_objects(ledger_path, ledger)
+
+    decisions_path = fixture / "causal_decisions.jsonl"
+    decisions = _read_jsonl_objects(decisions_path)
+    decision = next(
+        record for record in decisions if record["signal_id"] == discarded["derived_from_signal"]
+    )
+    decision["decision"] = "admit"
+    decision["reason_code"] = "state_scoped_inspection"
+    _write_jsonl_objects(decisions_path, decisions)
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.CAUSAL_CONFORMANCE_ERROR
+    assert any("guard discard" in violation for violation in report.violations)
+
+
+def test_guard_discard_accepts_arbitrary_public_core_reason_text(tmp_path: Path) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "discard-with-free-text-reason")
+    ledger_path = fixture / "bayesprobe_ledger.jsonl"
+    ledger = _read_jsonl_objects(ledger_path)
+    discarded = next(
+        record["payload"]
+        for record in ledger
+        if record["record_type"] == "evidence_event"
+        and record["payload"]["discard_reason"] is not None
+    )
+    discarded["discard_reason"] = "guard rejected the judgment"
+    _write_jsonl_objects(ledger_path, ledger)
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.CONFORMANT
+    assert report.discarded_evidence == 1
+
+
+def test_provider_contract_attempts_require_provider_telemetry(tmp_path: Path) -> None:
+    fixture = tmp_path / "attempts-without-telemetry"
+    fixture.mkdir()
+    shutil.copyfile(
+        CAUSAL_FIXTURES
+        / "conformant-inspect-intervene-verify"
+        / "provider_contract.jsonl",
+        fixture / "provider_contract.jsonl",
+    )
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.PROVIDER_CONTRACT_ERROR
+    assert any("telemetry" in violation for violation in report.violations)
+
+
+def test_completed_substantive_trace_requires_provider_telemetry(
+    tmp_path: Path,
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "trace-without-telemetry")
+    (fixture / "provider_telemetry.jsonl").unlink()
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.PROVIDER_CONTRACT_ERROR
+    assert any("telemetry" in violation for violation in report.violations)
+
+
+def test_successful_provider_calls_require_system_fingerprint_key(
+    tmp_path: Path,
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "missing-fingerprint-keys")
+    telemetry_path = fixture / "provider_telemetry.jsonl"
+    telemetry = _read_jsonl_objects(telemetry_path)
+    for record in telemetry:
+        record.pop("system_fingerprint")
+    _write_jsonl_objects(telemetry_path, telemetry)
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.PROVIDER_CONTRACT_ERROR
+    assert any("fingerprint key" in violation for violation in report.violations)
+
+
+def test_explicit_null_provider_fingerprint_is_available_and_conformant(
+    tmp_path: Path,
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "explicit-null-fingerprint")
+    telemetry_path = fixture / "provider_telemetry.jsonl"
+    telemetry = _read_jsonl_objects(telemetry_path)
+    for record in telemetry:
+        record["system_fingerprint"] = None
+    _write_jsonl_objects(telemetry_path, telemetry)
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.CONFORMANT
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("model", "drifted-model"),
+        ("system_fingerprint", "drifted-fingerprint"),
+        ("system_fingerprint", None),
+    ],
+)
+def test_provider_identity_value_or_availability_drift_is_provider_error(
+    tmp_path: Path,
+    field: str,
+    replacement: str | None,
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, f"provider-drift-{field}")
+    telemetry_path = fixture / "provider_telemetry.jsonl"
+    telemetry = _read_jsonl_objects(telemetry_path)
+    telemetry[0][field] = replacement
+    _write_jsonl_objects(telemetry_path, telemetry)
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.PROVIDER_CONTRACT_ERROR
+    assert any("identity drift" in violation for violation in report.violations)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "ls_to_write_file",
+        "arguments",
+        "call_id",
+        "function",
+        "result_metadata",
+    ],
+)
+def test_atif_terminal_action_must_exactly_match_executed_action(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, f"atif-{mutation}")
+    trajectory_path = fixture / "trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    step = next(
+        item
+        for item in trajectory["steps"]
+        if item.get("extra", {}).get("kind") == "terminal_action"
+    )
+    call = step["tool_calls"][0]
+    result = step["observation"]["results"][0]
+    if mutation == "ls_to_write_file":
+        call["function_name"] = "terminal.write_file"
+        call["arguments"] = {
+            "content": "replacement",
+            "path": "/workspace/replacement.txt",
+            "type": "write_file",
+        }
+    elif mutation == "arguments":
+        call["arguments"]["command"] = "pwd"
+    elif mutation == "call_id":
+        call["tool_call_id"] = "tool:mutated-action"
+        result["source_call_id"] = "tool:mutated-action"
+    elif mutation == "function":
+        call["function_name"] = "terminal.write_file"
+    else:
+        result["extra"]["action_index"] = 99
+    trajectory_path.write_text(
+        json.dumps(trajectory, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.ADAPTER_ERROR
+    assert any("trajectory linkage mismatch" in item for item in report.violations)
+
+
+@pytest.mark.parametrize(
+    ("record_type", "mutation", "label"),
+    [
+        ("evidence_event", "extra", "EvidenceEvent"),
+        ("evidence_event", "missing_required", "EvidenceEvent"),
+        ("evidence_event", "numeric_string", "EvidenceEvent"),
+        ("evidence_event", "nonfinite", "EvidenceEvent"),
+        ("evidence_event", "likelihoods_not_map", "EvidenceEvent"),
+        ("evidence_contribution_delta", "extra", "EvidenceContributionDelta"),
+        (
+            "evidence_contribution_delta",
+            "malformed_neutral",
+            "EvidenceContributionDelta",
+        ),
+        (
+            "evidence_contribution_delta",
+            "nonfinite",
+            "EvidenceContributionDelta",
+        ),
+        ("belief_update", "extra", "BeliefUpdate"),
+        ("belief_update", "numeric_string", "BeliefUpdate"),
+        ("belief_update", "nonfinite", "BeliefUpdate"),
+        ("belief_update", "causes_not_list", "BeliefUpdate"),
+    ],
+)
+def test_epistemic_payloads_are_strict_before_causal_reasoning(
+    tmp_path: Path,
+    record_type: str,
+    mutation: str,
+    label: str,
+) -> None:
+    fixture = _copy_conformant_fixture(
+        tmp_path,
+        f"strict-{record_type}-{mutation}",
+    )
+    ledger_path = fixture / "bayesprobe_ledger.jsonl"
+    ledger = _read_jsonl_objects(ledger_path)
+    payload = next(
+        record["payload"]
+        for record in ledger
+        if record["record_type"] == record_type
+    )
+    if mutation == "extra":
+        payload["unexpected"] = "forbidden"
+    elif mutation == "missing_required":
+        payload.pop("target_hypotheses")
+    elif mutation == "numeric_string":
+        field = "reliability" if record_type == "evidence_event" else "prior"
+        payload[field] = "0.5"
+    elif mutation == "nonfinite":
+        field = (
+            "reliability"
+            if record_type == "evidence_event"
+            else "per_hypothesis_delta"
+            if record_type == "evidence_contribution_delta"
+            else "posterior"
+        )
+        if field == "per_hypothesis_delta":
+            payload[field]["H1"] = float("inf")
+        else:
+            payload[field] = float("inf")
+    elif mutation == "likelihoods_not_map":
+        payload["likelihoods"] = ["neutral"]
+    elif mutation == "malformed_neutral":
+        payload["per_hypothesis_delta"] = {"H1": "0.0", "H2": "0.0"}
+        ledger = [
+            record for record in ledger if record["record_type"] != "belief_update"
+        ]
+    else:
+        payload["sensitivity"]["caused_by_event_ids"] = "not-a-list"
+    _write_jsonl_objects(ledger_path, ledger)
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.CAUSAL_CONFORMANCE_ERROR
+    assert any(f"invalid {label} payload" in item for item in report.violations)
+
+
 def test_historical_traces_replay_to_the_preregistered_classifications() -> None:
     manifest = json.loads(
         (HISTORICAL_FIXTURES / "manifest.json").read_text(encoding="utf-8")
@@ -714,52 +1080,75 @@ def test_each_broken_binding_state_or_update_fixture_is_causal_error(
 
 
 @pytest.mark.parametrize(
-    ("case", "expected"),
+    ("case", "expected", "expected_order"),
     [
-        ("conformant", TraceClassification.CONFORMANT),
-        ("adapter", TraceClassification.ADAPTER_ERROR),
-        ("budget_over_adapter", TraceClassification.BUDGET_ERROR),
-        ("provider_over_budget", TraceClassification.PROVIDER_CONTRACT_ERROR),
-        ("causal_over_provider", TraceClassification.CAUSAL_CONFORMANCE_ERROR),
-        ("security_over_all", TraceClassification.CAUSAL_CONFORMANCE_ERROR),
+        ("conformant", TraceClassification.CONFORMANT, ()),
+        ("adapter", TraceClassification.ADAPTER_ERROR, ("adapter",)),
+        (
+            "budget_over_adapter",
+            TraceClassification.BUDGET_ERROR,
+            ("budget", "adapter"),
+        ),
+        (
+            "provider_over_budget",
+            TraceClassification.PROVIDER_CONTRACT_ERROR,
+            ("provider", "budget", "adapter"),
+        ),
+        (
+            "causal_over_provider",
+            TraceClassification.CAUSAL_CONFORMANCE_ERROR,
+            ("causal", "provider", "budget", "adapter"),
+        ),
+        (
+            "security_over_all",
+            TraceClassification.CAUSAL_CONFORMANCE_ERROR,
+            ("security", "causal", "provider", "budget", "adapter"),
+        ),
     ],
 )
-def test_classification_precedence_is_deterministic(
+def test_classification_precedence_uses_real_detector_collisions(
     tmp_path: Path,
     case: str,
     expected: TraceClassification,
+    expected_order: tuple[str, ...],
 ) -> None:
-    fixture = tmp_path / case
-    shutil.copytree(
-        CAUSAL_FIXTURES / "conformant-inspect-intervene-verify",
-        fixture,
-    )
+    fixture = _copy_conformant_fixture(tmp_path, case)
     if case != "conformant":
         (fixture / "trajectory.json").unlink()
-    categories: list[str] = []
     if case in {
         "budget_over_adapter",
         "provider_over_budget",
         "causal_over_provider",
         "security_over_all",
     }:
-        categories.append("budget_error")
+        summary_path = fixture / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["max_total_actions"] = 1
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
     if case in {"provider_over_budget", "causal_over_provider", "security_over_all"}:
-        categories.append("provider_contract_error")
+        telemetry_path = fixture / "provider_telemetry.jsonl"
+        telemetry = _read_jsonl_objects(telemetry_path)
+        for record in telemetry:
+            record.pop("system_fingerprint")
+        _write_jsonl_objects(telemetry_path, telemetry)
     if case in {"causal_over_provider", "security_over_all"}:
-        categories.append("causal_conformance_error")
-    if categories:
-        (fixture / "errors.jsonl").write_text(
-            "".join(json.dumps({"category": item}) + "\n" for item in categories),
-            encoding="utf-8",
-        )
+        actions_path = fixture / "causal_actions.jsonl"
+        actions = _read_jsonl_objects(actions_path)
+        actions[0]["request_fingerprint"] = "sha256:" + "0" * 64
+        _write_jsonl_objects(actions_path, actions)
     if case == "security_over_all":
         (fixture / "unsafe.txt").write_text(
             "attempted read of /root/evaluator/secret",
             encoding="utf-8",
         )
 
-    assert validate_trial_trace(fixture).classification is expected
+    report = validate_trial_trace(fixture)
+    actual_order = tuple(
+        dict.fromkeys(violation.split(":", maxsplit=1)[0] for violation in report.violations)
+    )
+
+    assert report.classification is expected
+    assert actual_order == expected_order
 
 
 def test_causal_fixtures_are_secret_free_evaluator_free_and_portable() -> None:

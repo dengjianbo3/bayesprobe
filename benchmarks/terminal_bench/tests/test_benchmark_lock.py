@@ -711,6 +711,9 @@ def _write_smoke_job(
             "max_provider_tokens": 160_000,
         }
     )
+    evidence_id = "E1"
+    contribution_root_id = "evidence-root:sha256:" + "1" * 64
+    hypothesis_id = probe.target_hypotheses[0]
     records = [
         {
             "record_type": "belief_state",
@@ -741,11 +744,28 @@ def _write_smoke_job(
         {
             "record_type": "evidence_event",
             "payload": {
-                "id": "E1",
+                "schema_version": "v0.2",
+                "id": evidence_id,
                 "derived_from_signal": signal.id,
-                "content": signal.raw_content,
                 "epistemic_origin": "tool_result",
                 "derivation_root_id": signal.provenance.derivation_root_id,
+                "contribution_root_id": contribution_root_id,
+                "target_hypotheses": list(probe.target_hypotheses),
+                "evidence_type": "supporting",
+                "content": signal.raw_content,
+                "reliability": 0.8,
+                "independence": 0.8,
+                "relevance": 0.8,
+                "novelty": 0.8,
+                "specificity": 0.8,
+                "verifiability": 0.8,
+                "likelihoods": {hypothesis_id: "strongly_confirming"},
+                "unresolved_likelihood": None,
+                "frame_fit": "explained_by_named",
+                "unexplained_observation": None,
+                "correlation_status": "novel",
+                "effective_update_weight": None,
+                "interpretation": "The terminal observation supports the hypothesis.",
                 "discard_reason": None,
                 "model_trace": {
                     "task": "judge_evidence",
@@ -759,21 +779,43 @@ def _write_smoke_job(
         {
             "record_type": "evidence_contribution_delta",
             "payload": {
-                "contribution_root_id": "evidence-root:sha256:" + "1" * 64,
-                "caused_by_event_ids": ["E1"],
-                "per_hypothesis_delta": {"H_workspace": 1.0},
+                "contribution_root_id": contribution_root_id,
+                "mode": "new_root",
+                "previous_contribution": None,
+                "current_contribution": {
+                    "contribution_root_id": contribution_root_id,
+                    "revision": 1,
+                    "assessment_event_ids": [evidence_id],
+                    "epistemic_origin": "tool_result",
+                    "per_hypothesis_log_likelihood": {hypothesis_id: 1.0},
+                    "unresolved_log_likelihood": None,
+                    "active": True,
+                },
+                "per_hypothesis_delta": {hypothesis_id: 1.0},
                 "unresolved_delta": None,
+                "caused_by_event_ids": [evidence_id],
             },
         },
         {
             "record_type": "belief_update",
             "payload": {
+                "update_id": "U1",
                 "cycle_id": "cycle_1",
-                "evidence_id": "evidence-root:sha256:" + "1" * 64,
+                "evidence_id": contribution_root_id,
+                "hypothesis_id": hypothesis_id,
                 "prior": 0.5,
                 "posterior": 0.7,
                 "direction": "strengthened",
-                "sensitivity": {"caused_by_event_ids": ["E1"]},
+                "reason": "The accepted contribution updates the hypothesis.",
+                "sensitivity": {
+                    "contribution_mode": "new_root",
+                    "caused_by_event_ids": [evidence_id],
+                    "log_likelihood_delta": 1.0,
+                    "complexity_penalty": 0.0,
+                    "ad_hoc_penalty": 0.0,
+                    "complexity_penalty_delta": 0.0,
+                    "ad_hoc_penalty_delta": 0.0,
+                },
             },
         },
         {
@@ -1012,6 +1054,17 @@ def test_smoke_classifier_allows_linked_evidence_without_directional_update(
     )
     if evidence_outcome == "discarded":
         evidence["discard_reason"] = "duplicate_exact"
+        decisions_path = bayesprobe_dir / "causal_decisions.jsonl"
+        decisions = [
+            json.loads(line)
+            for line in decisions_path.read_text(encoding="utf-8").splitlines()
+        ]
+        decisions[0]["decision"] = "discard"
+        decisions[0]["reason_code"] = "target_mismatch"
+        decisions_path.write_text(
+            "".join(json.dumps(decision) + "\n" for decision in decisions),
+            encoding="utf-8",
+        )
     if evidence_outcome == "neutral":
         update = next(
             record["payload"]
@@ -1113,6 +1166,45 @@ def test_policy_denied_reserved_action_is_reconciled_without_an_observation(
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     summary["terminal_actions"] = 2
     summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    denied_plan = TerminalProbePlan(
+        mode="inspect",
+        steps=(
+            TerminalPlanStep(
+                role="inspect",
+                action=ShellAction(command="cat /workspace/missing"),
+            ),
+        ),
+        expected_observation="The policy rejects the reserved action.",
+    )
+    denied_registry = CausalTraceRegistry()
+    registered_denial = denied_registry.register_plan(
+        probe=probe,
+        context=execution_context,
+        plan=denied_plan,
+    )
+    artifact_store = TrialArtifactStore(bayesprobe_dir, restricted_values=())
+    artifact_store.append_plan(
+        {
+            "probe_id": probe.id,
+            "cycle_id": execution_context.cycle_id,
+            "plan_id": registered_denial.plan_id,
+            "policy_attempt_id": registered_denial.policy_attempt_id,
+            "plan": denied_plan.model_dump(mode="json"),
+        }
+    )
+    artifact_store.append_causal_decision(
+        {
+            "action_index": 2,
+            "category": "policy_error",
+            "cycle_id": execution_context.cycle_id,
+            "error_type": "PolicyViolation",
+            "plan_id": registered_denial.plan_id,
+            "probe_id": probe.id,
+            "run_id": execution_context.run_id,
+            "stage": "action_policy",
+            "step_index": 0,
+        }
+    )
     (bayesprobe_dir / "errors.jsonl").write_text(
         json.dumps(
             {
@@ -1155,8 +1247,26 @@ def test_all_policy_denied_cycle_needs_no_observation_signal_or_update(
     bayesprobe_dir = _trace_dir(job_dir)
     (bayesprobe_dir / "environment_actions.jsonl").unlink()
     (bayesprobe_dir / "causal_actions.jsonl").unlink()
-    (bayesprobe_dir / "causal_decisions.jsonl").unlink()
-    (bayesprobe_dir / "plans.jsonl").unlink()
+    plan = json.loads(
+        (bayesprobe_dir / "plans.jsonl").read_text(encoding="utf-8").strip()
+    )
+    (bayesprobe_dir / "causal_decisions.jsonl").write_text(
+        json.dumps(
+            {
+                "action_index": 1,
+                "category": "policy_error",
+                "cycle_id": execution_context.cycle_id,
+                "error_type": "PolicyViolation",
+                "plan_id": plan["plan_id"],
+                "probe_id": probe.id,
+                "run_id": execution_context.run_id,
+                "stage": "action_policy",
+                "step_index": 0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     records = [
         record
         for record in _read_trace_records(bayesprobe_dir)
