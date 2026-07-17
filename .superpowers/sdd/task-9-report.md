@@ -2,7 +2,7 @@
 
 ## Status
 
-`DONE - STOPPED AT HARD GATE A`
+`IMPLEMENTED - FINAL VERIFICATION AND RE-REVIEW PENDING`
 
 Task 9 is implemented and verified entirely offline. The adapter now has a
 strict Stage 0 qualification lock, a one-request provider identity artifact
@@ -386,3 +386,36 @@ provider artifact tamper/drift/missing cases, three-job shape rejection,
 reward-independent result validation, static and dynamic runtime-budget drift,
 and actual provider-token recording. `git diff --check` passed during
 self-review, and `git diff --name-only -- bayesprobe` remained empty.
+
+### Provider Artifact Configuration Binding Follow-up
+
+A final controller audit found that live validation bound the immutable
+provider artifact digest, returned model, and fingerprint to the lock, but did
+not independently compare the artifact's configured model, base URL, protocol,
+and temperature with the corresponding locked fields. Two regression cases
+first demonstrated the gap by constructing valid, content-addressed artifacts
+for a different configured model and a different base URL while updating only
+the lock's artifact digest:
+
+```text
+UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run --offline pytest \
+  tests/test_qualification.py::test_live_qualification_binds_provider_artifact_configuration -q
+
+2 failed in 0.24s
+```
+
+The live validator now requires all four configured identity fields to match
+the lock before accepting the returned identity. The same focused command then
+passed both cases, and the complete corrective focus set passed:
+
+```text
+2 passed in 0.09s
+
+UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run --offline pytest \
+  tests/test_qualification.py tests/test_experiment_lock.py tests/test_agent.py -q
+
+73 passed in 1.71s
+```
+
+The fixture-only CLI was rerun after this correction and still emitted
+`offline_gate_passed=true` with no `qualification_passed` field.

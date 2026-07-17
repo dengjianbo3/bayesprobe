@@ -744,6 +744,40 @@ def test_live_qualification_rejects_provider_artifact_and_budget_drift(
 
 
 @pytest.mark.parametrize(
+    ("configured_model", "base_url"),
+    [
+        ("different-configured-model", "https://api.deepseek.com"),
+        ("deepseek-v4-flash", "https://alternate.example.test"),
+    ],
+)
+def test_live_qualification_binds_provider_artifact_configuration(
+    tmp_path: Path,
+    configured_model: str,
+    base_url: str,
+) -> None:
+    artifact = capture_provider_identity(
+        client=_FakeClient(_identity_response()),
+        model=configured_model,
+        base_url=base_url,
+    )
+    artifact_path = write_provider_identity_artifact(
+        tmp_path / "drifted-configuration",
+        artifact,
+    )
+    lock = _lock_payload(tmp_path / "lock-fixture")
+    lock["provider_identity_sha256"] = artifact.content_sha256
+    lock_path = tmp_path / "causal-qualification.lock.json"
+    _write_json(lock_path, lock)
+
+    with pytest.raises(ValueError, match="provider identity artifact drift"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=_live_jobs(tmp_path / "live"),
+            provider_identity_path=artifact_path,
+        )
+
+
+@pytest.mark.parametrize(
     "exception",
     [
         {"category": "provider_transport_error", "status_code": 429},

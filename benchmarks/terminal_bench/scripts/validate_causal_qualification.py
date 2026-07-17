@@ -510,6 +510,10 @@ def _validate_provider_identity_artifact(
         raise ValueError("provider identity artifact is invalid") from None
     if (
         artifact.content_sha256 != lock.provider_identity_sha256
+        or artifact.configured_model != lock.model
+        or artifact.base_url != lock.base_url
+        or artifact.provider_protocol != lock.provider_protocol
+        or artifact.temperature != lock.temperature
         or artifact.returned_model != lock.expected_provider_model
         or artifact.system_fingerprint_available
         != lock.expected_system_fingerprint_available
