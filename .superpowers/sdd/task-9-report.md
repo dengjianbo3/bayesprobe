@@ -2,7 +2,7 @@
 
 ## Status
 
-`IMPLEMENTED - FINAL VERIFICATION AND RE-REVIEW PENDING`
+`DONE - INDEPENDENT REVIEW APPROVED - STOPPED AT HARD GATE A`
 
 Task 9 is implemented and verified entirely offline. The adapter now has a
 strict Stage 0 qualification lock, a one-request provider identity artifact
@@ -497,3 +497,30 @@ timestamps alongside the empty-string case. Before implementation, the empty
 case passed while the two new cases failed (`2 failed, 1 passed`). Lock writing
 now parses ISO-8601 and requires timezone information; the same check is
 `3 passed`. No other re-review finding was reported.
+
+## Final Controller Verification and Review
+
+The same independent reviewer rechecked the timestamp correction and returned
+`APPROVED`. The complete Task 9 implementation range is
+`9454008..3317d14`; its five commits are the initial gate, two provenance
+hardening cycles, Harbor job/runtime-lock binding, and strict Oracle completion
+validation.
+
+Fresh controller verification after the final code commit produced:
+
+```text
+focused qualification/lock/agent/runner tests: 181 passed in 2.43s
+complete Terminal-Bench adapter suite:          684 passed in 11.70s
+complete repository suite:                      1766 passed, 11 skipped in 13.64s
+```
+
+`compileall` and `git diff --check` passed. The complete Task 9 range contains
+no `bayesprobe/` public-core change and no secret-shaped value. The only
+remaining worktree entry is the pre-existing user-owned untracked `reports/`
+directory.
+
+The final offline CLI again exited zero with two
+`provider_contract_error` traces, one `causal_conformance_error` trace, one
+conformant synthetic trace, and `offline_gate_passed=true`. It contains no
+`qualification_passed` field. No provider, network, Docker, Harbor, Oracle,
+canary, or live benchmark command was run.
