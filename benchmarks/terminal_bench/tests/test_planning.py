@@ -180,6 +180,46 @@ def test_planner_never_falls_back_to_an_imagined_action(probe, execution_context
     assert len(client.chat.completions.calls) == 3
 
 
+def test_provider_controlled_field_locations_are_sanitized_everywhere(
+    probe,
+    execution_context,
+) -> None:
+    secret_field = "sk-abcdefghijklmnop1234"
+    invalid_payload = json.loads(VALID_PLAN)
+    invalid_payload["steps"][0][secret_field] = "provider-controlled-value"
+    invalid_plan = json.dumps(invalid_payload)
+    telemetry: list[dict[str, object]] = []
+    planner, client = _planner(
+        [invalid_plan, invalid_plan, invalid_plan],
+        telemetry=telemetry,
+    )
+
+    with pytest.raises(TerminalPlanError) as raised:
+        planner.plan(probe=probe, context=execution_context, history=())
+
+    repair_payloads = [
+        json.loads(call["messages"][1]["content"])
+        for call in client.chat.completions.calls[1:]
+    ]
+    planner_artifacts = json.dumps(
+        {
+            "exception": str(raised.value),
+            "repair_requests": repair_payloads,
+            "observer_telemetry": telemetry,
+        },
+        sort_keys=True,
+    )
+    assert secret_field not in planner_artifacts
+    expected_errors = [
+        "steps.0.<field>:extra_forbidden",
+        "steps:too_short",
+    ]
+    assert [item["field_errors"] for item in telemetry] == [expected_errors] * 3
+    assert [item["validation_error"] for item in repair_payloads] == [
+        expected_errors
+    ] * 2
+
+
 def test_empty_or_missing_choices_is_repaired_without_indexing_the_response(probe, execution_context) -> None:
     telemetry: list[dict[str, object]] = []
     missing_choices = SimpleNamespace(id="response_missing", choices=[], usage=None)
@@ -282,7 +322,11 @@ def test_planner_instruction_states_causal_execution_semantics(probe, execution_
     assert "Writes and patches are interventions" in instruction
     assert "Successful mutation output is acknowledgement, not verification" in instruction
     assert "Verification must follow the mutation" in instruction
-    assert "Transition predictions must be declared before execution" in instruction
+    assert "Transition predictions are optional; when provided" in instruction
+    assert "they must be declared before execution" in instruction
+    assert "cover every Probe target hypothesis" in instruction
+    assert "differentiated expected transitions" in instruction
+    assert "Transition predictions must be declared" not in instruction
 
 
 def test_planner_request_uses_the_existing_chat_completion_token_parameter(probe, execution_context) -> None:

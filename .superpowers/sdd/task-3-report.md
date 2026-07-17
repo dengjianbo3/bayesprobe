@@ -163,3 +163,117 @@ Result:
 Reviewed the final diff against every Task 3 brief item. No Critical or Important owned-file issue was found.
 
 Residual concern: the nested suite cannot be fully green until the out-of-scope gateway/conformance consumers migrate from the removed `actions` field to role-aware `steps`. Adding an `actions` compatibility property or accepting the old input would violate the explicit Task 3 schema replacement requirement, so no compatibility shim was added.
+
+## Review Fix Cycle 1
+
+### Review findings addressed
+
+- Fixed a security defect where provider-controlled Pydantic location components were copied verbatim into repair payloads and observer telemetry.
+- Changed planner guidance so transition predictions are explicitly optional and their completeness, differentiation, and pre-execution declaration requirements apply only when predictions are provided.
+
+### Root cause and fix
+
+`_safe_field_errors()` previously joined every Pydantic `loc` component with `str(part)`. An unknown extra field name is provider-controlled, so a secret-shaped key could cross the provider boundary through `field_errors` even though raw invalid payload values were redacted.
+
+The minimal fix adds an explicit bounded allow-list of terminal-plan schema field names. Numeric indices are preserved, known field names remain visible, and every other location component becomes the fixed `<field>` placeholder. Error types, set-based deduplication, lexical sorting, and the 32-item cap are unchanged.
+
+### RED evidence
+
+Security regression command:
+
+```text
+uv run pytest tests/test_planning.py::test_provider_controlled_field_locations_are_sanitized_everywhere -q
+```
+
+Result before production changes:
+
+```text
+1 failed in 0.12s
+```
+
+The assertion showed the synthetic `sk-...` field name inside persisted `field_errors` in observer telemetry and repair requests.
+
+Instruction regression command:
+
+```text
+uv run pytest tests/test_planning.py::test_planner_instruction_states_causal_execution_semantics -q
+```
+
+Result before the wording change:
+
+```text
+1 failed in 0.08s
+```
+
+The old instruction lacked the conditional phrase `Transition predictions are optional; when provided`.
+
+### GREEN evidence
+
+Initial focused fix command:
+
+```text
+uv run pytest tests/test_planning.py::test_provider_controlled_field_locations_are_sanitized_everywhere tests/test_planning.py::test_planner_instruction_states_causal_execution_semantics -q
+```
+
+Result:
+
+```text
+2 passed in 0.02s
+```
+
+The security fixture was then nested under `steps[0]` to prove known-name and numeric-index preservation. Its first run exposed the additional legitimate `steps:too_short` Pydantic diagnostic; the expectation was updated to retain both sorted errors. Final nested regression result:
+
+```text
+1 passed in 0.04s
+```
+
+Focused actions/planning command:
+
+```text
+uv run pytest tests/test_actions.py tests/test_planning.py -q
+```
+
+Result:
+
+```text
+69 passed in 0.08s
+```
+
+Environment command:
+
+```text
+uv run pytest tests/test_environment.py -q
+```
+
+Result:
+
+```text
+29 passed in 6.08s
+```
+
+Full nested command, run once for this review cycle:
+
+```text
+uv run pytest -q
+```
+
+Result:
+
+```text
+10 failed, 337 passed in 8.52s
+```
+
+The ten failures remain exactly the documented downstream schema migration breakpoints: nine in `tests/test_gateway.py` and one in `tests/test_conformance.py`, all caused by out-of-scope construction of the removed `actions` field.
+
+### Checks and self-review
+
+- `git diff --check`: exit 0.
+- Changed-file scope before this report append: only `planning.py` and `test_planning.py`.
+- Secret candidate scan found only the deliberate synthetic sentinel in the security regression.
+- Secret scan excluding that exact test sentinel: exit 1 from `rg`, meaning no candidates.
+- Confirmed known schema names and integer indices remain visible as `steps.0`, while the provider-controlled component is `<field>`.
+- Confirmed telemetry and both repair payloads contain only sanitized locations and error types; the exception text contains no provider field name.
+- Confirmed deduplication, deterministic sorting, and the 32-item cap are structurally unchanged.
+- Confirmed inspect/verify instructions no longer imply transition predictions are required.
+
+No Critical or Important issue remains within Task 3 ownership. The only concern is the already documented downstream gateway/conformance migration, which remains intentionally untouched.

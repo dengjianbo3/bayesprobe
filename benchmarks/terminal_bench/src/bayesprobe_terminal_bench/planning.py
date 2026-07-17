@@ -57,6 +57,28 @@ _REDACTION_MARKER = "[REDACTED]"
 _HISTORY_MODEL_FACING_OUTPUT_LIMIT = 4_096
 _HISTORY_ACTION_TEXT_LIMIT = 4_096
 _TERMINAL_PLAN_SCHEMA_VERSION = "terminal_probe_plan:v1"
+_SAFE_PLAN_FIELD_LOCATION_COMPONENTS = frozenset(
+    {
+        "action",
+        "command",
+        "content",
+        "expected_observation",
+        "expected_transition",
+        "hypothesis_id",
+        "mode",
+        "mutates_environment",
+        "patch",
+        "path",
+        "role",
+        "steps",
+        "strip",
+        "timeout_seconds",
+        "transition_predictions",
+        "type",
+        "verification_target",
+    }
+)
+_UNKNOWN_PLAN_FIELD_LOCATION = "<field>"
 _SECRET_VALUE_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}", re.IGNORECASE),
     re.compile(
@@ -423,8 +445,9 @@ def _planner_instruction(*, repair: bool) -> str:
         + " Writes and patches are interventions."
         + " Successful mutation output is acknowledgement, not verification."
         + " Verification must follow the mutation."
-        + " Transition predictions must be declared before execution and must cover"
-        + " exactly the Probe target hypotheses with differentiated expected transitions."
+        + " Transition predictions are optional; when provided, they must be declared"
+        + " before execution, cover every Probe target hypothesis, and have"
+        + " differentiated expected transitions."
         + " Schema: "
         + json.dumps(
             TerminalProbePlan.model_json_schema(),
@@ -456,11 +479,20 @@ def _safe_field_errors(error: ValidationError) -> tuple[str, ...]:
     return tuple(
         sorted(
             {
-                f"{'.'.join(str(part) for part in item['loc'])}:{item['type']}"
+                f"{'.'.join(_safe_field_location_component(part) for part in item['loc'])}"
+                f":{item['type']}"
                 for item in error.errors(include_url=False, include_input=False)
             }
         )
     )[:32]
+
+
+def _safe_field_location_component(value: object) -> str:
+    if type(value) is int:
+        return str(value)
+    if isinstance(value, str) and value in _SAFE_PLAN_FIELD_LOCATION_COMPONENTS:
+        return value
+    return _UNKNOWN_PLAN_FIELD_LOCATION
 
 
 def _content_sha256(content: str) -> str:
