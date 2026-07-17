@@ -106,9 +106,11 @@ is recomputed as:
 min(configured_timeout, floor(remaining_seconds) - 5)
 ```
 
-The result is non-increasing across successive operations. A non-positive
-value raises `budget_error` before starting work. The OpenAI proxy calls
-`base_client.with_options(timeout=current, max_retries=0)` on every request.
+Each operation applies its own configured cap to the shared remaining trial
+time. A smaller command cap does not constrain a later provider request. A
+non-positive result raises `budget_error` before starting work. The OpenAI
+proxy calls `base_client.with_options(timeout=current, max_retries=0)` on every
+request.
 
 The same deadline object reaches the public-core provider, terminal planner,
 Harbor action bridge, and reactive planner. The benchmark-local environment
@@ -212,10 +214,14 @@ reactive observation-action privacy
 
 reactive accounting exception priority
 1 failed: telemetry RuntimeError replaced BudgetExhausted
+
+cross-operation deadline cap independence
+1 failed: command cap leaked into provider timeout (120 != 360)
 ```
 
 Each set passed after its narrow implementation change: `1 passed`,
-`4 passed`, `2 passed`, `1 passed`, `1 passed`, and `1 passed`, respectively.
+`4 passed`, `2 passed`, `1 passed`, `1 passed`, `1 passed`, and `1 passed`,
+respectively.
 
 ### Final focused GREEN
 
@@ -231,7 +237,7 @@ UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run pytest \
   tests/test_direct_agent.py \
   tests/test_public_reuse.py -q
 
-153 passed in 1.73s
+154 passed in 1.44s
 ```
 
 Compilation check:

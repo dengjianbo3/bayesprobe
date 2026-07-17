@@ -95,7 +95,7 @@ def test_shared_budget_fails_immediately_after_provider_token_overflow() -> None
     assert budget.provider_tokens_used == 11
 
 
-def test_trial_deadline_applies_margin_and_nonincreasing_fresh_timeouts() -> None:
+def test_trial_deadline_applies_margin_and_recomputes_fresh_timeouts() -> None:
     from bayesprobe_terminal_bench.deadline import TrialDeadline
 
     now = [100.0]
@@ -111,6 +111,17 @@ def test_trial_deadline_applies_margin_and_nonincreasing_fresh_timeouts() -> Non
     with pytest.raises(BudgetExhausted) as failure:
         deadline.timeout_for(configured_timeout_seconds=360)
     assert failure.value.category == "budget_error"
+
+
+def test_trial_deadline_keeps_configured_operation_caps_independent() -> None:
+    from bayesprobe_terminal_bench.deadline import TrialDeadline
+
+    now = [0.0]
+    deadline = TrialDeadline(timeout_seconds=500, monotonic=lambda: now[0])
+
+    assert deadline.timeout_for(configured_timeout_seconds=120) == 120
+    now[0] = 1.0
+    assert deadline.timeout_for(configured_timeout_seconds=360) == 360
 
 
 def test_trial_error_classification_uses_only_stable_public_categories() -> None:

@@ -23,11 +23,11 @@ class TrialDeadline:
             raise ValueError("trial timeout must be a positive integer")
         self._monotonic = monotonic
         self._deadline = monotonic() + timeout_seconds
-        self._last_timeout: int | None = None
         self._lock = Lock()
 
     def remaining_seconds(self) -> float:
-        return self._deadline - self._monotonic()
+        with self._lock:
+            return self._deadline - self._monotonic()
 
     def timeout_for(self, *, configured_timeout_seconds: int) -> int:
         if (
@@ -35,14 +35,14 @@ class TrialDeadline:
             or configured_timeout_seconds < 1
         ):
             raise ValueError("configured timeout must be a positive integer")
-        remaining = math.floor(self.remaining_seconds()) - self._COMPLETION_MARGIN_SECONDS
         with self._lock:
+            remaining = (
+                math.floor(self._deadline - self._monotonic())
+                - self._COMPLETION_MARGIN_SECONDS
+            )
             timeout = min(configured_timeout_seconds, remaining)
-            if self._last_timeout is not None:
-                timeout = min(timeout, self._last_timeout)
             if timeout <= 0:
                 raise BudgetExhausted("trial deadline exhausted")
-            self._last_timeout = timeout
             return timeout
 
 
