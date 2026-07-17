@@ -63,6 +63,7 @@ def _oracle_job(root: Path, *, failed_task: str | None = None) -> Path:
         root / "config.json",
         {
             "n_attempts": 1,
+            "agents": [{"name": "oracle"}],
             "datasets": [
                 {
                     "name": "terminal-bench/terminal-bench-2",
@@ -82,7 +83,8 @@ def _oracle_job(root: Path, *, failed_task: str | None = None) -> Path:
                         "name": task_id,
                         "digest": FROZEN_GATE_TASK_REFS[task_id],
                         "source": "terminal-bench/terminal-bench-2",
-                    }
+                    },
+                    "agent": {"name": "oracle"},
                 }
                 for task_id in reversed(FROZEN_GATE_TASK_IDS)
             ],
@@ -99,6 +101,8 @@ def _oracle_job(root: Path, *, failed_task: str | None = None) -> Path:
                     "name": slug,
                     "ref": FROZEN_GATE_TASK_REFS[task_id],
                 },
+                "config": {"agent": {"name": "oracle"}},
+                "agent_info": {"name": "oracle"},
                 "verifier_result": {
                     "rewards": {
                         "reward": 0.0 if task_id == failed_task else 1.0,
@@ -184,15 +188,31 @@ def _write_lock(tmp_path: Path) -> Path:
     return path
 
 
-def _live_job(
+def _live_jobs(
     root: Path,
     *,
     rewards: tuple[float, float, float] = (0.0, 0.0, 0.0),
-) -> Path:
+) -> tuple[Path, Path, Path]:
+    jobs: list[Path] = []
     for index, task_id in enumerate(FROZEN_GATE_TASK_IDS):
         slug = task_id.split("/", 1)[1]
-        trial = root / f"{slug}__qualification"
+        job = root / f"{slug}-job"
+        jobs.append(job)
+        trial = job / f"{slug}__qualification"
         shutil.copytree(CONFORMANT_FIXTURE, trial / "agent" / "bayesprobe")
+        summary_path = trial / "agent" / "bayesprobe" / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["runtime_budgets"] = {
+            "max_total_actions": 24,
+            "max_model_calls": 72,
+            "max_provider_tokens": 160000,
+            "max_output_tokens": 8192,
+            "command_timeout_seconds": 120,
+            "provider_timeout_seconds": 360,
+            "signal_output_bytes": 32768,
+            "provider_tokens_used": 60,
+        }
+        _write_json(summary_path, summary)
         _write_json(
             trial / "result.json",
             {
@@ -215,7 +235,7 @@ def _live_job(
                 "finished_at": "2026-07-17T00:01:00Z",
             },
         )
-    return root
+    return jobs[0], jobs[1], jobs[2]
 
 
 def _replace_task_artifacts(job: Path, task_id: str, fixture: Path) -> Path:
@@ -337,6 +357,8 @@ def test_build_causal_lock_freezes_oracle_tasks_budgets_and_provider_identity(
         "signal_output_bytes": 32768,
     }
     assert lock["expected_provider_model"] == "fixture-model-v1"
+    assert _SHA256.fullmatch(str(lock["provider_identity_sha256"]))
+    assert lock["expected_system_fingerprint_available"] is True
     assert lock["expected_system_fingerprint"] == "fixture-fingerprint-v1"
     assert lock["prompt_schema_hashes"] == {
         **contract_identity(),
@@ -375,6 +397,46 @@ def test_causal_lock_writer_rejects_oracle_failure_dirty_tree_or_missing_canary(
             runtime_identity=_runtime(),
             config=_config(),
             provider_identity_path=tmp_path / "missing.json",
+            task_identity_resolver=_cached_task,
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        ("config.json", {"agents": [{"name": "oracle"}, {"name": "other"}]}),
+        ("lock.json", {"agent": {"name": "other"}}),
+        (
+            "break-filter-js-from-html__oracle/result.json",
+            {"config": {"agent": {"name": "other"}}},
+        ),
+        (
+            "break-filter-js-from-html__oracle/result.json",
+            {"agent_info": {"name": "other"}},
+        ),
+    ],
+)
+def test_causal_lock_writer_rejects_non_oracle_provenance(
+    tmp_path: Path,
+    path: str,
+    value: dict[str, object],
+) -> None:
+    job = _oracle_job(tmp_path / "oracle")
+    target = job / path
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    if path == "lock.json":
+        payload["trials"][0].update(value)
+    else:
+        for key, replacement in value.items():
+            payload[key] = replacement
+    _write_json(target, payload)
+
+    with pytest.raises(ValueError, match="Oracle agent"):
+        build_causal_qualification_lock(
+            job_dir=job,
+            config=_config(),
+            runtime_identity=_runtime(),
+            provider_identity_path=_provider_identity_path(tmp_path),
             task_identity_resolver=_cached_task,
         )
 
@@ -451,7 +513,8 @@ def test_offline_cli_never_enters_live_job_validation(
 def test_reward_zero_conformant_trials_pass_live_qualification(tmp_path: Path) -> None:
     report = validate_causal_qualification_job(
         lock_path=_write_lock(tmp_path),
-        job_dir=_live_job(tmp_path / "live"),
+        job_dirs=_live_jobs(tmp_path / "live"),
+        provider_identity_path=_provider_identity_path(tmp_path),
     )
 
     assert report["qualification_passed"] is True
@@ -491,9 +554,10 @@ def test_live_qualification_fails_independently_of_reward(
     expected_failure: str,
 ) -> None:
     lock_path = _write_lock(tmp_path)
-    job = _live_job(tmp_path / "live", rewards=(1.0, 1.0, 1.0))
+    jobs = _live_jobs(tmp_path / "live", rewards=(1.0, 1.0, 1.0))
     task_id = FROZEN_GATE_TASK_IDS[0]
     slug = task_id.split("/", 1)[1]
+    job = jobs[0]
     if case == "reward_one_causal":
         _replace_task_artifacts(
             job,
@@ -550,7 +614,8 @@ def test_live_qualification_fails_independently_of_reward(
 
     report = validate_causal_qualification_job(
         lock_path=lock_path,
-        job_dir=job,
+        job_dirs=jobs,
+        provider_identity_path=_provider_identity_path(tmp_path),
     )
 
     first = report["tasks"][0]
@@ -558,6 +623,124 @@ def test_live_qualification_fails_independently_of_reward(
     assert first["reward"] == (None if case == "missing_verifier" else 1.0)
     assert first["classification"] == expected_classification
     assert expected_failure in first["failures"]
+
+
+def test_live_qualification_rejects_noncanonical_job_shape(tmp_path: Path) -> None:
+    lock_path = _write_lock(tmp_path)
+    jobs = _live_jobs(tmp_path / "live")
+    provider_identity = _provider_identity_path(tmp_path)
+
+    with pytest.raises(ValueError, match="exactly three"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=jobs[:2],
+            provider_identity_path=provider_identity,
+        )
+
+    duplicate = jobs[0]
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=(jobs[0], duplicate, jobs[2]),
+            provider_identity_path=provider_identity,
+        )
+
+    missing = _live_jobs(tmp_path / "missing")
+    shutil.rmtree(missing[1] / "cancel-async-tasks__qualification")
+    with pytest.raises(ValueError, match="exactly one result"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=missing,
+            provider_identity_path=provider_identity,
+        )
+
+    multi = _live_jobs(tmp_path / "multi")
+    shutil.copytree(
+        multi[0] / "break-filter-js-from-html__qualification",
+        multi[0] / "second-result",
+    )
+    with pytest.raises(ValueError, match="exactly one result"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=multi,
+            provider_identity_path=provider_identity,
+        )
+
+    unknown_result = json.loads(
+        (jobs[1] / "cancel-async-tasks__qualification" / "result.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    unknown_result["task_name"] = "terminal-bench/unknown-task"
+    _write_json(jobs[1] / "cancel-async-tasks__qualification" / "result.json", unknown_result)
+    with pytest.raises(ValueError, match="unknown"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=jobs,
+            provider_identity_path=provider_identity,
+        )
+
+
+def test_live_qualification_rejects_provider_artifact_and_budget_drift(
+    tmp_path: Path,
+) -> None:
+    lock_path = _write_lock(tmp_path)
+    jobs = _live_jobs(tmp_path / "live")
+    provider_identity = _provider_identity_path(tmp_path)
+    summary_path = jobs[0] / "break-filter-js-from-html__qualification" / "agent" / "bayesprobe" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["runtime_budgets"]["command_timeout_seconds"] = 119
+    _write_json(summary_path, summary)
+
+    report = validate_causal_qualification_job(
+        lock_path=lock_path,
+        job_dirs=jobs,
+        provider_identity_path=provider_identity,
+    )
+    assert report["qualification_passed"] is False
+    assert "runtime_budget_drift" in report["tasks"][0]["failures"]
+
+    summary["runtime_budgets"]["command_timeout_seconds"] = 120
+    summary["runtime_budgets"]["provider_tokens_used"] = 59
+    _write_json(summary_path, summary)
+    report = validate_causal_qualification_job(
+        lock_path=lock_path,
+        job_dirs=jobs,
+        provider_identity_path=provider_identity,
+    )
+    assert "runtime_budget_drift" in report["tasks"][0]["failures"]
+
+    summary["runtime_budgets"]["provider_tokens_used"] = 60
+    _write_json(summary_path, summary)
+    artifact = json.loads(provider_identity.read_text(encoding="utf-8"))
+    artifact["returned_model"] = "tampered-model"
+    _write_json(provider_identity, artifact)
+    with pytest.raises(ValueError, match="provider identity artifact"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=jobs,
+            provider_identity_path=provider_identity,
+        )
+
+    with pytest.raises(ValueError, match="provider identity artifact"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=jobs,
+            provider_identity_path=tmp_path / "missing-provider-identity.json",
+        )
+
+    drifted_artifact = capture_provider_identity(
+        client=_FakeClient({**_identity_response(), "model": "different-model"}),
+        model=_config().model,
+        base_url=_config().base_url,
+    )
+    drifted_path = write_provider_identity_artifact(tmp_path / "drifted", drifted_artifact)
+    with pytest.raises(ValueError, match="provider identity artifact drift"):
+        validate_causal_qualification_job(
+            lock_path=lock_path,
+            job_dirs=jobs,
+            provider_identity_path=drifted_path,
+        )
 
 
 @pytest.mark.parametrize(

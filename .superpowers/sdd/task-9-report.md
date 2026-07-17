@@ -289,3 +289,100 @@ Task 10 must run the one minimal canary and Oracle only after separate explicit
 authorization and an environment-only provider key. The BayesProbe config must
 then be invoked once per task with the matching locked timeout. No Tasks 10-14
 work was performed here.
+
+## Fix Cycle: Independent Review Corrections
+
+The corrective cycle remains fully offline. It hardens the narrow Stage 0
+adapter without changing public `bayesprobe/`, configuration, dependencies,
+generated artifacts, or the user-owned `reports/` directory.
+
+### Exact Future Job Shape
+
+The shared BayesProbe qualification config must be run exactly three times,
+with one frozen task and one unique Harbor job directory per invocation:
+
+```text
+BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS=1200 harbor run \
+  --config configs/bayesprobe-causal-qualification.yaml \
+  --job-name bayesprobe-causal-qualification-break-filter-js-from-html \
+  --dataset terminal-bench/terminal-bench-2 \
+  --include-task-name terminal-bench/break-filter-js-from-html
+
+BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS=900 harbor run \
+  --config configs/bayesprobe-causal-qualification.yaml \
+  --job-name bayesprobe-causal-qualification-cancel-async-tasks \
+  --dataset terminal-bench/terminal-bench-2 \
+  --include-task-name terminal-bench/cancel-async-tasks
+
+BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS=900 harbor run \
+  --config configs/bayesprobe-causal-qualification.yaml \
+  --job-name bayesprobe-causal-qualification-log-summary-date-ranges \
+  --dataset terminal-bench/terminal-bench-2 \
+  --include-task-name terminal-bench/log-summary-date-ranges
+```
+
+The live validator intentionally requires the same sealed provider identity
+artifact and all three separately generated job directories:
+
+```text
+UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run --offline python \
+  scripts/validate_causal_qualification.py \
+  --historical-fixtures tests/fixtures/historical_traces \
+  --lock .runs/causal-qualification.lock.json \
+  --provider-identity .runs/provider-identity/<sha256>.json \
+  --job .runs/harbor/causal-qualification/bayesprobe/bayesprobe-causal-qualification-break-filter-js-from-html \
+  --job .runs/harbor/causal-qualification/bayesprobe/bayesprobe-causal-qualification-cancel-async-tasks \
+  --job .runs/harbor/causal-qualification/bayesprobe/bayesprobe-causal-qualification-log-summary-date-ranges
+```
+
+No command above was run in this corrective cycle.
+
+### Corrective Design
+
+- Lock writing now requires exactly one `config.json` Oracle agent, Oracle on
+  every `lock.json` trial, and Oracle in both completed result identity
+  locations: `config.agent.name` and `agent_info.name`.
+- `CausalQualificationLock` seals the provider artifact digest plus immutable
+  fingerprint availability/value. The writer uses only the already validated,
+  content-addressed artifact. Live validation reloads that artifact and checks
+  its digest, returned model, and fingerprint availability/value against lock.
+- Live qualification consumes exactly three `--job` directories. Each must
+  contain exactly one result for a unique frozen task; missing, duplicate,
+  unknown, and multi-result shapes are rejected before per-task validation.
+- Successful BayesProbe summaries carry `runtime_budgets` with exactly the
+  seven locked fields plus the uncapped actual `provider_tokens_used`. The
+  validator requires all static values and dynamic provider-token evidence to
+  equal the lock and telemetry, respectively.
+
+### TDD Evidence
+
+The first corrective RED run was performed before implementation:
+
+```text
+UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run --offline pytest \
+  tests/test_experiment_lock.py tests/test_qualification.py tests/test_agent.py -q
+
+21 failed, 45 passed in 1.25s
+```
+
+Failures were the intended missing behavior: extra lock fields,
+`validate_causal_qualification_job()` lacking `job_dirs` and
+`provider_identity_path`, and no `runtime_budgets` in the agent summary. A
+second focused RED check proved that a provider count of `160001` was being
+incorrectly clamped to `160000` in the summary.
+
+After the narrow implementation and self-review fixes, the focused GREEN run
+was:
+
+```text
+UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run --offline pytest \
+  tests/test_experiment_lock.py tests/test_qualification.py tests/test_agent.py -q
+
+71 passed in 1.66s
+```
+
+The focused tests cover Oracle provenance rejection, content-addressed
+provider artifact tamper/drift/missing cases, three-job shape rejection,
+reward-independent result validation, static and dynamic runtime-budget drift,
+and actual provider-token recording. `git diff --check` passed during
+self-review, and `git diff --name-only -- bayesprobe` remained empty.

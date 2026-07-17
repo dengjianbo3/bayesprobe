@@ -123,6 +123,8 @@ def _causal_payload() -> dict[str, object]:
             **plan_contract_identity(),
         },
         "expected_provider_model": "fixture-model-v1",
+        "provider_identity_sha256": "sha256:" + "c" * 64,
+        "expected_system_fingerprint_available": True,
         "expected_system_fingerprint": "fixture-fingerprint-v1",
     }
 
@@ -344,6 +346,18 @@ def test_causal_qualification_lock_rejects_budget_task_and_contract_drift() -> N
         "harbor-observation:v3:schema"
     )
     mutations.append(("prompt/schema", old_signal))
+
+    missing_provider_artifact = _causal_payload()
+    missing_provider_artifact.pop("provider_identity_sha256")
+    mutations.append(("provider_identity_sha256", missing_provider_artifact))
+
+    unavailable_fingerprint_value = _causal_payload()
+    unavailable_fingerprint_value["expected_system_fingerprint_available"] = False
+    mutations.append(("fingerprint availability", unavailable_fingerprint_value))
+
+    available_missing_fingerprint = _causal_payload()
+    available_missing_fingerprint["expected_system_fingerprint"] = None
+    mutations.append(("fingerprint availability", available_missing_fingerprint))
 
     for match, candidate in mutations:
         with pytest.raises(ValidationError, match=match):

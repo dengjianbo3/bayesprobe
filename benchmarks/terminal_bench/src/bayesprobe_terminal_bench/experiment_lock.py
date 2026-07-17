@@ -100,6 +100,8 @@ class CausalQualificationLock(BaseModel):
     budgets: LockedBudgets
     prompt_schema_hashes: dict[str, str]
     expected_provider_model: str
+    provider_identity_sha256: str
+    expected_system_fingerprint_available: bool
     expected_system_fingerprint: str | None
 
     @model_validator(mode="before")
@@ -144,6 +146,13 @@ class CausalQualificationLock(BaseModel):
             raise ValueError("provider fingerprint must be non-empty")
         return value
 
+    @field_validator("provider_identity_sha256")
+    @classmethod
+    def require_provider_identity_digest(cls, value: str) -> str:
+        if not _SHA256.fullmatch(value):
+            raise ValueError("provider identity artifact hash must be sha256")
+        return value
+
     @model_validator(mode="after")
     def require_frozen_contract(self) -> CausalQualificationLock:
         if tuple(task.task_id for task in self.tasks) != FROZEN_GATE_TASK_IDS:
@@ -162,6 +171,10 @@ class CausalQualificationLock(BaseModel):
             raise ValueError("causal qualification requires the official agent timeout")
         if self.budgets != _STAGE0_BUDGETS:
             raise ValueError("causal qualification requires the Stage 0 budgets")
+        if self.expected_system_fingerprint_available != (
+            self.expected_system_fingerprint is not None
+        ):
+            raise ValueError("provider fingerprint availability disagrees with value")
         from bayesprobe_terminal_bench.planning import plan_contract_identity
         from bayesprobe_terminal_bench.provider_contract import contract_identity
 

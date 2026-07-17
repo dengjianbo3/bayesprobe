@@ -65,6 +65,7 @@ def build_causal_qualification_lock(
     root = Path(job_dir)
     job_config = _read_object(root / "config.json")
     job_lock = _read_object(root / "lock.json")
+    _require_oracle_job_config(job_config)
     dataset = _qualification_dataset(job_config)
     resolved = _resolved_tasks(job_lock)
     results = _trial_results_by_task(root)
@@ -80,6 +81,7 @@ def build_causal_qualification_lock(
             or result_task.get("ref") != task_ref
         ):
             raise ValueError("Oracle result task ref does not match the frozen ref")
+        _require_oracle_result(result)
         cached = task_identity_resolver(task_id, task_ref)
         if not isinstance(cached, CachedQualificationTask):
             raise ValueError("cached qualification task identity is invalid")
@@ -127,6 +129,8 @@ def build_causal_qualification_lock(
             **plan_contract_identity(),
         },
         expected_provider_model=provider.returned_model,
+        provider_identity_sha256=provider.content_sha256,
+        expected_system_fingerprint_available=provider.system_fingerprint_available,
         expected_system_fingerprint=provider.system_fingerprint,
     )
     return lock.model_dump(mode="json")
@@ -148,6 +152,30 @@ def _qualification_dataset(job_config: Mapping[str, object]) -> Mapping[str, obj
     return dataset
 
 
+def _require_oracle_job_config(job_config: Mapping[str, object]) -> None:
+    agents = job_config.get("agents")
+    if (
+        not isinstance(agents, list)
+        or len(agents) != 1
+        or not isinstance(agents[0], Mapping)
+        or agents[0].get("name") != "oracle"
+    ):
+        raise ValueError("Oracle agent provenance is invalid")
+
+
+def _require_oracle_result(result: Mapping[str, object]) -> None:
+    config = result.get("config")
+    agent = config.get("agent") if isinstance(config, Mapping) else None
+    agent_info = result.get("agent_info")
+    if (
+        not isinstance(agent, Mapping)
+        or agent.get("name") != "oracle"
+        or not isinstance(agent_info, Mapping)
+        or agent_info.get("name") != "oracle"
+    ):
+        raise ValueError("Oracle agent provenance is invalid")
+
+
 def _resolved_tasks(job_lock: Mapping[str, object]) -> list[tuple[str, str]]:
     harbor = job_lock.get("harbor")
     trials = job_lock.get("trials")
@@ -158,10 +186,16 @@ def _resolved_tasks(job_lock: Mapping[str, object]) -> list[tuple[str, str]]:
     by_id: dict[str, str] = {}
     for trial in trials:
         task = trial.get("task") if isinstance(trial, Mapping) else None
+        agent = trial.get("agent") if isinstance(trial, Mapping) else None
         task_id = task.get("name") if isinstance(task, Mapping) else None
         task_ref = task.get("digest") if isinstance(task, Mapping) else None
-        if not isinstance(task_id, str) or not isinstance(task_ref, str):
-            raise ValueError("Oracle qualification trial identity is invalid")
+        if (
+            not isinstance(task_id, str)
+            or not isinstance(task_ref, str)
+            or not isinstance(agent, Mapping)
+            or agent.get("name") != "oracle"
+        ):
+            raise ValueError("Oracle agent provenance is invalid")
         if task_id in by_id:
             raise ValueError("Oracle qualification contains a duplicate task")
         by_id[task_id] = task_ref

@@ -36,6 +36,10 @@ def _bounded_count(value: object, *, maximum: int) -> int:
     return min(max(value, 0), maximum)
 
 
+def _nonnegative_count(value: object) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
 class BayesProbeHarborAgentError(RuntimeError):
     def __init__(self, category: str, *, configuration: bool = False) -> None:
         self.category = category
@@ -142,6 +146,18 @@ class BayesProbeHarborAgent(BaseAgent):
                 getattr(session.budget, "model_calls_used", None),
                 maximum=config.max_model_calls,
             ),
+            "runtime_budgets": {
+                "max_total_actions": config.max_total_actions,
+                "max_model_calls": config.max_model_calls,
+                "max_provider_tokens": config.max_provider_tokens,
+                "max_output_tokens": config.max_output_tokens,
+                "command_timeout_seconds": config.command_timeout_seconds,
+                "provider_timeout_seconds": config.provider_timeout_seconds,
+                "signal_output_bytes": config.signal_output_bytes,
+                "provider_tokens_used": _nonnegative_count(
+                    getattr(session.budget, "provider_tokens_used", None),
+                ),
+            },
         }
         if not self._emit_trajectory(
             artifacts=session.artifacts,

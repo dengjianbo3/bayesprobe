@@ -14,6 +14,7 @@ from bayesprobe_terminal_bench.conformance import (
     validate_trial_trace,
 )
 from bayesprobe_terminal_bench.experiment_lock import CausalQualificationLock
+from capture_provider_identity import load_provider_identity_artifact
 from freeze_historical_traces import FROZEN_TASKS, HistoricalTraceManifest
 
 
@@ -110,7 +111,8 @@ def replay_offline_gate(
 def validate_causal_qualification_job(
     *,
     lock_path: Path,
-    job_dir: Path,
+    job_dirs: Sequence[Path],
+    provider_identity_path: Path,
 ) -> dict[str, object]:
     try:
         lock = CausalQualificationLock.model_validate_json(
@@ -118,7 +120,14 @@ def validate_causal_qualification_job(
         )
     except Exception:
         raise ValueError("causal qualification lock is invalid") from None
-    results = _trial_results(Path(job_dir))
+    _validate_provider_identity_artifact(
+        lock=lock,
+        provider_identity_path=provider_identity_path,
+    )
+    results = _trial_results(
+        job_dirs,
+        locked_task_ids=tuple(task.task_id for task in lock.tasks),
+    )
     task_reports = [
         _validate_live_task(
             lock=lock,
@@ -135,9 +144,8 @@ def validate_causal_qualification_job(
         "expected_system_fingerprint": lock.expected_system_fingerprint,
         "budgets": lock.budgets.model_dump(mode="json"),
         "tasks": task_reports,
-        "qualification_passed": (
-            len(results) == len(lock.tasks)
-            and all(report["passed"] is True for report in task_reports)
+        "qualification_passed": all(
+            report["passed"] is True for report in task_reports
         ),
     }
 
@@ -196,6 +204,7 @@ def _validate_live_task(
     model_calls, provider_tokens, identity_matches = _provider_accounting(
         artifact_root / "provider_telemetry.jsonl",
         expected_model=lock.expected_provider_model,
+        expected_fingerprint_available=lock.expected_system_fingerprint_available,
         expected_fingerprint=lock.expected_system_fingerprint,
     )
     if not identity_matches:
@@ -205,6 +214,12 @@ def _validate_live_task(
         "terminal_actions",
         fallback=conformance.actions,
     )
+    if not _runtime_budgets_match(
+        artifact_root / "summary.json",
+        locked_budgets=lock.budgets.model_dump(mode="json"),
+        provider_tokens=provider_tokens,
+    ):
+        failures.append("runtime_budget_drift")
     if (
         actions > lock.budgets.max_total_actions
         or model_calls > lock.budgets.max_model_calls
@@ -343,12 +358,22 @@ def _verify_synthetic_fixture(fixture: Path) -> None:
 
 
 def _trial_results(
-    job_dir: Path,
+    job_dirs: Sequence[Path],
+    *,
+    locked_task_ids: tuple[str, str, str],
 ) -> dict[str, tuple[Path, Mapping[str, object]]]:
-    if job_dir.is_symlink() or not job_dir.is_dir():
-        raise ValueError("causal qualification job must be a real directory")
+    if len(job_dirs) != 3:
+        raise ValueError(
+            "causal qualification requires exactly three --job directories"
+        )
     results: dict[str, tuple[Path, Mapping[str, object]]] = {}
-    for path in sorted(job_dir.glob("*/result.json")):
+    for job_dir in job_dirs:
+        if job_dir.is_symlink() or not job_dir.is_dir():
+            raise ValueError("causal qualification job must be a real directory")
+        paths = sorted(job_dir.glob("*/result.json"))
+        if len(paths) != 1:
+            raise ValueError("each qualification job must contain exactly one result")
+        path = paths[0]
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -357,10 +382,15 @@ def _trial_results(
             raise ValueError("causal qualification result is invalid")
         task_id = payload.get("task_name")
         if not isinstance(task_id, str):
-            continue
+            raise ValueError("qualification result task is invalid")
+        if task_id not in locked_task_ids:
+            raise ValueError("qualification result task is unknown")
         if task_id in results:
             raise ValueError(f"duplicate qualification result for {task_id}")
         results[task_id] = (path.parent, payload)
+    missing = set(locked_task_ids) - set(results)
+    if missing:
+        raise ValueError(f"missing qualification result for {sorted(missing)}")
     return results
 
 
@@ -399,6 +429,7 @@ def _provider_accounting(
     path: Path,
     *,
     expected_model: str,
+    expected_fingerprint_available: bool,
     expected_fingerprint: str | None,
 ) -> tuple[int, int, bool]:
     calls = 0
@@ -423,10 +454,11 @@ def _provider_accounting(
             identity_matches = False
         else:
             tokens += total
+        fingerprint = record.get("system_fingerprint")
         if (
             record.get("model") != expected_model
-            or "system_fingerprint" not in record
-            or record.get("system_fingerprint") != expected_fingerprint
+            or (fingerprint is not None) != expected_fingerprint_available
+            or fingerprint != expected_fingerprint
         ):
             identity_matches = False
     if calls == 0:
@@ -443,25 +475,81 @@ def _declared_counter(path: Path, name: str, *, fallback: int) -> int:
     return value if type(value) is int and value >= 0 else fallback
 
 
+def _runtime_budgets_match(
+    path: Path,
+    *,
+    locked_budgets: Mapping[str, object],
+    provider_tokens: int,
+) -> bool:
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    runtime_budgets = (
+        summary.get("runtime_budgets") if isinstance(summary, Mapping) else None
+    )
+    expected = {**locked_budgets, "provider_tokens_used": provider_tokens}
+    return (
+        isinstance(runtime_budgets, Mapping)
+        and set(runtime_budgets) == set(expected)
+        and all(
+            type(runtime_budgets.get(name)) is int and runtime_budgets[name] == value
+            for name, value in expected.items()
+        )
+    )
+
+
+def _validate_provider_identity_artifact(
+    *,
+    lock: CausalQualificationLock,
+    provider_identity_path: Path,
+) -> None:
+    try:
+        artifact = load_provider_identity_artifact(provider_identity_path)
+    except Exception:
+        raise ValueError("provider identity artifact is invalid") from None
+    if (
+        artifact.content_sha256 != lock.provider_identity_sha256
+        or artifact.returned_model != lock.expected_provider_model
+        or artifact.system_fingerprint_available
+        != lock.expected_system_fingerprint_available
+        or artifact.system_fingerprint != lock.expected_system_fingerprint
+    ):
+        raise ValueError("provider identity artifact drift")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--historical-fixtures", required=True, type=Path)
     parser.add_argument("--offline-only", action="store_true")
     parser.add_argument("--lock", type=Path)
-    parser.add_argument("--job", type=Path)
+    parser.add_argument("--job", action="append", type=Path)
+    parser.add_argument("--provider-identity", type=Path)
     args = parser.parse_args(argv)
     offline = replay_offline_gate(historical_fixtures=args.historical_fixtures)
     if args.offline_only:
-        if args.lock is not None or args.job is not None:
+        if (
+            args.lock is not None
+            or args.job is not None
+            or args.provider_identity is not None
+        ):
             parser.error("--offline-only cannot be combined with --lock or --job")
         report = offline
         passed = bool(report["offline_gate_passed"])
     else:
-        if args.lock is None or args.job is None:
-            parser.error("live validation requires --lock and --job")
+        if (
+            args.lock is None
+            or args.job is None
+            or len(args.job) != 3
+            or args.provider_identity is None
+        ):
+            parser.error(
+                "live validation requires --lock, --provider-identity, and exactly three --job values"
+            )
         live = validate_causal_qualification_job(
             lock_path=args.lock,
-            job_dir=args.job,
+            job_dirs=args.job,
+            provider_identity_path=args.provider_identity,
         )
         report = {
             **offline,

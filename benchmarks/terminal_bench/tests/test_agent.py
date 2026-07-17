@@ -30,6 +30,7 @@ _BAYESPROBE_METADATA = {
     "bayesprobe_cycles",
     "terminal_actions",
     "model_calls",
+    "runtime_budgets",
 }
 WORKTREE_DIR = Path(__file__).resolve().parents[3]
 
@@ -186,6 +187,16 @@ async def test_agent_runs_the_real_session_once_in_a_worker_and_records_safe_sum
         "bayesprobe_cycles": 2,
         "terminal_actions": 3,
         "model_calls": 4,
+        "runtime_budgets": {
+            "max_total_actions": 24,
+            "max_model_calls": 72,
+            "max_provider_tokens": 160000,
+            "max_output_tokens": 8192,
+            "command_timeout_seconds": 120,
+            "provider_timeout_seconds": 360,
+            "signal_output_bytes": 32768,
+            "provider_tokens_used": 0,
+        },
     }
     assert set(context.metadata) - {"harbor_owned"} == _BAYESPROBE_METADATA
     assert artifacts.summaries == [
@@ -195,11 +206,39 @@ async def test_agent_runs_the_real_session_once_in_a_worker_and_records_safe_sum
             "bayesprobe_cycles": 2,
             "terminal_actions": 3,
             "model_calls": 4,
+            "runtime_budgets": {
+                "max_total_actions": 24,
+                "max_model_calls": 72,
+                "max_provider_tokens": 160000,
+                "max_output_tokens": 8192,
+                "command_timeout_seconds": 120,
+                "provider_timeout_seconds": 360,
+                "signal_output_bytes": 32768,
+                "provider_tokens_used": 0,
+            },
         }
     ]
     assert _API_KEY not in repr(_agent(tmp_path))
     assert _API_KEY not in repr(context.metadata)
     assert _API_KEY not in repr(artifacts.summaries)
+
+
+@pytest.mark.asyncio
+async def test_agent_records_actual_provider_tokens_in_runtime_budget_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = SpyArtifacts()
+    session = _session(runner=SpyRunner(), artifacts=artifacts)
+    session.budget.provider_tokens_used = 160001
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.agent.build_live_session",
+        lambda **kwargs: session,
+    )
+
+    await _agent(tmp_path).run("solve the task", object(), AgentContext())
+
+    assert artifacts.summaries[0]["runtime_budgets"]["provider_tokens_used"] == 160001
 
 
 @pytest.mark.asyncio
@@ -253,7 +292,9 @@ async def test_agent_replaces_invalid_metadata_with_its_bounded_summary(
 
     assert context.metadata == artifacts.summaries[0]
     assert set(context.metadata) == _BAYESPROBE_METADATA
-    assert all(isinstance(value, (str, int)) for value in context.metadata.values())
+    assert all(
+        isinstance(value, (str, int, dict)) for value in context.metadata.values()
+    )
 
 
 @pytest.mark.asyncio
