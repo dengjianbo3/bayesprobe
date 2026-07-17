@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from harbor.agents.base import BaseAgent
@@ -9,7 +10,11 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from bayesprobe_terminal_bench import __version__
-from bayesprobe_terminal_bench.config import TerminalBenchConfig
+from bayesprobe_terminal_bench.artifacts import TrialArtifactStore
+from bayesprobe_terminal_bench.config import (
+    TerminalBenchConfig,
+    classify_trial_error,
+)
 from bayesprobe_terminal_bench.runner_factory import build_live_session
 
 
@@ -31,7 +36,14 @@ def _bounded_count(value: object, *, maximum: int) -> int:
 
 
 class BayesProbeHarborAgentError(RuntimeError):
-    pass
+    def __init__(self, category: str, *, configuration: bool = False) -> None:
+        self.category = category
+        prefix = (
+            "BayesProbe Harbor agent configuration failed"
+            if configuration
+            else "BayesProbe Harbor agent failed"
+        )
+        super().__init__(f"{prefix}: {category}")
 
 
 class BayesProbeHarborAgent(BaseAgent):
@@ -56,13 +68,18 @@ class BayesProbeHarborAgent(BaseAgent):
             config, api_key = TerminalBenchConfig.from_sources(self.extra_env)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
             configuration_error = BayesProbeHarborAgentError(
-                "BayesProbe Harbor agent configuration failed"
+                classify_trial_error(error),
+                configuration=True,
             )
         if configuration_error is not None:
             raise configuration_error from None
 
+        artifacts = TrialArtifactStore(
+            Path(self.logs_dir) / "bayesprobe",
+            restricted_values=(api_key,),
+        )
         execution_error: BayesProbeHarborAgentError | None = None
         try:
             session = build_live_session(
@@ -74,14 +91,18 @@ class BayesProbeHarborAgent(BaseAgent):
                 logs_dir=self.logs_dir,
                 session_id=self.session_id,
                 context_id=str(self.context_id) if self.context_id is not None else None,
+                artifacts=artifacts,
             )
+            artifacts = session.artifacts
             result = await asyncio.to_thread(session.runner.run_question, session.input)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            execution_error = BayesProbeHarborAgentError(
-                "BayesProbe Harbor agent execution failed"
+        except Exception as error:
+            category = classify_trial_error(error)
+            artifacts.append_error(
+                {"category": category, "error_type": type(error).__name__}
             )
+            execution_error = BayesProbeHarborAgentError(category)
         if execution_error is not None:
             raise execution_error from None
 

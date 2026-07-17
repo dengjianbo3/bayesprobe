@@ -57,11 +57,99 @@ def test_shared_budget_rejects_concurrent_attempts_above_hard_limit() -> None:
     assert budget.actions_used == 8
 
 
+def test_shared_budget_accumulates_provider_tokens_thread_safely() -> None:
+    budget = RunBudget(
+        max_actions=1,
+        max_model_calls=1,
+        max_provider_tokens=1_000,
+    )
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        totals = list(executor.map(budget.record_provider_usage, [10] * 40))
+
+    assert sorted(totals) == list(range(10, 401, 10))
+    assert budget.provider_tokens_used == 400
+
+
+@pytest.mark.parametrize("usage", [None, True, 1.5, "1", -1])
+def test_shared_budget_rejects_invalid_provider_usage_without_coercion(
+    usage: object,
+) -> None:
+    budget = RunBudget(max_provider_tokens=100)
+
+    with pytest.raises(BudgetExhausted) as failure:
+        budget.record_provider_usage(usage)
+
+    assert failure.value.category == "provider_identity_error"
+    assert budget.provider_tokens_used == 0
+
+
+def test_shared_budget_fails_immediately_after_provider_token_overflow() -> None:
+    budget = RunBudget(max_provider_tokens=10)
+    assert budget.record_provider_usage(6) == 6
+
+    with pytest.raises(BudgetExhausted) as failure:
+        budget.record_provider_usage(5)
+
+    assert failure.value.category == "budget_error"
+    assert budget.provider_tokens_used == 11
+
+
+def test_trial_deadline_applies_margin_and_nonincreasing_fresh_timeouts() -> None:
+    from bayesprobe_terminal_bench.deadline import TrialDeadline
+
+    now = [100.0]
+    deadline = TrialDeadline(timeout_seconds=100, monotonic=lambda: now[0])
+
+    assert deadline.timeout_for(configured_timeout_seconds=360) == 95
+    now[0] = 101.1
+    assert deadline.timeout_for(configured_timeout_seconds=360) == 93
+    now[0] = 110.0
+    assert deadline.timeout_for(configured_timeout_seconds=60) == 60
+
+    now[0] = 195.0
+    with pytest.raises(BudgetExhausted) as failure:
+        deadline.timeout_for(configured_timeout_seconds=360)
+    assert failure.value.category == "budget_error"
+
+
+def test_trial_error_classification_uses_only_stable_public_categories() -> None:
+    from bayesprobe_terminal_bench.causal import CausalTraceError
+    from bayesprobe_terminal_bench.config import (
+        ProviderIdentityError,
+        classify_trial_error,
+    )
+    from bayesprobe_terminal_bench.environment import PolicyViolation
+    from bayesprobe_terminal_bench.planning import TerminalPlanError
+    from bayesprobe_terminal_bench.provider_contract import ProviderContractError
+
+    cases = [
+        (
+            ProviderContractError(stage="terminal_task_frame", attempts=3),
+            "provider_contract_error",
+        ),
+        (
+            TerminalPlanError(category="provider_error", attempts=1),
+            "provider_transport_error",
+        ),
+        (ProviderIdentityError("provider model drift"), "provider_identity_error"),
+        (BudgetExhausted("deadline exhausted"), "budget_error"),
+        (RuntimeError("adapter failed"), "adapter_error"),
+        (CausalTraceError("lineage failed"), "causal_conformance_error"),
+        (PolicyViolation("denied"), "policy_error"),
+    ]
+
+    assert [classify_trial_error(error) for error, _ in cases] == [
+        category for _, category in cases
+    ]
+
+
 def test_extra_env_wins_and_config_never_serializes_key_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BAYESPROBE_BENCH_API_KEY", "host-secret")
     config, api_key = TerminalBenchConfig.from_sources({
         "BAYESPROBE_BENCH_API_KEY": "one-time-provider-secret",
         "BAYESPROBE_BENCH_MODEL": "deepseek-v4-flash",
+        "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS": "900",
     })
     assert api_key == "one-time-provider-secret"
     assert config.api_key_env == "BAYESPROBE_BENCH_API_KEY"
@@ -75,6 +163,7 @@ def test_config_uses_exact_defaults_and_source_overrides() -> None:
         "BAYESPROBE_BENCH_MODEL": "model",
         "BAYESPROBE_BENCH_BASE_URL": "https://provider.example/v1 ",
         "BAYESPROBE_BENCH_LOCK_PATH": ".runs/custom.lock.json",
+        "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS": "900",
     })
 
     assert config.base_url == "https://provider.example/v1"
@@ -87,7 +176,9 @@ def test_config_uses_exact_defaults_and_source_overrides() -> None:
     assert config.max_actions_per_probe == 3
     assert config.max_total_actions == 24
     assert config.max_model_calls == 72
+    assert config.max_provider_tokens == 160_000
     assert config.signal_output_bytes == 32_768
+    assert config.task_timeout_seconds == 900
 
 
 def test_default_smoke_model_budget_covers_all_cycle_repair_paths() -> None:
@@ -108,11 +199,19 @@ def test_default_smoke_model_budget_covers_all_cycle_repair_paths() -> None:
     )
 
 
-@pytest.mark.parametrize("name", ["BAYESPROBE_BENCH_MODEL", "BAYESPROBE_BENCH_API_KEY"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "BAYESPROBE_BENCH_MODEL",
+        "BAYESPROBE_BENCH_API_KEY",
+        "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS",
+    ],
+)
 def test_config_requires_model_and_api_key(name: str) -> None:
     source = {
         "BAYESPROBE_BENCH_API_KEY": "secret",
         "BAYESPROBE_BENCH_MODEL": "model",
+        "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS": "900",
     }
     source[name] = "  "
 

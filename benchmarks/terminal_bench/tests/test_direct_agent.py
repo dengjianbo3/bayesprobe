@@ -13,13 +13,17 @@ from harbor.models.agent.context import AgentContext
 from bayesprobe_terminal_bench.direct_agent import (
     DirectHarborAgent,
     DirectHarborAgentError,
+    build_direct_session,
 )
+from bayesprobe_terminal_bench.config import TerminalBenchConfig
+from bayesprobe_terminal_bench.provider_contract import ProviderContractError
 
 
 _API_KEY = "one-time-direct-secret"
 _EXTRA_ENV = {
     "BAYESPROBE_BENCH_API_KEY": _API_KEY,
     "BAYESPROBE_BENCH_MODEL": "test-model",
+    "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS": "900",
 }
 WORKTREE_DIR = Path(__file__).resolve().parents[3]
 
@@ -27,9 +31,13 @@ WORKTREE_DIR = Path(__file__).resolve().parents[3]
 class _Artifacts:
     def __init__(self) -> None:
         self.summaries: list[dict[str, object]] = []
+        self.errors: list[dict[str, object]] = []
 
     def write_summary(self, payload: dict[str, object]) -> None:
         self.summaries.append(dict(payload))
+
+    def append_error(self, payload: dict[str, object]) -> None:
+        self.errors.append(dict(payload))
 
 
 class _Controller:
@@ -78,6 +86,41 @@ def test_exact_uv_project_command_imports_direct_agent() -> None:
     assert completed.stdout.strip() == (
         "bayesprobe_terminal_bench.direct_agent:DirectHarborAgent"
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_session_shares_budget_deadline_and_provider_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.direct_agent.validate_runtime_lock",
+        lambda *args, **kwargs: {
+            "expected_provider_model": "test-model",
+            "expected_system_fingerprint": "fp-locked",
+            "agent_timeout_seconds": 100,
+        },
+    )
+    config = TerminalBenchConfig(
+        model="test-model",
+        lock_path=tmp_path / "unused.lock.json",
+        task_timeout_seconds=100,
+    )
+
+    session = build_direct_session(
+        config=config,
+        api_key=_API_KEY,
+        environment=object(),
+        event_loop=asyncio.get_running_loop(),
+        logs_dir=tmp_path / "logs",
+        session_id="session/id",
+    )
+
+    assert session.controller._budget is session.budget
+    assert session.controller._planner._budget is session.budget
+    assert session.budget.max_provider_tokens == 160_000
+    assert session.controller._planner._client._deadline is session.deadline
+    assert session.controller._bridge._deadline is session.deadline
 
 
 @pytest.mark.asyncio
@@ -168,11 +211,47 @@ async def test_direct_agent_exposes_stable_error_without_secret(
     with pytest.raises(DirectHarborAgentError) as failure:
         await _agent(tmp_path).run("solve it", object(), context)
 
-    assert str(failure.value) == "Direct Harbor agent execution failed"
+    assert str(failure.value) == "Direct Harbor agent failed: adapter_error"
+    assert failure.value.category == "adapter_error"
     assert failure.value.__cause__ is None
     assert failure.value.__context__ is None
     assert _API_KEY not in repr(failure.value)
     assert context.metadata == {"harbor_owned": "preserved"}
+
+
+@pytest.mark.asyncio
+async def test_direct_agent_persists_classified_post_artifact_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = _Artifacts()
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.direct_agent.TrialArtifactStore",
+        lambda *args, **kwargs: artifacts,
+    )
+
+    def fail_after_artifacts(**kwargs: object) -> object:
+        assert kwargs["artifacts"] is artifacts
+        raise ProviderContractError(stage="react_step", attempts=3)
+
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.direct_agent.build_direct_session",
+        fail_after_artifacts,
+    )
+
+    with pytest.raises(DirectHarborAgentError) as failure:
+        await _agent(tmp_path).run("solve it", object(), AgentContext())
+
+    assert str(failure.value) == (
+        "Direct Harbor agent failed: provider_contract_error"
+    )
+    assert failure.value.category == "provider_contract_error"
+    assert artifacts.errors == [
+        {
+            "category": "provider_contract_error",
+            "error_type": "ProviderContractError",
+        }
+    ]
 
 
 @pytest.mark.asyncio

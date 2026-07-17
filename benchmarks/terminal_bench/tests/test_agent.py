@@ -15,12 +15,14 @@ from bayesprobe_terminal_bench.agent import (
     BayesProbeHarborAgent,
     BayesProbeHarborAgentError,
 )
+from bayesprobe_terminal_bench.provider_contract import ProviderContractError
 
 
 _API_KEY = "one-time-agent-secret"
 _EXTRA_ENV = {
     "BAYESPROBE_BENCH_API_KEY": _API_KEY,
     "BAYESPROBE_BENCH_MODEL": "deepseek-v4-flash",
+    "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS": "900",
 }
 _BAYESPROBE_METADATA = {
     "bayesprobe_run_id",
@@ -35,9 +37,13 @@ WORKTREE_DIR = Path(__file__).resolve().parents[3]
 class SpyArtifacts:
     def __init__(self) -> None:
         self.summaries: list[dict[str, object]] = []
+        self.errors: list[dict[str, object]] = []
 
     def write_summary(self, payload: dict[str, object]) -> None:
         self.summaries.append(dict(payload))
+
+    def append_error(self, payload: dict[str, object]) -> None:
+        self.errors.append(dict(payload))
 
 
 class SpyRunner:
@@ -93,9 +99,11 @@ def _raise_hostile_failure() -> None:
 def _assert_stable_failure(
     failure: BayesProbeHarborAgentError,
     expected_message: str,
+    expected_category: str,
 ) -> None:
     assert type(failure) is BayesProbeHarborAgentError
     assert str(failure) == expected_message
+    assert failure.category == expected_category
     assert failure.__cause__ is None
     assert failure.__context__ is None
     for value in (
@@ -263,9 +271,80 @@ async def test_agent_propagates_runner_failure_without_writing_or_leaking_secret
     with pytest.raises(BayesProbeHarborAgentError) as failure:
         await _agent(tmp_path).run("solve the task", object(), context)
 
-    _assert_stable_failure(failure.value, "BayesProbe Harbor agent execution failed")
+    _assert_stable_failure(
+        failure.value,
+        "BayesProbe Harbor agent failed: adapter_error",
+        "adapter_error",
+    )
     assert context.metadata == {"harbor_owned": "preserved"}
     assert artifacts.summaries == []
+    assert artifacts.errors == [
+        {"category": "adapter_error", "error_type": "HostileFailure"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_persists_provider_contract_category_before_rethrow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingRunner:
+        def run_question(self, input: object) -> object:
+            raise ProviderContractError(stage="terminal_task_frame", attempts=3)
+
+    artifacts = SpyArtifacts()
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.agent.build_live_session",
+        lambda **kwargs: _session(runner=FailingRunner(), artifacts=artifacts),
+    )
+
+    with pytest.raises(BayesProbeHarborAgentError) as failure:
+        await _agent(tmp_path).run("solve the task", object(), AgentContext())
+
+    _assert_stable_failure(
+        failure.value,
+        "BayesProbe Harbor agent failed: provider_contract_error",
+        "provider_contract_error",
+    )
+    assert artifacts.errors == [
+        {
+            "category": "provider_contract_error",
+            "error_type": "ProviderContractError",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_persists_classified_post_artifact_construction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = SpyArtifacts()
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.agent.TrialArtifactStore",
+        lambda *args, **kwargs: artifacts,
+        raising=False,
+    )
+
+    def fail_after_artifacts(**kwargs: object) -> object:
+        assert kwargs["artifacts"] is artifacts
+        raise ProviderContractError(stage="terminal_probe_design", attempts=3)
+
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.agent.build_live_session",
+        fail_after_artifacts,
+    )
+
+    with pytest.raises(BayesProbeHarborAgentError) as failure:
+        await _agent(tmp_path).run("solve the task", object(), AgentContext())
+
+    assert failure.value.category == "provider_contract_error"
+    assert artifacts.errors == [
+        {
+            "category": "provider_contract_error",
+            "error_type": "ProviderContractError",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -294,7 +373,11 @@ async def test_agent_raises_stable_error_for_hostile_config_failure(
     with pytest.raises(BayesProbeHarborAgentError) as failure:
         await agent.run("solve the task", object(), context)
 
-    _assert_stable_failure(failure.value, "BayesProbe Harbor agent configuration failed")
+    _assert_stable_failure(
+        failure.value,
+        "BayesProbe Harbor agent configuration failed: adapter_error",
+        "adapter_error",
+    )
     assert not started
     assert context.metadata == {"harbor_owned": "preserved"}
 
@@ -316,7 +399,11 @@ async def test_agent_raises_stable_error_for_hostile_session_failure(
     with pytest.raises(BayesProbeHarborAgentError) as failure:
         await _agent(tmp_path).run("solve the task", object(), context)
 
-    _assert_stable_failure(failure.value, "BayesProbe Harbor agent execution failed")
+    _assert_stable_failure(
+        failure.value,
+        "BayesProbe Harbor agent failed: adapter_error",
+        "adapter_error",
+    )
     assert context.metadata == {"harbor_owned": "preserved"}
 
 

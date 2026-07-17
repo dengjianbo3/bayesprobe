@@ -12,7 +12,12 @@ from bayesprobe_terminal_bench.actions import (
     ShellAction,
     WriteFileAction,
 )
-from bayesprobe_terminal_bench.config import RunBudget, TerminalBenchConfig
+from bayesprobe_terminal_bench.config import (
+    BudgetExhausted,
+    ProviderIdentityError,
+    RunBudget,
+    TerminalBenchConfig,
+)
 from bayesprobe_terminal_bench.environment import PolicyViolation
 from bayesprobe_terminal_bench.react import (
     OpenAICompatibleReActPlanner,
@@ -26,6 +31,8 @@ from bayesprobe_terminal_bench.react import (
 def _response(content: str) -> SimpleNamespace:
     return SimpleNamespace(
         id="response-1",
+        model="test-model",
+        system_fingerprint="fp-test",
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(content=content),
@@ -182,6 +189,46 @@ def test_planner_repairs_invalid_json_once_and_charges_both_calls() -> None:
     assert len(client.chat.completions.requests) == 2
 
 
+def test_planner_uses_initial_plus_two_repairs_with_safe_field_telemetry() -> None:
+    secret = "sk-react-secret-1234567890"
+    client = _Client(
+        [
+            _response("not-json"),
+            _response(json.dumps({"thought_summary": secret, "actions": []})),
+            _response(json.dumps({"done": True, "completion_summary": None})),
+        ]
+    )
+    budget = RunBudget(max_model_calls=3, max_provider_tokens=100)
+    telemetry: list[dict[str, object]] = []
+    planner = OpenAICompatibleReActPlanner(
+        config=_config(),
+        budget=budget,
+        client=client,
+        invocation_observer=telemetry.append,
+        expected_provider_model="test-model",
+        expected_system_fingerprint="fp-test",
+    )
+
+    with pytest.raises(ReActPlanError) as failure:
+        planner.next_step(instruction="repair the task", history=())
+
+    assert failure.value.category == "provider_contract_error"
+    assert failure.value.attempts == 3
+    assert budget.model_calls_used == 3
+    assert budget.provider_tokens_used == 45
+    assert len(client.chat.completions.requests) == 3
+    assert [item["attempt_index"] for item in telemetry] == [0, 1, 2]
+    assert all(item["field_errors"] for item in telemetry)
+    assert all(item["response_sha256"] for item in telemetry)
+    assert secret not in json.dumps(telemetry)
+
+    repair_payloads = [
+        json.loads(request["messages"][1]["content"])
+        for request in client.chat.completions.requests[1:]
+    ]
+    assert all(secret not in json.dumps(payload) for payload in repair_payloads)
+
+
 def test_planner_does_not_retry_provider_errors() -> None:
     client = _Client([RuntimeError("secret provider detail")])
     budget = RunBudget(max_actions=3, max_model_calls=4)
@@ -195,6 +242,51 @@ def test_planner_does_not_retry_provider_errors() -> None:
         planner.next_step(instruction="repair the task", history=())
 
     assert budget.model_calls_used == 1
+    assert len(client.chat.completions.requests) == 1
+
+
+def test_planner_records_usage_before_return_and_stops_on_token_overflow() -> None:
+    client = _Client(
+        [
+            _response(
+                json.dumps(
+                    {
+                        "thought_summary": "inspect files",
+                        "actions": [
+                            {
+                                "type": "shell",
+                                "command": "pwd",
+                                "timeout_seconds": 120,
+                                "mutates_environment": False,
+                            }
+                        ],
+                        "done": False,
+                        "completion_summary": None,
+                    }
+                )
+            )
+        ]
+    )
+    budget = RunBudget(max_model_calls=4, max_provider_tokens=10)
+
+    def fail_observer(payload: object) -> None:
+        raise RuntimeError("telemetry write failed")
+
+    planner = OpenAICompatibleReActPlanner(
+        config=_config(),
+        budget=budget,
+        client=client,
+        invocation_observer=fail_observer,
+        expected_provider_model="test-model",
+        expected_system_fingerprint="fp-test",
+    )
+
+    with pytest.raises(BudgetExhausted) as failure:
+        planner.next_step(instruction="repair the task", history=())
+
+    assert failure.value.category == "budget_error"
+    assert budget.model_calls_used == 1
+    assert budget.provider_tokens_used == 15
     assert len(client.chat.completions.requests) == 1
 
 
@@ -268,6 +360,104 @@ def test_controller_executes_shared_actions_and_passes_real_history() -> None:
     assert planner.histories[1][0].stdout == "ok"
     assert len(artifacts.plans) == 2
     assert len(artifacts.observations) == 1
+    assert "thought_summary" not in json.dumps(artifacts.plans)
+
+
+def test_controller_plan_artifacts_omit_action_payloads_and_redact_completion() -> None:
+    secret = "sk-react-artifact-1234567890"
+    planner = _Planner(
+        [
+            ReActStep(
+                thought_summary="write the repair",
+                actions=(
+                    WriteFileAction(
+                        path="/app/result.txt",
+                        content=f"{secret}\nread /solution/answer.py",
+                    ),
+                ),
+                done=False,
+            ),
+            ReActStep(
+                thought_summary="verified",
+                actions=(),
+                done=True,
+                completion_summary=f"done with {secret} at /solution/answer.py",
+            ),
+        ]
+    )
+    artifacts = _Artifacts()
+    controller = ReActController(
+        planner=planner,
+        bridge=_Bridge(),
+        artifacts=artifacts,
+        budget=RunBudget(max_actions=2, max_model_calls=2),
+    )
+
+    controller.run("repair the task")
+
+    persisted = json.dumps(artifacts.plans)
+    assert '"type": "write_file"' in persisted
+    assert '"path": "/app/result.txt"' in persisted
+    assert '"content"' not in persisted
+    assert "thought_summary" not in persisted
+    assert secret not in persisted
+    assert "/solution/answer.py" not in persisted
+    observations = json.dumps(
+        artifacts.observations,
+        default=lambda value: value.model_dump(mode="json"),
+    )
+    assert secret not in observations
+    assert "/solution/answer.py" not in observations
+
+
+def test_controller_propagates_contract_failure_without_executing_actions() -> None:
+    class FailingPlanner:
+        def next_step(self, **_: object) -> ReActStep:
+            raise ReActPlanError(
+                category="provider_contract_error",
+                attempts=3,
+            )
+
+    artifacts = _Artifacts()
+    bridge = _Bridge()
+    controller = ReActController(
+        planner=FailingPlanner(),
+        bridge=bridge,
+        artifacts=artifacts,
+        budget=RunBudget(max_actions=3, max_model_calls=4),
+    )
+
+    with pytest.raises(ReActPlanError) as failure:
+        controller.run("repair the task")
+
+    assert failure.value.category == "provider_contract_error"
+    assert bridge.actions == []
+    assert artifacts.errors == [
+        {
+            "category": "provider_contract_error",
+            "error_type": "ReActPlanError",
+            "step": 1,
+        }
+    ]
+
+
+def test_controller_preserves_provider_identity_error_category() -> None:
+    class FailingPlanner:
+        def next_step(self, **_: object) -> ReActStep:
+            raise ProviderIdentityError("provider model identity drift")
+
+    artifacts = _Artifacts()
+    controller = ReActController(
+        planner=FailingPlanner(),
+        bridge=_Bridge(),
+        artifacts=artifacts,
+        budget=RunBudget(max_actions=1, max_model_calls=1),
+    )
+
+    with pytest.raises(ProviderIdentityError):
+        controller.run("repair the task")
+
+    assert artifacts.errors == [{"category": "provider_identity_error"}]
 
 
 def test_controller_records_policy_rejection_without_observation() -> None:
@@ -323,10 +513,11 @@ def test_controller_stops_cleanly_when_action_budget_is_exhausted() -> None:
             ),
         ]
     )
+    artifacts = _Artifacts()
     controller = ReActController(
         planner=planner,
         bridge=_Bridge(),
-        artifacts=_Artifacts(),
+        artifacts=artifacts,
         budget=RunBudget(max_actions=1, max_model_calls=4),
     )
 
@@ -335,3 +526,4 @@ def test_controller_stops_cleanly_when_action_budget_is_exhausted() -> None:
     assert result.stop_reason == "action_budget_exhausted"
     assert result.steps == 2
     assert result.observations == 1
+    assert artifacts.errors == [{"category": "budget_error", "step": 2}]

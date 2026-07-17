@@ -15,10 +15,16 @@ from bayesprobe import (
     BayesProbeCore,
     CapabilityKind,
     DeterministicModelGateway,
+    EvidenceJudgmentRepairPolicy,
+    OpenAIChatCompletionsModelGateway,
     RecordedTaskAdmitter,
     TaskAwareAnswerProjector,
 )
 from bayesprobe_terminal_bench.artifacts import TrialArtifactStore
+from bayesprobe_terminal_bench.causal import (
+    CausalEvidenceModelGateway,
+    CausalTraceRegistry,
+)
 from bayesprobe_terminal_bench.config import (
     BudgetExhausted,
     RunBudget,
@@ -29,6 +35,9 @@ from bayesprobe_terminal_bench.experiment_lock import (
     FROZEN_GATE_TASK_REFS,
     PAIRED_GATE_ARMS,
 )
+from bayesprobe_terminal_bench.gateway import HarborProbeToolGateway
+from bayesprobe_terminal_bench.planning import TerminalPlanError
+from bayesprobe_terminal_bench.provider_contract import TerminalContractModelGateway
 from bayesprobe_terminal_bench.runner_factory import (
     ArtifactInvocationObserver,
     BudgetedModelGateway,
@@ -38,6 +47,7 @@ from bayesprobe_terminal_bench.runner_factory import (
     collect_repository_git_identity,
     load_and_validate_lock,
     safe_run_id,
+    validate_runtime_lock,
 )
 from write_benchmark_lock import RuntimeIdentity, build_lock
 
@@ -116,6 +126,24 @@ class NeverExecutedEnvironment:
         raise AssertionError("live-session construction must not upload files")
 
 
+class RecordingOpenAIClient:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = iter(responses)
+        self.options: list[dict[str, object]] = []
+        self.requests: list[dict[str, object]] = []
+
+    def with_options(self, **kwargs: object) -> object:
+        self.options.append(dict(kwargs))
+        parent = self
+
+        class Completions:
+            def create(self, **request: object) -> object:
+                parent.requests.append(dict(request))
+                return next(parent._responses)
+
+        return SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+
+
 def _lock_payload(config: TerminalBenchConfig) -> dict[str, object]:
     return {
         "schema_version": "terminal_bench_lock:v0.1",
@@ -149,6 +177,27 @@ def _lock_payload(config: TerminalBenchConfig) -> dict[str, object]:
 
 def _write_lock(path: Path, config: TerminalBenchConfig) -> dict[str, object]:
     payload = _lock_payload(config)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
+def _active_lock_payload(config: TerminalBenchConfig) -> dict[str, object]:
+    payload = _lock_payload(config)
+    payload.update(
+        {
+            "schema_version": "terminal_bench_lock:v1",
+            "terminal_plan_version": "terminal_probe_plan:v1",
+            "max_provider_tokens": config.max_provider_tokens,
+            "agent_timeout_seconds": config.task_timeout_seconds,
+            "expected_provider_model": config.model,
+            "expected_system_fingerprint": "fp-locked",
+        }
+    )
+    return payload
+
+
+def _write_active_lock(path: Path, config: TerminalBenchConfig) -> dict[str, object]:
+    payload = _active_lock_payload(config)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return payload
 
@@ -239,13 +288,22 @@ def test_artifact_invocation_observer_accepts_provider_record_and_redacts(
 ) -> None:
     secret = "provider-secret-value"
     artifacts = TrialArtifactStore(tmp_path, restricted_values=(secret,))
-    observer = ArtifactInvocationObserver(artifacts)
+    budget = RunBudget(max_provider_tokens=100)
+    observer = ArtifactInvocationObserver(
+        artifacts,
+        budget=budget,
+        expected_model="provider-model",
+        expected_system_fingerprint="fp-1",
+    )
 
     observer.observe(
         ProviderRecord(
             {
                 "task": "judge_evidence",
                 "model": "provider-model",
+                "system_fingerprint": "fp-1",
+                "usage": {"total_tokens": 12},
+                "outcome": "success",
                 "message": f"do not persist {secret}",
             }
         )
@@ -256,6 +314,410 @@ def test_artifact_invocation_observer_accepts_provider_record_and_redacts(
     assert secret not in telemetry
     assert "[REDACTED]" in telemetry
     assert len(telemetry.splitlines()) == 1
+    assert budget.provider_tokens_used == 12
+
+
+def test_shared_provider_accounting_accumulates_core_terminal_and_react_calls(
+    tmp_path: Path,
+) -> None:
+    budget = RunBudget(max_provider_tokens=100)
+    observer = ArtifactInvocationObserver(
+        TrialArtifactStore(tmp_path, restricted_values=()),
+        budget=budget,
+        expected_model="provider-model",
+        expected_system_fingerprint="fp-1",
+    )
+
+    for task, tokens in (
+        ("judge_evidence", 11),
+        ("terminal_probe_plan", 13),
+        ("react_step", 17),
+    ):
+        observer.observe(
+            ProviderRecord(
+                {
+                    "task": task,
+                    "model": "provider-model",
+                    "system_fingerprint": "fp-1",
+                    "usage": {"total_tokens": tokens},
+                    "outcome": "success",
+                }
+            )
+        )
+
+    assert budget.provider_tokens_used == 41
+
+
+def test_planner_sdk_observation_records_identity_usage_without_raw_content(
+    tmp_path: Path,
+) -> None:
+    secret = "raw-provider-secret"
+    budget = RunBudget(max_provider_tokens=100)
+    observer = ArtifactInvocationObserver(
+        TrialArtifactStore(tmp_path, restricted_values=(secret,)),
+        budget=budget,
+        expected_model="provider-model",
+        expected_system_fingerprint="fp-1",
+    )
+    response = SimpleNamespace(
+        id="response-1",
+        model="provider-model",
+        system_fingerprint="fp-1",
+        usage=SimpleNamespace(
+            prompt_tokens=7,
+            completion_tokens=5,
+            total_tokens=12,
+        ),
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=secret),
+            )
+        ],
+    )
+
+    observer.observe_sdk_response(response, task="terminal_probe_plan")
+
+    assert budget.provider_tokens_used == 12
+    telemetry = (tmp_path / "provider_telemetry.jsonl").read_text(encoding="utf-8")
+    assert secret not in telemetry
+    assert "terminal_probe_plan" in telemetry
+
+
+def test_public_observer_uses_raw_response_identity_capture(tmp_path: Path) -> None:
+    observer = ArtifactInvocationObserver(
+        TrialArtifactStore(tmp_path, restricted_values=()),
+        budget=RunBudget(max_provider_tokens=100),
+        expected_model="provider-model",
+        expected_system_fingerprint="fp-1",
+    )
+    observer.capture_provider_response(
+        SimpleNamespace(
+            model="drifted-model",
+            system_fingerprint="fp-1",
+        )
+    )
+
+    with pytest.raises(BudgetExhausted) as failure:
+        observer.observe(
+            ProviderRecord(
+                {
+                    "model": "provider-model",
+                    "system_fingerprint": "fp-1",
+                    "usage": {"total_tokens": 1},
+                    "outcome": "success",
+                }
+            )
+        )
+
+    assert failure.value.category == "provider_identity_error"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "model": "provider-model",
+            "system_fingerprint": "fp-1",
+            "usage": {"total_tokens": None},
+            "outcome": "success",
+        },
+        {
+            "model": "provider-model",
+            "system_fingerprint": "fp-1",
+            "usage": {"total_tokens": True},
+            "outcome": "success",
+        },
+        {
+            "model": "provider-model",
+            "system_fingerprint": "fp-1",
+            "usage": {"total_tokens": 1.5},
+            "outcome": "success",
+        },
+        {
+            "model": "provider-model",
+            "system_fingerprint": "fp-1",
+            "usage": {"total_tokens": -1},
+            "outcome": "success",
+        },
+        {
+            "model": "drifted-model",
+            "system_fingerprint": "fp-1",
+            "usage": {"total_tokens": 1},
+            "outcome": "success",
+        },
+        {
+            "model": "provider-model",
+            "system_fingerprint": "fp-2",
+            "usage": {"total_tokens": 1},
+            "outcome": "success",
+        },
+    ],
+)
+def test_artifact_observer_fails_closed_on_usage_or_identity_drift(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    observer = ArtifactInvocationObserver(
+        TrialArtifactStore(tmp_path, restricted_values=()),
+        budget=RunBudget(max_provider_tokens=100),
+        expected_model="provider-model",
+        expected_system_fingerprint="fp-1",
+    )
+
+    with pytest.raises(BudgetExhausted) as failure:
+        observer.observe(ProviderRecord(payload))
+
+    assert failure.value.category == "provider_identity_error"
+
+
+def test_artifact_observer_detects_fingerprint_availability_drift(
+    tmp_path: Path,
+) -> None:
+    observer = ArtifactInvocationObserver(
+        TrialArtifactStore(tmp_path, restricted_values=()),
+        budget=RunBudget(max_provider_tokens=100),
+        expected_model="provider-model",
+        expected_system_fingerprint=None,
+    )
+
+    with pytest.raises(BudgetExhausted) as failure:
+        observer.observe(
+            ProviderRecord(
+                {
+                    "model": "provider-model",
+                    "system_fingerprint": "became-available",
+                    "usage": {"total_tokens": 1},
+                    "outcome": "success",
+                }
+            )
+        )
+
+    assert failure.value.category == "provider_identity_error"
+
+
+def test_budgeted_gateway_surfaces_identity_failure_swallowed_by_delegate(
+    tmp_path: Path,
+) -> None:
+    observer = ArtifactInvocationObserver(
+        TrialArtifactStore(tmp_path, restricted_values=()),
+        budget=RunBudget(max_provider_tokens=100),
+        expected_model="provider-model",
+        expected_system_fingerprint="fp-1",
+    )
+
+    class Delegate(RecordingModelGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.invocation_observer = observer
+
+        def complete_structured(self, request: object) -> dict[str, object]:
+            self.calls.append(request)
+            try:
+                observer.observe(
+                    ProviderRecord(
+                        {
+                            "model": "drifted-model",
+                            "system_fingerprint": "fp-1",
+                            "usage": {"total_tokens": 1},
+                            "outcome": "success",
+                        }
+                    )
+                )
+            except BudgetExhausted:
+                pass
+            return {"ok": True}
+
+    budget = RunBudget(max_model_calls=2, max_provider_tokens=100)
+    gateway = BudgetedModelGateway(Delegate(), budget)
+
+    with pytest.raises(BudgetExhausted) as failure:
+        gateway.complete_structured(object())
+
+    assert failure.value.category == "provider_identity_error"
+    assert budget.model_calls_used == 1
+
+
+def test_budgeted_gateway_surfaces_artifact_failure_swallowed_by_delegate() -> None:
+    class FailingArtifacts:
+        def append_provider_call(self, payload: object) -> None:
+            raise RuntimeError("artifact write failed")
+
+    observer = ArtifactInvocationObserver(
+        FailingArtifacts(),
+        budget=RunBudget(max_provider_tokens=100),
+        expected_model="provider-model",
+        expected_system_fingerprint="fp-1",
+    )
+
+    class Delegate(RecordingModelGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.invocation_observer = observer
+
+        def complete_structured(self, request: object) -> dict[str, object]:
+            self.calls.append(request)
+            try:
+                observer.observe(
+                    ProviderRecord(
+                        {
+                            "model": "provider-model",
+                            "system_fingerprint": "fp-1",
+                            "usage": {"total_tokens": 1},
+                            "outcome": "success",
+                        }
+                    )
+                )
+            except RuntimeError:
+                pass
+            return {"ok": True}
+
+    gateway = BudgetedModelGateway(
+        Delegate(),
+        RunBudget(max_model_calls=2, max_provider_tokens=100),
+    )
+
+    with pytest.raises(RuntimeError, match="artifact write failed"):
+        gateway.complete_structured(object())
+
+
+def test_openai_deadline_proxy_recomputes_timeout_and_disables_sdk_retries() -> None:
+    from bayesprobe_terminal_bench.deadline import DeadlineOpenAIClient, TrialDeadline
+
+    now = [10.0]
+    base_client = RecordingOpenAIClient([{"ok": 1}, {"ok": 2}])
+    observed_responses: list[object] = []
+    observed_errors: list[Exception] = []
+    client = DeadlineOpenAIClient(
+        base_client=base_client,
+        deadline=TrialDeadline(timeout_seconds=100, monotonic=lambda: now[0]),
+        configured_timeout_seconds=360,
+        response_observer=observed_responses.append,
+        error_observer=observed_errors.append,
+    )
+
+    assert client.chat.completions.create(model="test") == {"ok": 1}
+    now[0] = 20.2
+    assert client.chat.completions.create(model="test") == {"ok": 2}
+    assert base_client.options == [
+        {"timeout": 95, "max_retries": 0},
+        {"timeout": 84, "max_retries": 0},
+    ]
+    assert observed_responses == [{"ok": 1}, {"ok": 2}]
+
+    now[0] = 105.0
+    with pytest.raises(BudgetExhausted) as failure:
+        client.chat.completions.create(model="test")
+    assert failure.value.category == "budget_error"
+    assert observed_errors == [failure.value]
+    assert len(base_client.requests) == 2
+
+
+def test_environment_deadline_proxy_clamps_shell_timeout_and_stops_after_expiry() -> None:
+    from bayesprobe_terminal_bench.actions import ShellAction
+    from bayesprobe_terminal_bench.deadline import (
+        DeadlineEnvironmentBridge,
+        TrialDeadline,
+    )
+
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, int]] = []
+
+        def execute(self, action: object, action_index: int) -> object:
+            self.calls.append((action, action_index))
+            return "observed"
+
+    now = [0.0]
+    bridge = Bridge()
+    guarded = DeadlineEnvironmentBridge(
+        delegate=bridge,
+        deadline=TrialDeadline(timeout_seconds=100, monotonic=lambda: now[0]),
+        configured_timeout_seconds=120,
+    )
+
+    assert guarded.execute(ShellAction(command="pwd", timeout_seconds=120), 1) == (
+        "observed"
+    )
+    assert bridge.calls[0][0].timeout_seconds == 95
+
+    now[0] = 95.0
+    with pytest.raises(BudgetExhausted) as failure:
+        guarded.execute(ShellAction(command="ls", timeout_seconds=120), 2)
+    assert failure.value.category == "budget_error"
+    assert len(bridge.calls) == 1
+
+
+def test_environment_deadline_proxy_clamps_non_shell_bridge_timeout() -> None:
+    from bayesprobe_terminal_bench.actions import WriteFileAction
+    from bayesprobe_terminal_bench.deadline import (
+        DeadlineEnvironmentBridge,
+        TrialDeadline,
+    )
+
+    class Bridge:
+        _NON_SHELL_TIMEOUT_SECONDS = 120
+
+        def __init__(self) -> None:
+            self.timeouts: list[int] = []
+
+        def execute(self, action: object, action_index: int) -> object:
+            self.timeouts.append(self._NON_SHELL_TIMEOUT_SECONDS)
+            return "observed"
+
+    bridge = Bridge()
+    guarded = DeadlineEnvironmentBridge(
+        delegate=bridge,
+        deadline=TrialDeadline(timeout_seconds=20, monotonic=lambda: 0.0),
+        configured_timeout_seconds=120,
+    )
+
+    assert guarded.execute(WriteFileAction(path="/tmp/result", content="ok"), 1) == (
+        "observed"
+    )
+    assert bridge.timeouts == [15]
+    assert bridge._NON_SHELL_TIMEOUT_SECONDS == 120
+
+
+def test_terminal_plan_failure_propagates_without_starting_an_action(
+    tmp_path: Path,
+    probe: object,
+    execution_context: object,
+) -> None:
+    class FailingPlanner:
+        def plan(self, **_: object) -> object:
+            raise TerminalPlanError(
+                category="provider_contract_error",
+                attempts=3,
+            )
+
+    class NeverBridge:
+        def execute(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("an invalid plan must not execute an action")
+
+    artifacts = TrialArtifactStore(tmp_path, restricted_values=())
+    gateway = HarborProbeToolGateway(
+        planner=FailingPlanner(),
+        bridge=NeverBridge(),
+        artifacts=artifacts,
+        budget=RunBudget(max_actions=3, max_model_calls=3),
+    )
+
+    with pytest.raises(TerminalPlanError) as failure:
+        gateway.execute_probe(probe=probe, context=execution_context)
+
+    assert failure.value.category == "provider_contract_error"
+    errors = [
+        json.loads(line)
+        for line in (tmp_path / "errors.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert errors == [
+        {
+            "category": "provider_contract_error",
+            "error_type": "TerminalPlanError",
+            "probe_id": probe.id,
+        }
+    ]
 
 
 def test_safe_run_id_normalizes_prefixes_and_caps_harbor_ids() -> None:
@@ -379,6 +841,74 @@ def test_valid_lock_is_returned_without_rewriting_it(tmp_path: Path) -> None:
         runtime_git_identity=_runtime_git_identity(payload),
     ) == payload
     assert path.read_bytes() == original
+
+
+def test_active_runtime_rejects_v01_lock_and_accepts_v1_identity(
+    tmp_path: Path,
+) -> None:
+    config = TerminalBenchConfig(
+        model="locked-model",
+        task_timeout_seconds=900,
+    )
+    path = tmp_path / "benchmark.lock.json"
+    historical = _write_lock(path, config)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        validate_runtime_lock(
+            path,
+            config,
+            arm="bayesprobe",
+            session_id="break-filter-js-from-html__run__agent",
+            runtime_git_identity=_runtime_git_identity(historical),
+        )
+
+    active = _write_active_lock(path, config)
+    validated = validate_runtime_lock(
+        path,
+        config,
+        arm="bayesprobe",
+        session_id="break-filter-js-from-html__run__agent",
+        runtime_git_identity=_runtime_git_identity(active),
+    )
+
+    assert validated["schema_version"] == "terminal_bench_lock:v1"
+    assert validated["terminal_plan_version"] == "terminal_probe_plan:v1"
+
+
+def test_active_runtime_rejects_task_timeout_mismatch(tmp_path: Path) -> None:
+    config = TerminalBenchConfig(model="locked-model", task_timeout_seconds=900)
+    path = tmp_path / "benchmark.lock.json"
+    payload = _active_lock_payload(config)
+    payload["agent_timeout_seconds"] = 901
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="agent_timeout_seconds"):
+        validate_runtime_lock(
+            path,
+            config,
+            arm="bayesprobe",
+            session_id="break-filter-js-from-html__run__agent",
+            runtime_git_identity=_runtime_git_identity(payload),
+        )
+
+
+def test_active_runtime_requires_locked_fingerprint_availability(
+    tmp_path: Path,
+) -> None:
+    config = TerminalBenchConfig(model="locked-model", task_timeout_seconds=900)
+    path = tmp_path / "benchmark.lock.json"
+    payload = _active_lock_payload(config)
+    payload.pop("expected_system_fingerprint")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="expected_system_fingerprint"):
+        validate_runtime_lock(
+            path,
+            config,
+            arm="bayesprobe",
+            session_id="break-filter-js-from-html__run__agent",
+            runtime_git_identity=_runtime_git_identity(payload),
+        )
 
 
 @pytest.mark.parametrize("stale_field", ["root_git_sha", "adapter_tree_sha"])
@@ -515,9 +1045,10 @@ async def test_build_live_session_composes_shared_budget_and_active_loop_without
         model="live-model",
         base_url="https://provider.example/v1",
         max_cycles=1,
+        task_timeout_seconds=900,
         lock_path=lock_path,
     )
-    lock = _write_lock(lock_path, config)
+    lock = _write_active_lock(lock_path, config)
     environment = NeverExecutedEnvironment()
     active_loop = asyncio.get_running_loop()
     api_key = "one-time-live-provider-secret"
@@ -546,13 +1077,94 @@ async def test_build_live_session_composes_shared_budget_and_active_loop_without
 
     model_gateway = session.runner.core._model_gateway
     probe_gateway = session.runner.executor._gateway
-    assert type(model_gateway) is BudgetedModelGateway
-    assert model_gateway._budget is session.budget
+    assert type(model_gateway) is CausalEvidenceModelGateway
+    assert model_gateway._delegate._delegate._budget is session.budget
     assert probe_gateway._budget is session.budget
     assert probe_gateway._planner._budget is session.budget
     assert probe_gateway._bridge._loop is active_loop
     assert api_key not in repr(session)
     assert list(session.artifacts.root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_live_session_uses_exact_causal_composition_and_shared_registry(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "benchmark.lock.json"
+    config = TerminalBenchConfig(
+        model="live-model",
+        lock_path=lock_path,
+        task_timeout_seconds=900,
+    )
+    lock = _write_active_lock(lock_path, config)
+
+    session = build_live_session(
+        config=config,
+        api_key="one-time-live-provider-secret",
+        instruction="Repair the supplied task workspace.",
+        environment=NeverExecutedEnvironment(),
+        event_loop=asyncio.get_running_loop(),
+        logs_dir=tmp_path / "logs",
+        session_id="session/id",
+        context_id="context:id",
+        runtime_git_identity=_runtime_git_identity(lock),
+    )
+
+    guarded = session.runner.core._model_gateway
+    assert type(guarded) is CausalEvidenceModelGateway
+    assert type(guarded._registry) is CausalTraceRegistry
+    assert type(guarded._delegate) is TerminalContractModelGateway
+    assert type(guarded._delegate._delegate) is BudgetedModelGateway
+    assert type(guarded._delegate._delegate._delegate) is OpenAIChatCompletionsModelGateway
+    assert guarded._delegate._delegate._budget is session.budget
+
+    probe_gateway = session.runner.executor._gateway
+    assert probe_gateway._causal is guarded._registry
+    assert session.runner.initializer._task_framer._open_framer._model_gateway is guarded
+    assert session.runner.probe_designer._model_gateway is guarded
+    assert session.runner.core._hypothesis_expander._adapter._model_gateway is guarded
+    assert session.runner.answer_projector._model_gateway is guarded
+    assert session.runner.core._judgment_repair_policy == EvidenceJudgmentRepairPolicy(
+        max_attempts=2
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_session_injects_one_deadline_into_every_request_and_action_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = TerminalBenchConfig(
+        model="live-model",
+        lock_path=tmp_path / "unused.lock.json",
+        task_timeout_seconds=100,
+    )
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.runner_factory.validate_runtime_lock",
+        lambda *args, **kwargs: {
+            "expected_provider_model": "live-model",
+            "expected_system_fingerprint": "fp-locked",
+            "agent_timeout_seconds": 100,
+        },
+    )
+
+    session = build_live_session(
+        config=config,
+        api_key="one-time-live-provider-secret",
+        instruction="Repair the supplied task workspace.",
+        environment=NeverExecutedEnvironment(),
+        event_loop=asyncio.get_running_loop(),
+        logs_dir=tmp_path / "logs",
+        session_id="session/id",
+        context_id="context:id",
+    )
+
+    guarded = session.runner.core._model_gateway
+    provider = guarded._delegate._delegate._delegate
+    probe_gateway = session.runner.executor._gateway
+    assert provider._client._deadline is session.deadline
+    assert probe_gateway._planner._deadline is session.deadline
+    assert probe_gateway._bridge._deadline is session.deadline
 
 
 @pytest.mark.asyncio
@@ -563,10 +1175,11 @@ async def test_build_live_session_accepts_paired_gate_lock_for_locked_task(
     config = TerminalBenchConfig(
         model="live-model",
         base_url="https://provider.example/v1",
+        task_timeout_seconds=900,
         lock_path=lock_path,
     )
     payload = {
-        "schema_version": "terminal_bench_paired_gate:v0.1",
+        "schema_version": "terminal_bench_paired_gate:v1",
         "harbor_version": "0.18.0",
         "dataset_name": "terminal-bench/terminal-bench-2",
         "dataset_revision": "sha256:" + "1" * 64,
@@ -575,6 +1188,7 @@ async def test_build_live_session_accepts_paired_gate_lock_for_locked_task(
                 "task_id": task_id,
                 "task_ref": FROZEN_GATE_TASK_REFS[task_id],
                 "image_digest": "sha256:" + str(index) * 64,
+                "agent_timeout_seconds": 900,
             }
             for index, task_id in enumerate(FROZEN_GATE_TASK_IDS, start=2)
         ],
@@ -591,12 +1205,38 @@ async def test_build_live_session_accepts_paired_gate_lock_for_locked_task(
         "max_actions_per_probe": config.max_actions_per_probe,
         "max_total_actions": config.max_total_actions,
         "max_model_calls": config.max_model_calls,
+        "max_provider_tokens": config.max_provider_tokens,
         "command_timeout_seconds": config.command_timeout_seconds,
         "provider_timeout_seconds": config.provider_timeout_seconds,
         "max_output_tokens": config.max_output_tokens,
         "signal_output_bytes": config.signal_output_bytes,
+        "terminal_plan_version": "terminal_probe_plan:v1",
+        "expected_provider_model": config.model,
+        "expected_system_fingerprint": "fp-locked",
         "arms": PAIRED_GATE_ARMS,
     }
+    tasks = payload["tasks"]
+    assert isinstance(tasks, list)
+    first_task = tasks[0]
+    assert isinstance(first_task, dict)
+    locked_digest = first_task["image_digest"]
+    first_task["image_digest"] = "not-a-digest"
+    lock_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="tasks"):
+        validate_runtime_lock(
+            lock_path,
+            config,
+            arm="bayesprobe",
+            session_id="cancel-async-tasks__AbCd123__agent",
+            runtime_git_identity=RepositoryGitIdentity(
+                root_git_sha="a" * 40,
+                adapter_tree_sha="b" * 40,
+                adapter_dirty=False,
+            ),
+        )
+
+    first_task["image_digest"] = locked_digest
     lock_path.write_text(json.dumps(payload), encoding="utf-8")
 
     session = build_live_session(
