@@ -32,6 +32,7 @@ from bayesprobe_terminal_bench.runner_factory import (
     RepositoryGitIdentity,
     validate_runtime_lock,
 )
+from bayesprobe_terminal_bench.trajectory import write_atif_trajectory
 
 
 _MAX_METADATA_TEXT_LENGTH = 96
@@ -153,6 +154,8 @@ def _bounded_count(value: object, *, maximum: int) -> int:
 
 
 class DirectHarborAgent(BaseAgent):
+    SUPPORTS_ATIF = True
+
     @staticmethod
     def name() -> str:
         return "bayesprobe-direct"
@@ -186,6 +189,7 @@ class DirectHarborAgent(BaseAgent):
             Path(self.logs_dir) / "direct",
             restricted_values=(api_key,),
         )
+        session: Any = None
         execution_error: DirectHarborAgentError | None = None
         try:
             session = build_direct_session(
@@ -210,6 +214,15 @@ class DirectHarborAgent(BaseAgent):
             artifacts.append_error(
                 {"category": category, "error_type": type(error).__name__}
             )
+            if not self._emit_trajectory(
+                artifacts=artifacts,
+                session=session,
+                instruction=instruction,
+                config=config,
+                api_key=api_key,
+                stop_reason=category,
+            ):
+                category = "adapter_error"
             execution_error = DirectHarborAgentError(category)
         if execution_error is not None:
             raise execution_error from None
@@ -238,9 +251,66 @@ class DirectHarborAgent(BaseAgent):
                 maximum=config.max_model_calls,
             ),
         }
+        if not self._emit_trajectory(
+            artifacts=session.artifacts,
+            session=session,
+            instruction=instruction,
+            config=config,
+            api_key=api_key,
+            stop_reason=metadata["stop_reason"],
+        ):
+            raise DirectHarborAgentError("adapter_error") from None
         existing_metadata = context.metadata
         context.metadata = {
             **(dict(existing_metadata) if isinstance(existing_metadata, Mapping) else {}),
             **metadata,
         }
         session.artifacts.write_summary(metadata)
+
+    def _emit_trajectory(
+        self,
+        *,
+        artifacts: object,
+        session: object,
+        instruction: str,
+        config: TerminalBenchConfig,
+        api_key: str,
+        stop_reason: object,
+    ) -> bool:
+        run_id = _bounded_text(
+            str(self.context_id or self.session_id or "tb_harbor"),
+            fallback="tb_harbor",
+            restricted_value=api_key,
+        )
+        try:
+            write_atif_trajectory(
+                logs_dir=self.logs_dir,
+                artifact_root=getattr(
+                    artifacts,
+                    "root",
+                    Path(self.logs_dir) / "direct",
+                ),
+                arm="direct",
+                instruction=instruction,
+                run_id=run_id,
+                session_id=self.session_id,
+                model_name=config.model,
+                adapter_version=__version__,
+                stop_reason=(
+                    stop_reason if isinstance(stop_reason, str) else "adapter_error"
+                ),
+                budget=getattr(session, "budget", None),
+                restricted_values=(api_key,),
+            )
+        except Exception as error:
+            append_error = getattr(artifacts, "append_error", None)
+            if callable(append_error):
+                append_error(
+                    {
+                        "category": "adapter_error",
+                        "error_type": type(error).__name__,
+                        "stage": "trajectory_export",
+                    }
+                )
+            return False
+        return True
