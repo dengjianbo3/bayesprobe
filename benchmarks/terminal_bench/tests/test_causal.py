@@ -14,6 +14,7 @@ from bayesprobe_terminal_bench.actions import (
     WriteFileAction,
 )
 from bayesprobe_terminal_bench.causal import CausalTraceRegistry
+from bayesprobe_terminal_bench.signals import signal_from_observation
 
 
 def _canonical_digest(payload: object) -> str:
@@ -254,7 +255,7 @@ def test_registry_rejects_missing_environment_states(
         )
 
 
-def test_registry_rejects_non_linear_state_and_a_second_mutation(
+def test_registry_allows_verify_state_changes_without_counting_interventions(
     probe,
     execution_context,
 ) -> None:
@@ -276,7 +277,7 @@ def test_registry_rejects_non_linear_state_and_a_second_mutation(
     )
     registry = CausalTraceRegistry()
     registered = registry.register_plan(probe=probe, context=execution_context, plan=plan)
-    registry.register_action(
+    first = registry.register_action(
         plan=registered,
         step_index=0,
         observation=_observation(
@@ -298,17 +299,44 @@ def test_registry_rejects_non_linear_state_and_a_second_mutation(
                 after="env:10",
             ),
         )
-    with pytest.raises(ValueError, match="second mutation"):
-        registry.register_action(
-            plan=registered,
-            step_index=1,
-            observation=_observation(
-                action=plan.steps[1].action,
-                action_index=2,
-                before="env:1",
-                after="env:2",
-            ),
-        )
+    second = registry.register_action(
+        plan=registered,
+        step_index=1,
+        observation=_observation(
+            action=plan.steps[1].action,
+            action_index=2,
+            before="env:1",
+            after="env:2",
+        ),
+    )
+
+    assert [first.action_role, second.action_role] == ["verify", "verify"]
+    assert [first.intervention_generation, second.intervention_generation] == [0, 0]
+
+
+def test_registry_rejects_a_plan_with_a_second_declared_intervention(
+    probe,
+    execution_context,
+) -> None:
+    steps = (
+        TerminalPlanStep(
+            role="intervene",
+            action=WriteFileAction(path="/workspace/one", content="one"),
+        ),
+        TerminalPlanStep(
+            role="intervene",
+            action=WriteFileAction(path="/workspace/two", content="two"),
+        ),
+    )
+    plan = TerminalProbePlan.model_construct(
+        mode="intervene",
+        steps=steps,
+        expected_observation="The malformed plan is rejected by the registry.",
+        transition_predictions=(),
+    )
+    registry = CausalTraceRegistry()
+    with pytest.raises(ValueError, match="optional inspect, one intervene, then verify"):
+        registry.register_plan(probe=probe, context=execution_context, plan=plan)
 
 
 def test_registry_rejects_non_linear_state_across_plans_in_the_same_run(
@@ -432,12 +460,27 @@ def test_registry_binds_each_action_and_signal_exactly_once(probe, execution_con
         ),
     )
 
-    registry.bind_signal(action_id=first_record.action_id, signal_id="S_one")
+    first_signal = signal_from_observation(
+        registry=registry,
+        action_id=first_record.action_id,
+        probe=probe,
+        context=execution_context,
+        redact_model_content=lambda value: value,
+    )
 
-    assert registry.record_for_signal("S_one") == first_record
+    assert registry.record_for_signal(first_signal.id) == first_record
     with pytest.raises(ValueError, match="already has a Signal"):
-        registry.bind_signal(action_id=first_record.action_id, signal_id="S_two")
+        signal_from_observation(
+            registry=registry,
+            action_id=first_record.action_id,
+            probe=probe,
+            context=execution_context,
+            redact_model_content=lambda value: value,
+        )
     with pytest.raises(ValueError, match="Signal ID is already bound"):
-        registry.bind_signal(action_id=second_record.action_id, signal_id="S_one")
+        registry.bind_signal(
+            action_id=second_record.action_id,
+            signal_builder=lambda _: first_signal,
+        )
     with pytest.raises(KeyError, match="unknown Signal"):
         registry.record_for_signal("S_missing")

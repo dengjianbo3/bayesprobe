@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import unicodedata
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from bayesprobe import (
@@ -15,10 +16,6 @@ from bayesprobe import (
 
 from bayesprobe_terminal_bench.actions import (
     ActionObservation,
-    ShellAction,
-    TerminalPlanStep,
-    TerminalProbePlan,
-    action_may_mutate,
 )
 from bayesprobe_terminal_bench.causal import (
     CausalActionRecord,
@@ -36,25 +33,48 @@ _MAX_OBSERVATION_BYTES = 32_768
 
 def signal_from_observation(
     *,
-    observation: ActionObservation,
+    registry: CausalTraceRegistry,
+    action_id: str,
     probe: ProbeDesign,
     context: ProbeExecutionBrief,
-    causal_record: CausalActionRecord | None = None,
+    redact_model_content: Callable[[Any], Any],
 ) -> ExternalSignal:
-    """Convert one completed Harbor action into one public external signal."""
-    if causal_record is None:
-        causal_record = _standalone_causal_record(
-            observation=observation,
+    """Build and atomically bind one Signal for a registry-owned action."""
+    if not isinstance(registry, CausalTraceRegistry):
+        raise TypeError("registry must be a CausalTraceRegistry")
+    if not callable(redact_model_content):
+        raise TypeError("redact_model_content must be callable")
+    return registry.bind_signal(
+        action_id=action_id,
+        signal_builder=lambda causal_record: _build_signal(
+            causal_record=causal_record,
             probe=probe,
             context=context,
-        )
+            redact_model_content=redact_model_content,
+        ),
+    )
+
+
+def _build_signal(
+    *,
+    causal_record: CausalActionRecord,
+    probe: ProbeDesign,
+    context: ProbeExecutionBrief,
+    redact_model_content: Callable[[Any], Any],
+) -> ExternalSignal:
+    observation = causal_record.observation
     _validate_causal_binding(
-        observation=observation,
         probe=probe,
         context=context,
         causal_record=causal_record,
     )
-    raw_content = canonical_json(_observation_payload(observation, causal_record))
+    raw_content = canonical_json(
+        _observation_payload(
+            observation=observation,
+            causal_record=causal_record,
+            redact_model_content=redact_model_content,
+        )
+    )
     environment_digest = canonical_sha256(
         {
             "run_id": context.run_id,
@@ -97,14 +117,24 @@ def signal_from_observation(
 
 
 def _observation_payload(
+    *,
     observation: ActionObservation,
     causal_record: CausalActionRecord,
+    redact_model_content: Callable[[Any], Any],
 ) -> dict[str, Any]:
+    redacted_observation = redact_model_content(observation.model_facing_output)
+    if not isinstance(redacted_observation, str):
+        raise TypeError("redacted observation must remain a string")
     bounded_observation, _ = _bounded_text(
-        observation.model_facing_output,
+        redacted_observation,
         _MAX_OBSERVATION_BYTES,
     )
-    return {
+    redacted_request = redact_model_content(
+        executed_request_from_action(observation.action)
+    )
+    if not isinstance(redacted_request, Mapping):
+        raise TypeError("redacted executed request must remain a mapping")
+    payload = {
         "action_index": observation.action_index,
         "causal_binding": {
             "action_id": causal_record.action_id,
@@ -115,11 +145,15 @@ def _observation_payload(
             "subject_environment_state_id": causal_record.subject_environment_state_id,
             "verification_target": causal_record.verification_target,
         },
-        "executed_request": executed_request_from_action(observation.action),
+        "executed_request": dict(redacted_request),
         "observation": bounded_observation,
         "post_environment_state_id": observation.post_environment_state_id,
         "pre_environment_state_id": observation.pre_environment_state_id,
     }
+    redacted_payload = redact_model_content(payload)
+    if not isinstance(redacted_payload, Mapping):
+        raise TypeError("redacted observation payload must remain a mapping")
+    return dict(redacted_payload)
 
 
 def _root_inputs(causal_record: CausalActionRecord) -> dict[str, Any]:
@@ -144,13 +178,10 @@ def _canonical_content_fingerprint(source_identity: str, raw_content: str) -> st
 
 def _validate_causal_binding(
     *,
-    observation: ActionObservation,
     probe: ProbeDesign,
     context: ProbeExecutionBrief,
     causal_record: CausalActionRecord,
 ) -> None:
-    if causal_record.observation != observation:
-        raise ValueError("causal record does not contain the completed observation")
     if causal_record.probe_id != probe.id:
         raise ValueError("causal record does not match the Probe")
     if (
@@ -158,58 +189,6 @@ def _validate_causal_binding(
         or causal_record.cycle_id != context.cycle_id
     ):
         raise ValueError("causal record does not match the execution context")
-
-
-def _standalone_causal_record(
-    *,
-    observation: ActionObservation,
-    probe: ProbeDesign,
-    context: ProbeExecutionBrief,
-) -> CausalActionRecord:
-    """Support deterministic fixture construction outside the execution gateway."""
-    if not action_may_mutate(observation.action):
-        step = TerminalPlanStep(role="inspect", action=observation.action)
-        plan = TerminalProbePlan(
-            mode="inspect",
-            steps=(step,),
-            expected_observation="The completed action is observed.",
-        )
-        step_index = 0
-    elif isinstance(observation.action, ShellAction):
-        step = TerminalPlanStep(
-            role="verify",
-            action=observation.action,
-            verification_target="the completed action result",
-        )
-        plan = TerminalProbePlan(
-            mode="verify",
-            steps=(step,),
-            expected_observation="The completed verification is observed.",
-        )
-        step_index = 0
-    else:
-        step = TerminalPlanStep(role="intervene", action=observation.action)
-        plan = TerminalProbePlan(
-            mode="intervene",
-            steps=(
-                step,
-                TerminalPlanStep(
-                    role="verify",
-                    action=ShellAction(command="pwd"),
-                    verification_target="the completed intervention state",
-                ),
-            ),
-            expected_observation="The completed intervention is acknowledged.",
-        )
-        step_index = 0
-
-    registry = CausalTraceRegistry()
-    registered = registry.register_plan(probe=probe, context=context, plan=plan)
-    return registry.register_action(
-        plan=registered,
-        step_index=step_index,
-        observation=observation,
-    )
 
 
 def _bounded_text(value: str, limit: int) -> tuple[str, bool]:

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from threading import RLock
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from bayesprobe import ProbeDesign, ProbeExecutionBrief
+from bayesprobe import ExternalSignal, ProbeDesign, ProbeExecutionBrief
 from bayesprobe_terminal_bench.actions import (
     ActionObservation,
     ApplyPatchAction,
@@ -51,10 +52,14 @@ class CausalActionRecord(BaseModel):
     observation: ActionObservation
 
 
+class CausalTraceError(ValueError):
+    pass
+
+
 class _PlanState:
     def __init__(self) -> None:
         self.last_environment_state_id: str | None = None
-        self.mutation_count = 0
+        self.intervention_count = 0
         self.registered_steps: set[int] = set()
 
 
@@ -164,13 +169,11 @@ class CausalTraceRegistry:
             ):
                 raise ValueError("non-linear environment state")
 
-            changed_environment = (
-                observation.pre_environment_state_id
-                != observation.post_environment_state_id
+            intervention_count = state.intervention_count + int(
+                step.role == "intervene"
             )
-            mutation_count = state.mutation_count + int(changed_environment)
-            if mutation_count > 1:
-                raise ValueError("second mutation in one plan")
+            if intervention_count > 1:
+                raise ValueError("second intervention in one plan")
             intervention_generation = self._intervention_generation_by_run.get(
                 plan.run_id, 0
             ) + int(step.role == "intervene")
@@ -203,7 +206,7 @@ class CausalTraceRegistry:
 
             self._actions[action_id] = record
             state.last_environment_state_id = observation.post_environment_state_id
-            state.mutation_count = mutation_count
+            state.intervention_count = intervention_count
             state.registered_steps.add(step_index)
             self._last_environment_state_by_run[plan.run_id] = (
                 observation.post_environment_state_id
@@ -211,18 +214,26 @@ class CausalTraceRegistry:
             self._intervention_generation_by_run[plan.run_id] = intervention_generation
         return record
 
-    def bind_signal(self, *, action_id: str, signal_id: str) -> None:
-        if not signal_id:
-            raise ValueError("signal_id must not be empty")
+    def bind_signal(
+        self,
+        *,
+        action_id: str,
+        signal_builder: Callable[[CausalActionRecord], ExternalSignal],
+    ) -> ExternalSignal:
         with self._lock:
             if action_id not in self._actions:
                 raise KeyError(f"unknown action: {action_id}")
             if action_id in self._action_to_signal:
                 raise ValueError(f"action {action_id} already has a Signal")
+            signal = signal_builder(self._actions[action_id])
+            if not isinstance(signal, ExternalSignal):
+                raise TypeError("signal_builder must return an ExternalSignal")
+            signal_id = signal.id
             if signal_id in self._signal_to_action:
                 raise ValueError(f"Signal ID is already bound: {signal_id}")
             self._action_to_signal[action_id] = signal_id
             self._signal_to_action[signal_id] = action_id
+            return signal
 
     def record_for_signal(self, signal_id: str) -> CausalActionRecord:
         with self._lock:

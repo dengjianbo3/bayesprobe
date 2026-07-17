@@ -6,7 +6,7 @@ from typing import Any
 from bayesprobe import ExternalSignal, ProbeDesign, ProbeExecutionBrief
 
 from bayesprobe_terminal_bench.actions import ActionObservation
-from bayesprobe_terminal_bench.causal import CausalTraceRegistry
+from bayesprobe_terminal_bench.causal import CausalTraceError, CausalTraceRegistry
 from bayesprobe_terminal_bench.config import BudgetExhausted
 from bayesprobe_terminal_bench.environment import PolicyViolation
 from bayesprobe_terminal_bench.planning import TerminalPlanError
@@ -76,6 +76,21 @@ class HarborProbeToolGateway:
             )
             raise
 
+        required_actions = len(plan.steps)
+        remaining_actions = self._budget.max_actions - self._budget.actions_used
+        if remaining_actions < required_actions:
+            self._record_decision(
+                category="budget_exhausted",
+                probe=probe,
+                context=context,
+                stage="plan_action_budget",
+                remaining_actions=remaining_actions,
+                required_actions=required_actions,
+            )
+            raise BudgetExhausted(
+                "terminal action budget cannot cover the frozen plan"
+            )
+
         registered_plan = self._causal.register_plan(
             probe=probe,
             context=context,
@@ -120,20 +135,34 @@ class HarborProbeToolGateway:
                 )
                 continue
 
+            if observation.action_index != action_index:
+                error = CausalTraceError(
+                    "observation action index does not match reserved action index"
+                )
+                self._record_decision(
+                    action_index=action_index,
+                    category="causal_adapter_error",
+                    probe=probe,
+                    context=context,
+                    stage="action_observation",
+                    error_type=type(error).__name__,
+                    observed_action_index=observation.action_index,
+                    plan_id=registered_plan.plan_id,
+                    step_index=step_index,
+                )
+                raise error
+
             causal_record = self._causal.register_action(
                 plan=registered_plan,
                 step_index=step_index,
                 observation=observation,
             )
             signal = signal_from_observation(
-                observation=observation,
+                registry=self._causal,
+                action_id=causal_record.action_id,
                 probe=probe,
                 context=context,
-                causal_record=causal_record,
-            )
-            self._causal.bind_signal(
-                action_id=causal_record.action_id,
-                signal_id=signal.id,
+                redact_model_content=self._artifacts.redact_model_content,
             )
             history.append(observation)
             self._artifacts.append_observation(observation)
@@ -150,7 +179,10 @@ class HarborProbeToolGateway:
         stage: str,
         action_index: int | None = None,
         error_type: str | None = None,
+        observed_action_index: int | None = None,
         plan_id: str | None = None,
+        remaining_actions: int | None = None,
+        required_actions: int | None = None,
         step_index: int | None = None,
     ) -> None:
         payload = {
@@ -163,7 +195,10 @@ class HarborProbeToolGateway:
         optional = {
             "action_index": action_index,
             "error_type": error_type,
+            "observed_action_index": observed_action_index,
             "plan_id": plan_id,
+            "remaining_actions": remaining_actions,
+            "required_actions": required_actions,
             "step_index": step_index,
         }
         payload.update(
@@ -174,6 +209,15 @@ class HarborProbeToolGateway:
             {
                 key: value
                 for key, value in payload.items()
-                if key not in {"cycle_id", "plan_id", "run_id", "stage", "step_index"}
+                if key
+                not in {
+                    "cycle_id",
+                    "plan_id",
+                    "remaining_actions",
+                    "required_actions",
+                    "run_id",
+                    "stage",
+                    "step_index",
+                }
             }
         )

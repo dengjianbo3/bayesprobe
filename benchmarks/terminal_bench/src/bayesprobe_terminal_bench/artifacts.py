@@ -52,6 +52,10 @@ class TrialArtifactStore:
     def append_error(self, payload: Any) -> None:
         self._append("errors.jsonl", payload)
 
+    def redact_model_content(self, payload: Any) -> Any:
+        """Apply the same recursive policy used before artifact serialization."""
+        return self._redact(payload)
+
     def write_summary(self, payload: Mapping[str, Any]) -> None:
         with self._lock:
             contents = json.dumps(

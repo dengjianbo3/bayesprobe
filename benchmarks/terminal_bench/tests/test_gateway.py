@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from bayesprobe import EpistemicOrigin, ProbeToolGateway, SignalKind
+from bayesprobe_terminal_bench.artifacts import TrialArtifactStore
 from bayesprobe_terminal_bench.actions import (
     ActionObservation,
     ApplyPatchAction,
@@ -53,6 +54,9 @@ class RecordedArtifacts:
     def append_error(self, payload: dict[str, Any]) -> None:
         self.errors.append(payload)
 
+    def redact_model_content(self, payload: Any) -> Any:
+        return payload
+
 
 class ScriptedPlanner:
     def __init__(
@@ -89,13 +93,20 @@ class ScriptedBridge:
 class CountingBudget:
     def __init__(self, *, outcomes: list[int | BaseException]) -> None:
         self._outcomes = list(outcomes)
+        self.max_actions = len(outcomes)
+        self._actions_used = 0
         self.calls = 0
+
+    @property
+    def actions_used(self) -> int:
+        return self._actions_used
 
     def reserve_action(self) -> int:
         self.calls += 1
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
+        self._actions_used += 1
         return outcome
 
 
@@ -205,7 +216,7 @@ def _record_for_signal(
     context: Any,
     role: str = "inspect",
     verification_target: str | None = None,
-) -> CausalActionRecord:
+) -> tuple[CausalTraceRegistry, CausalActionRecord]:
     plan = TerminalProbePlan(
         mode=role,
         steps=(
@@ -219,11 +230,12 @@ def _record_for_signal(
     )
     registry = CausalTraceRegistry()
     registered = registry.register_plan(probe=probe, context=context, plan=plan)
-    return registry.register_action(
+    record = registry.register_action(
         plan=registered,
         step_index=0,
         observation=observation,
     )
+    return registry, record
 
 
 def _gateway(
@@ -257,7 +269,7 @@ def test_signal_exposes_exact_executed_shell_request_separately_from_observation
         pre_environment_state_id="env:7",
         post_environment_state_id="env:8",
     )
-    causal_record = _record_for_signal(
+    registry, causal_record = _record_for_signal(
         observation=observation,
         probe=probe,
         context=execution_context,
@@ -266,10 +278,11 @@ def test_signal_exposes_exact_executed_shell_request_separately_from_observation
     )
 
     signal = signal_from_observation(
-        observation=observation,
+        registry=registry,
+        action_id=causal_record.action_id,
         probe=probe,
         context=execution_context,
-        causal_record=causal_record,
+        redact_model_content=lambda value: value,
     )
     payload = json.loads(signal.raw_content)
 
@@ -311,6 +324,101 @@ def test_signal_exposes_exact_executed_shell_request_separately_from_observation
         "environment_actions.jsonl#4",
         f"causal_actions.jsonl#{causal_record.action_id}",
     ]
+
+
+def test_signal_builder_requires_registry_owned_action_and_binds_atomically(
+    probe,
+    execution_context,
+) -> None:
+    observation = _observation(action_index=1)
+    plan = _plan("pwd")
+    registry = CausalTraceRegistry()
+    registered = registry.register_plan(
+        probe=probe,
+        context=execution_context,
+        plan=plan,
+    )
+    record = registry.register_action(
+        plan=registered,
+        step_index=0,
+        observation=observation,
+    )
+
+    signal = signal_from_observation(
+        registry=registry,
+        action_id=record.action_id,
+        probe=probe,
+        context=execution_context,
+        redact_model_content=lambda value: value,
+    )
+
+    assert registry.record_for_signal(signal.id) == record
+    assert "causal_record" not in inspect.signature(signal_from_observation).parameters
+    with pytest.raises(KeyError, match="unknown action"):
+        signal_from_observation(
+            registry=registry,
+            action_id="A_" + "0" * 64,
+            probe=probe,
+            context=execution_context,
+            redact_model_content=lambda value: value,
+        )
+    with pytest.raises(ValueError, match="already has a Signal"):
+        signal_from_observation(
+            registry=registry,
+            action_id=record.action_id,
+            probe=probe,
+            context=execution_context,
+            redact_model_content=lambda value: value,
+        )
+
+
+def test_signal_redacts_secret_command_and_output_without_changing_action_identity(
+    tmp_path,
+    probe,
+    execution_context,
+) -> None:
+    secret = "sk-review-secret-1234567890"
+    observation = _observation(
+        action=ShellAction(command=f"printf {secret}"),
+        action_index=1,
+        model_facing_output=f'{{"stdout":"{secret}"}}',
+        full_output_sha256=hashlib.sha256(secret.encode("utf-8")).hexdigest(),
+        pre_environment_state_id="env:0",
+        post_environment_state_id="env:1",
+    )
+    first_registry, first_record = _record_for_signal(
+        observation=observation,
+        probe=probe,
+        context=execution_context,
+        role="verify",
+        verification_target="the command completes",
+    )
+    _, equivalent_record = _record_for_signal(
+        observation=observation,
+        probe=probe,
+        context=execution_context,
+        role="verify",
+        verification_target="the command completes",
+    )
+    redactor = TrialArtifactStore(
+        tmp_path,
+        restricted_values=(secret,),
+    )
+
+    signal = signal_from_observation(
+        registry=first_registry,
+        action_id=first_record.action_id,
+        probe=probe,
+        context=execution_context,
+        redact_model_content=redactor.redact_model_content,
+    )
+    serialized_signal = json.dumps(signal.model_dump(mode="json"), sort_keys=True)
+
+    assert secret not in signal.raw_content
+    assert secret not in serialized_signal
+    assert redactor.redact_model_content(secret) == "[REDACTED]"
+    assert first_record.request_fingerprint == equivalent_record.request_fingerprint
+    assert first_record.action_id == equivalent_record.action_id
 
 
 @pytest.mark.parametrize(
@@ -400,7 +508,7 @@ def test_signal_caps_an_oversized_observation_independently_of_action_artifact(
         action=ShellAction(command="printf tests passed"),
         model_facing_output="z" * 1_000_000,
     )
-    causal_record = _record_for_signal(
+    registry, causal_record = _record_for_signal(
         observation=observation,
         probe=probe,
         context=execution_context,
@@ -409,10 +517,11 @@ def test_signal_caps_an_oversized_observation_independently_of_action_artifact(
     )
 
     signal = signal_from_observation(
-        observation=observation,
+        registry=registry,
+        action_id=causal_record.action_id,
         probe=probe,
         context=execution_context,
-        causal_record=causal_record,
+        redact_model_content=lambda value: value,
     )
     payload = json.loads(signal.raw_content)
 
@@ -425,43 +534,47 @@ def test_signal_identity_and_roots_are_deterministic_and_distinct_across_lineage
     equivalent_observation = _observation(action_index=1)
     different_action_observation = _observation(action_index=2)
     different_probe_value = probe.model_copy(update={"id": "P_cycle_1_verify"})
-    first_record = _record_for_signal(
+    first_registry, first_record = _record_for_signal(
         observation=first_observation, probe=probe, context=execution_context
     )
-    equivalent_record = _record_for_signal(
+    equivalent_registry, equivalent_record = _record_for_signal(
         observation=equivalent_observation, probe=probe, context=execution_context
     )
-    different_action_record = _record_for_signal(
+    different_action_registry, different_action_record = _record_for_signal(
         observation=different_action_observation, probe=probe, context=execution_context
     )
-    different_probe_record = _record_for_signal(
+    different_probe_registry, different_probe_record = _record_for_signal(
         observation=first_observation,
         probe=different_probe_value,
         context=execution_context,
     )
     first = signal_from_observation(
-        observation=first_observation,
+        registry=first_registry,
+        action_id=first_record.action_id,
         probe=probe,
         context=execution_context,
-        causal_record=first_record,
+        redact_model_content=lambda value: value,
     )
     equivalent = signal_from_observation(
-        observation=equivalent_observation,
+        registry=equivalent_registry,
+        action_id=equivalent_record.action_id,
         probe=probe,
         context=execution_context,
-        causal_record=equivalent_record,
+        redact_model_content=lambda value: value,
     )
     different_action = signal_from_observation(
-        observation=different_action_observation,
+        registry=different_action_registry,
+        action_id=different_action_record.action_id,
         probe=probe,
         context=execution_context,
-        causal_record=different_action_record,
+        redact_model_content=lambda value: value,
     )
     different_probe = signal_from_observation(
-        observation=first_observation,
+        registry=different_probe_registry,
+        action_id=different_probe_record.action_id,
         probe=different_probe_value,
         context=execution_context,
-        causal_record=different_probe_record,
+        redact_model_content=lambda value: value,
     )
     different_cycle_observation = _observation(
         action_index=1, post_environment_state_id="env:1"
@@ -502,16 +615,17 @@ def test_signal_identity_and_roots_are_deterministic_and_distinct_across_lineage
             hypotheses=execution_context.hypotheses,
             metadata=dict(execution_context.metadata),
         )
-    different_cycle_record = _record_for_signal(
+    different_cycle_registry, different_cycle_record = _record_for_signal(
         observation=different_cycle_observation,
         probe=different_cycle_probe,
         context=different_cycle_context,
     )
     different_cycle = signal_from_observation(
-        observation=different_cycle_observation,
+        registry=different_cycle_registry,
+        action_id=different_cycle_record.action_id,
         probe=different_cycle_probe,
         context=different_cycle_context,
-        causal_record=different_cycle_record,
+        redact_model_content=lambda value: value,
     )
 
     assert first.id == equivalent.id
@@ -558,6 +672,61 @@ def test_gateway_emits_one_tool_result_signal_per_completed_observation(probe, e
     assert planner.histories == [()]
     assert len(artifacts.plans) == 1
     assert artifacts.errors == []
+
+
+def test_gateway_emits_verify_signals_for_incidental_verify_state_changes(
+    probe,
+    execution_context,
+) -> None:
+    plan = TerminalProbePlan(
+        mode="verify",
+        steps=(
+            TerminalPlanStep(
+                role="verify",
+                action=ShellAction(command="pytest -q"),
+                verification_target="the focused suite passes",
+            ),
+            TerminalPlanStep(
+                role="verify",
+                action=ShellAction(command="touch /tmp/cache"),
+                verification_target="the cache-producing check completes",
+            ),
+        ),
+        expected_observation="Both verification commands complete.",
+    )
+    observations = [
+        _observation(
+            action=plan.steps[0].action,
+            action_index=1,
+            pre_environment_state_id="env:0",
+            post_environment_state_id="env:1",
+        ),
+        _observation(
+            action=plan.steps[1].action,
+            action_index=2,
+            pre_environment_state_id="env:1",
+            post_environment_state_id="env:2",
+        ),
+    ]
+    artifacts = _artifacts()
+    gateway = _gateway(
+        planner=ScriptedPlanner(plan=plan),
+        bridge=ScriptedBridge(observations),
+        artifacts=artifacts,
+        budget=RunBudget(max_actions=2),
+    )
+
+    signals = gateway.execute_probe(probe=probe, context=execution_context)
+
+    assert len(signals) == 2
+    assert [record.action_role for record in artifacts.causal_actions] == [
+        "verify",
+        "verify",
+    ]
+    assert [record.intervention_generation for record in artifacts.causal_actions] == [
+        0,
+        0,
+    ]
 
 
 def test_gateway_records_and_reraises_expected_planner_failure_without_a_signal_or_history(probe, execution_context) -> None:
@@ -705,6 +874,65 @@ def test_gateway_reraises_after_action_budget_exhaustion_without_executing_the_a
     assert artifacts.causal_decisions[0]["category"] == "budget_exhausted"
     assert artifacts.causal_decisions[0]["stage"] == "action_budget"
     assert "budget-secret" not in json.dumps(artifacts.errors)
+
+
+def test_gateway_rejects_a_plan_that_cannot_fit_remaining_action_capacity(
+    probe,
+    execution_context,
+) -> None:
+    artifacts = _artifacts()
+    bridge = ScriptedBridge(
+        [_observation(action=ShellAction(command="pwd"), action_index=1)]
+    )
+    budget = RunBudget(max_actions=1)
+    gateway = _gateway(
+        planner=ScriptedPlanner(plan=_plan("pwd", "ls")),
+        bridge=bridge,
+        artifacts=artifacts,
+        budget=budget,
+    )
+
+    with pytest.raises(BudgetExhausted):
+        gateway.execute_probe(probe=probe, context=execution_context)
+
+    assert budget.actions_used == 0
+    assert bridge.calls == []
+    assert artifacts.observations == []
+    assert artifacts.causal_actions == []
+    assert artifacts.causal_decisions == [
+        {
+            "category": "budget_exhausted",
+            "cycle_id": execution_context.cycle_id,
+            "probe_id": probe.id,
+            "required_actions": 2,
+            "remaining_actions": 1,
+            "run_id": execution_context.run_id,
+            "stage": "plan_action_budget",
+        }
+    ]
+
+
+def test_gateway_rejects_observation_with_the_wrong_reserved_action_index(
+    probe,
+    execution_context,
+) -> None:
+    artifacts = _artifacts()
+    bridge = ScriptedBridge([_observation(action_index=99)])
+    gateway = _gateway(
+        planner=ScriptedPlanner(plan=_plan("pwd")),
+        bridge=bridge,
+        artifacts=artifacts,
+        budget=RunBudget(max_actions=1),
+    )
+
+    with pytest.raises(ValueError, match="reserved action index"):
+        gateway.execute_probe(probe=probe, context=execution_context)
+
+    assert [call[1] for call in bridge.calls] == [1]
+    assert artifacts.observations == []
+    assert artifacts.causal_actions == []
+    assert artifacts.causal_decisions[0]["category"] == "causal_adapter_error"
+    assert artifacts.causal_decisions[0]["stage"] == "action_observation"
 
 
 def test_gateway_preserves_only_actual_observations_in_later_planner_history(probe, execution_context) -> None:
