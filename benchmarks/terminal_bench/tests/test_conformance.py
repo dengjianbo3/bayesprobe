@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from bayesprobe import (
     AutonomousQuestionProgressKind,
@@ -29,8 +31,17 @@ from bayesprobe_terminal_bench.actions import (
 from bayesprobe_terminal_bench.artifacts import TrialArtifactStore
 from bayesprobe_terminal_bench.causal import CausalEvidenceModelGateway
 from bayesprobe_terminal_bench.config import RunBudget, TerminalBenchConfig
+from bayesprobe_terminal_bench.conformance import (
+    ConformanceReport,
+    TraceClassification,
+    validate_trial_trace,
+)
 from bayesprobe_terminal_bench.gateway import HarborProbeToolGateway
 from bayesprobe_terminal_bench.runner_factory import build_runner
+
+
+CAUSAL_FIXTURES = Path(__file__).parent / "fixtures" / "causal_traces"
+HISTORICAL_FIXTURES = Path(__file__).parent / "fixtures" / "historical_traces"
 
 
 class ScriptedTerminalPlanner:
@@ -72,9 +83,19 @@ class ScriptedTerminalPlanner:
                     expected_transition="The verifier still fails if the effect is H2.",
                 ),
             )
+        leading_steps = (
+            (
+                TerminalPlanStep(
+                    role="inspect",
+                    action=ShellAction(command="ls"),
+                ),
+            )
+            if self.scenario == "inspect_intervene_verify"
+            else ()
+        )
         return TerminalProbePlan(
             mode="intervene",
-            steps=(
+            steps=leading_steps + (
                 TerminalPlanStep(
                     role="intervene",
                     action=WriteFileAction(
@@ -107,7 +128,11 @@ class SupportingObservationBridge:
         if isinstance(action, WriteFileAction):
             output = "ACKNOWLEDGED: the Semaphore implementation was written."
             before, after = "env:0", "env:1"
-        elif self.scenario in {"inspect", "repair_causal_discard"}:
+        elif (
+            self.scenario in {"inspect", "repair_causal_discard"}
+            or isinstance(action, ShellAction)
+            and action.command == "ls"
+        ):
             output = "SUPPORTS H1: ls reports that the expected file is missing."
             before, after = "env:0", "env:0"
         else:
@@ -193,7 +218,7 @@ class TerminalEvidenceDelegate:
         raise AssertionError(f"unexpected model task: {request.task}")
 
     def _frame(self) -> dict[str, Any]:
-        if self.scenario == "postcondition":
+        if self.scenario in {"postcondition", "inspect_intervene_verify"}:
             types = ("postcondition", "invariant")
             statements = (
                 "The declared postcondition holds after the intervention.",
@@ -588,3 +613,174 @@ def test_no_signal_execution_preserves_belief_until_core_rejects_empty_cycle(
         event.kind is not AutonomousQuestionProgressKind.CYCLE_INTEGRATED
         for event in progress
     )
+
+
+def test_conformance_report_is_strict_frozen_and_uses_the_fixed_public_enum() -> None:
+    report = validate_trial_trace(
+        CAUSAL_FIXTURES / "conformant-inspect-intervene-verify"
+    )
+
+    assert report.classification is TraceClassification.CONFORMANT
+    assert report.model_config["strict"] is True
+    assert report.model_config["frozen"] is True
+    assert tuple(item.value for item in TraceClassification) == (
+        "conformant",
+        "provider_contract_error",
+        "causal_conformance_error",
+        "budget_error",
+        "adapter_error",
+    )
+    with pytest.raises(ValidationError):
+        report.complete_cycles = 0  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        ConformanceReport.model_validate(
+            {**report.model_dump(), "unexpected": "field"}
+        )
+
+
+def test_conformant_inspect_intervene_verify_fixture_reports_mechanism_counts() -> None:
+    report = validate_trial_trace(
+        CAUSAL_FIXTURES / "conformant-inspect-intervene-verify"
+    )
+
+    expected = ConformanceReport(
+        classification=TraceClassification.CONFORMANT,
+        complete_cycles=1,
+        plans=1,
+        actions=3,
+        signals=3,
+        evidence_events=3,
+        admitted_evidence=2,
+        discarded_evidence=1,
+        nonneutral_updates=2,
+        violations=(),
+        mechanism_metrics={
+            "action_signal_ratio": 1.0,
+            "admitted_evidence_rate": 2 / 3,
+            "discarded_evidence_rate": 1 / 3,
+            "nonneutral_updates_per_admitted_evidence": 1.0,
+            "provider_tokens": 60,
+        },
+    )
+    assert report == expected
+
+
+def test_guard_discard_is_observable_without_becoming_a_causal_error() -> None:
+    report = validate_trial_trace(
+        CAUSAL_FIXTURES / "conformant-inspect-intervene-verify"
+    )
+
+    assert report.discarded_evidence == 1
+    assert report.classification is TraceClassification.CONFORMANT
+    assert not report.violations
+
+
+def test_historical_traces_replay_to_the_preregistered_classifications() -> None:
+    manifest = json.loads(
+        (HISTORICAL_FIXTURES / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    actual = {
+        trace["task_id"]: validate_trial_trace(
+            HISTORICAL_FIXTURES / trace["task_id"].split("/", maxsplit=1)[1]
+        ).classification.value
+        for trace in manifest["traces"]
+    }
+
+    assert actual == {
+        trace["task_id"]: trace["expected_classification"]
+        for trace in manifest["traces"]
+    }
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "ambiguous-update",
+        "discarded-update",
+        "environment-state",
+        "request-fingerprint",
+    ],
+)
+def test_each_broken_binding_state_or_update_fixture_is_causal_error(
+    fixture_name: str,
+) -> None:
+    report = validate_trial_trace(
+        CAUSAL_FIXTURES / "broken-bindings" / fixture_name
+    )
+
+    assert report.classification is TraceClassification.CAUSAL_CONFORMANCE_ERROR
+    assert report.violations
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("conformant", TraceClassification.CONFORMANT),
+        ("adapter", TraceClassification.ADAPTER_ERROR),
+        ("budget_over_adapter", TraceClassification.BUDGET_ERROR),
+        ("provider_over_budget", TraceClassification.PROVIDER_CONTRACT_ERROR),
+        ("causal_over_provider", TraceClassification.CAUSAL_CONFORMANCE_ERROR),
+        ("security_over_all", TraceClassification.CAUSAL_CONFORMANCE_ERROR),
+    ],
+)
+def test_classification_precedence_is_deterministic(
+    tmp_path: Path,
+    case: str,
+    expected: TraceClassification,
+) -> None:
+    fixture = tmp_path / case
+    shutil.copytree(
+        CAUSAL_FIXTURES / "conformant-inspect-intervene-verify",
+        fixture,
+    )
+    if case != "conformant":
+        (fixture / "trajectory.json").unlink()
+    categories: list[str] = []
+    if case in {
+        "budget_over_adapter",
+        "provider_over_budget",
+        "causal_over_provider",
+        "security_over_all",
+    }:
+        categories.append("budget_error")
+    if case in {"provider_over_budget", "causal_over_provider", "security_over_all"}:
+        categories.append("provider_contract_error")
+    if case in {"causal_over_provider", "security_over_all"}:
+        categories.append("causal_conformance_error")
+    if categories:
+        (fixture / "errors.jsonl").write_text(
+            "".join(json.dumps({"category": item}) + "\n" for item in categories),
+            encoding="utf-8",
+        )
+    if case == "security_over_all":
+        (fixture / "unsafe.txt").write_text(
+            "attempted read of /root/evaluator/secret",
+            encoding="utf-8",
+        )
+
+    assert validate_trial_trace(fixture).classification is expected
+
+
+def test_causal_fixtures_are_secret_free_evaluator_free_and_portable() -> None:
+    manifest = json.loads(
+        (CAUSAL_FIXTURES / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["schema_version"] == "terminal_causal_trace_fixtures:v1"
+    actual_files = {
+        path.relative_to(CAUSAL_FIXTURES).as_posix(): (
+            "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+        for path in CAUSAL_FIXTURES.rglob("*")
+        if path.is_file() and path.name != "manifest.json"
+    }
+    assert manifest["files"] == actual_files
+
+    for path in CAUSAL_FIXTURES.rglob("*"):
+        assert not path.is_symlink()
+        if not path.is_file():
+            continue
+        contents = path.read_text(encoding="utf-8")
+        assert "/Users/" not in contents
+        assert "/root/evaluator" not in contents
+        assert "sk-1234567890ab" not in contents

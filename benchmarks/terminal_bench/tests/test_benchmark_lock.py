@@ -11,13 +11,22 @@ import pytest
 
 from bayesprobe import ExternalSignal, ProbeDesign, ProbeExecutionBrief
 from bayesprobe.evidence_memory import SignalProvenanceNormalizer
-from bayesprobe_terminal_bench.actions import ActionObservation, ShellAction
+from bayesprobe_terminal_bench.actions import (
+    ActionObservation,
+    ShellAction,
+    TerminalPlanStep,
+    TerminalProbePlan,
+)
+from bayesprobe_terminal_bench.artifacts import TrialArtifactStore
+from bayesprobe_terminal_bench.causal import CausalDecision, CausalTraceRegistry
 from bayesprobe_terminal_bench.config import TerminalBenchConfig
+from bayesprobe_terminal_bench.provider_contract import ContractAttempt
 from bayesprobe_terminal_bench.runner_factory import (
     RepositoryGitIdentity,
     load_and_validate_lock,
 )
 from bayesprobe_terminal_bench.signals import signal_from_observation
+from bayesprobe_terminal_bench.trajectory import write_atif_trajectory
 from conftest import (
     FIXED_CONTAINER_IMAGE,
     FIXED_DATASET,
@@ -580,25 +589,127 @@ def _write_smoke_job(
         full_output_sha256=hashlib.sha256(output.encode("utf-8")).hexdigest(),
         model_facing_output=output,
     )
-    signal = signal_from_observation(
-        observation=observation,
+    artifact_store = TrialArtifactStore(bayesprobe_dir, restricted_values=())
+    registry = CausalTraceRegistry()
+    plan = TerminalProbePlan(
+        mode="inspect",
+        steps=(
+            TerminalPlanStep(
+                role="inspect",
+                action=observation.action,
+            ),
+        ),
+        expected_observation="The working directory is observed.",
+    )
+    registered_plan = registry.register_plan(
         probe=probe,
         context=execution_context,
+        plan=plan,
     )
-    (bayesprobe_dir / "summary.json").write_text(
-        json.dumps(
-            {
-                "bayesprobe_cycles": 1,
-                "terminal_actions": 1,
-                "model_calls": 4,
-            }
+    causal_action = registry.register_action(
+        plan=registered_plan,
+        step_index=0,
+        observation=observation,
+    )
+    signal = signal_from_observation(
+        registry=registry,
+        action_id=causal_action.action_id,
+        probe=probe,
+        context=execution_context,
+        redact_model_content=artifact_store.redact_model_content,
+    )
+    artifact_store.append_plan(
+        {
+            "probe_id": probe.id,
+            "cycle_id": execution_context.cycle_id,
+            "plan_id": registered_plan.plan_id,
+            "policy_attempt_id": registered_plan.policy_attempt_id,
+            "plan": plan.model_dump(mode="json"),
+        }
+    )
+    artifact_store.append_observation(observation)
+    artifact_store.append_causal_action(causal_action)
+    artifact_store.append_causal_decision(
+        CausalDecision(
+            signal_id=signal.id,
+            action_id=causal_action.action_id,
+            action_role="inspect",
+            decision="admit",
+            reason_code="state_scoped_inspection",
+            subject_environment_state_id="env:0",
+            judgment_response_sha256="3" * 64,
+        )
+    )
+    for attempt in (
+        ContractAttempt(
+            stage="terminal_task_frame",
+            attempt_index=0,
+            request_task="frame_open_question",
+            response_sha256="1" * 64,
+            required_keys_present=(
+                "answer_contract",
+                "answer_relationship",
+                "competition",
+                "coverage",
+                "coverage_limitation",
+                "coverage_statement",
+                "hypotheses",
+                "task_kind",
+            ),
+            validation="valid",
+            field_errors=(),
         ),
-        encoding="utf-8",
+        ContractAttempt(
+            stage="terminal_probe_design",
+            attempt_index=0,
+            request_task="design_probes",
+            response_sha256="2" * 64,
+            required_keys_present=("proposals",),
+            validation="valid",
+            field_errors=(),
+        ),
+    ):
+        artifact_store.append_contract_attempt(attempt)
+    provider_calls = (
+        ("frame_open_question", "open_question_task_framing", "OpenQuestionTaskFrame"),
+        ("design_probes", "probe_design", "ProbeDesign"),
+        ("judge_evidence", "evidence_judgment", "EvidenceJudgment"),
+        ("project_answer", "answer_projection", "AnswerProjection"),
     )
-    (bayesprobe_dir / "environment_actions.jsonl").write_text(
-        json.dumps(observation.model_dump(mode="json"))
-        + "\n",
-        encoding="utf-8",
+    for index, (task, prompt_id, schema_name) in enumerate(provider_calls, start=1):
+        artifact_store.append_provider_call(
+            {
+                "adapter_kind": "openai_chat_completions",
+                "task": task,
+                "outcome": "success",
+                "model": "test-model",
+                "system_fingerprint": "fixture-fingerprint-v1",
+                "finish_reason": "stop",
+                "request_sha256": str(index) * 64,
+                "response_id": f"fixture-response-{index}",
+                "prompt_id": prompt_id,
+                "prompt_version": "v0.2",
+                "schema_name": schema_name,
+                "schema_version": "v0.2",
+                "usage": {
+                    "input_tokens": 6,
+                    "output_tokens": 4,
+                    "total_tokens": 10,
+                },
+            }
+        )
+    artifact_store.write_summary(
+        {
+            "bayesprobe_cycles": 1,
+            "bayesprobe_run_id": execution_context.run_id,
+            "bayesprobe_stop_reason": "max_cycles",
+            "terminal_actions": 1,
+            "model_calls": 4,
+            "provider_tokens": 40,
+            "max_total_actions": 24,
+            "max_model_calls": 72,
+            "max_provider_tokens": 160_000,
+        }
     )
     records = [
         {
@@ -632,9 +743,17 @@ def _write_smoke_job(
             "payload": {
                 "id": "E1",
                 "derived_from_signal": signal.id,
+                "content": signal.raw_content,
                 "epistemic_origin": "tool_result",
                 "derivation_root_id": signal.provenance.derivation_root_id,
                 "discard_reason": None,
+                "model_trace": {
+                    "task": "judge_evidence",
+                    "prompt_id": "evidence_judgment",
+                    "prompt_version": "v0.2",
+                    "schema_name": "EvidenceJudgment",
+                    "schema_version": "v0.2",
+                },
             },
         },
         {
@@ -642,6 +761,8 @@ def _write_smoke_job(
             "payload": {
                 "contribution_root_id": "evidence-root:sha256:" + "1" * 64,
                 "caused_by_event_ids": ["E1"],
+                "per_hypothesis_delta": {"H_workspace": 1.0},
+                "unresolved_delta": None,
             },
         },
         {
@@ -674,7 +795,36 @@ def _write_smoke_job(
         "".join(json.dumps(record) + "\n" for record in records),
         encoding="utf-8",
     )
+    _write_smoke_trajectory(
+        bayesprobe_dir,
+        run_id=execution_context.run_id,
+        actions_used=1,
+    )
     return job_dir
+
+
+def _write_smoke_trajectory(
+    bayesprobe_dir: Path,
+    *,
+    run_id: str,
+    actions_used: int,
+) -> None:
+    write_atif_trajectory(
+        logs_dir=bayesprobe_dir.parent,
+        artifact_root=bayesprobe_dir,
+        arm="bayesprobe",
+        instruction="Repair the synthetic smoke task.",
+        run_id=run_id,
+        session_id="fixture-session-v1",
+        model_name="test-model",
+        adapter_version="terminal:v1",
+        stop_reason="max_cycles",
+        budget=SimpleNamespace(
+            provider_tokens_used=40,
+            model_calls_used=4,
+            actions_used=actions_used,
+        ),
+    )
 
 
 def _write_complete_benchmark_lock(
@@ -975,6 +1125,11 @@ def test_policy_denied_reserved_action_is_reconciled_without_an_observation(
         + "\n",
         encoding="utf-8",
     )
+    _write_smoke_trajectory(
+        bayesprobe_dir,
+        run_id=execution_context.run_id,
+        actions_used=2,
+    )
     lock_path = tmp_path / "benchmark.lock.json"
     _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)
 
@@ -999,6 +1154,9 @@ def test_all_policy_denied_cycle_needs_no_observation_signal_or_update(
     )
     bayesprobe_dir = _trace_dir(job_dir)
     (bayesprobe_dir / "environment_actions.jsonl").unlink()
+    (bayesprobe_dir / "causal_actions.jsonl").unlink()
+    (bayesprobe_dir / "causal_decisions.jsonl").unlink()
+    (bayesprobe_dir / "plans.jsonl").unlink()
     records = [
         record
         for record in _read_trace_records(bayesprobe_dir)
@@ -1023,6 +1181,11 @@ def test_all_policy_denied_cycle_needs_no_observation_signal_or_update(
         )
         + "\n",
         encoding="utf-8",
+    )
+    _write_smoke_trajectory(
+        bayesprobe_dir,
+        run_id=execution_context.run_id,
+        actions_used=1,
     )
     lock_path = tmp_path / "benchmark.lock.json"
     _write_complete_benchmark_lock(lock_path, oracle_job=synthetic_oracle_job)

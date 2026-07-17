@@ -1,0 +1,257 @@
+{
+  "agent": {
+    "model_name": "fixture-model-v1",
+    "name": "bayesprobe",
+    "version": "terminal:v1"
+  },
+  "extra": {
+    "arm": "bayesprobe",
+    "artifact_schema": "terminal:v1",
+    "experiment_id": "terminal_bench_causal:v1"
+  },
+  "final_metrics": {
+    "extra": {
+      "model_calls_used": 6,
+      "provider_tokens_used": 60,
+      "terminal_actions_used": 3
+    },
+    "total_completion_tokens": 24,
+    "total_prompt_tokens": 36,
+    "total_steps": 11
+  },
+  "schema_version": "ATIF-v1.7",
+  "session_id": "fixture-session-v1",
+  "steps": [
+    {
+      "message": "Repair and verify the deterministic fixture.",
+      "source": "user",
+      "step_id": 1
+    },
+    {
+      "extra": {
+        "action_id": "A_7847aa7231115f1d82d5e7e50c5d98ca43f893f6b7878694e267b429dd875d31",
+        "kind": "terminal_action",
+        "plan_id": "PL_e6e39a84214e856a1f0d05dad678a5995a15dab09b2b147a248f6e7805bdea0c",
+        "policy_attempt_id": "PA_80ac92a5bfeac8b61da160c69b1435cb8ca81b21cae62ccbb7e81fc78b41ae8b",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "request_fingerprint": "sha256:a3204a2a41607cb8460075fa13ac2fa003e0248c386a650911be0066b224d463",
+        "signal_id": "S_harbor_ec18cc389c1b0b041767d12dca0006607d636ec575f4778f66d2afc2908bade8"
+      },
+      "llm_call_count": 0,
+      "message": "Execute terminal action.",
+      "observation": {
+        "results": [
+          {
+            "content": "SUPPORTS H1: ls reports that the expected file is missing.",
+            "extra": {
+              "action_index": 1,
+              "post_environment_state_id": "env:0",
+              "pre_environment_state_id": "env:0",
+              "return_code": 0,
+              "timed_out": false
+            },
+            "source_call_id": "tool:A_7847aa7231115f1d82d5e7e50c5d98ca43f893f6b7878694e267b429dd875d31"
+          }
+        ]
+      },
+      "source": "agent",
+      "step_id": 2,
+      "tool_calls": [
+        {
+          "arguments": {
+            "command": "ls",
+            "mutates_environment": false,
+            "timeout_seconds": 120,
+            "type": "shell"
+          },
+          "function_name": "terminal.shell",
+          "tool_call_id": "tool:A_7847aa7231115f1d82d5e7e50c5d98ca43f893f6b7878694e267b429dd875d31"
+        }
+      ]
+    },
+    {
+      "extra": {
+        "action_id": "A_cdc62855f6d84d2691f0a44d9c230f4d754fc6cf7c1acd399a3a78c43aa2facc",
+        "kind": "terminal_action",
+        "plan_id": "PL_e6e39a84214e856a1f0d05dad678a5995a15dab09b2b147a248f6e7805bdea0c",
+        "policy_attempt_id": "PA_80ac92a5bfeac8b61da160c69b1435cb8ca81b21cae62ccbb7e81fc78b41ae8b",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "request_fingerprint": "sha256:a9ad9b54ff638b90b7e6056a2e052f9e4a70c0029acda19c97755c88dac7c20b",
+        "signal_id": "S_harbor_284d85ff015ee22ceee7c812a5bd6f298a1ae81668465574121427ed9e6759a0"
+      },
+      "llm_call_count": 0,
+      "message": "Execute terminal action.",
+      "observation": {
+        "results": [
+          {
+            "content": "ACKNOWLEDGED: the Semaphore implementation was written.",
+            "extra": {
+              "action_index": 2,
+              "post_environment_state_id": "env:1",
+              "pre_environment_state_id": "env:0",
+              "return_code": 0,
+              "timed_out": false
+            },
+            "source_call_id": "tool:A_cdc62855f6d84d2691f0a44d9c230f4d754fc6cf7c1acd399a3a78c43aa2facc"
+          }
+        ]
+      },
+      "source": "agent",
+      "step_id": 3,
+      "tool_calls": [
+        {
+          "arguments": {
+            "content": "semaphore implementation",
+            "path": "/workspace/result.txt",
+            "type": "write_file"
+          },
+          "function_name": "terminal.write_file",
+          "tool_call_id": "tool:A_cdc62855f6d84d2691f0a44d9c230f4d754fc6cf7c1acd399a3a78c43aa2facc"
+        }
+      ]
+    },
+    {
+      "extra": {
+        "action_id": "A_cfe005b47ca52d4fcbd8dd0c6e8fa7cf606672f89da0fb8922e4b6f094883c8b",
+        "kind": "terminal_action",
+        "plan_id": "PL_e6e39a84214e856a1f0d05dad678a5995a15dab09b2b147a248f6e7805bdea0c",
+        "policy_attempt_id": "PA_80ac92a5bfeac8b61da160c69b1435cb8ca81b21cae62ccbb7e81fc78b41ae8b",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "request_fingerprint": "sha256:e47f9676bfc61df83aecf115bb15d3e555bb07854bfefe84017440c22a805bba",
+        "signal_id": "S_harbor_7eeaa29edec311937875150e226d28762e66d201b450e07c3f1db4f68a945a22"
+      },
+      "llm_call_count": 0,
+      "message": "Execute terminal action.",
+      "observation": {
+        "results": [
+          {
+            "content": "VERIFIED: the declared postcondition passes.",
+            "extra": {
+              "action_index": 3,
+              "post_environment_state_id": "env:1",
+              "pre_environment_state_id": "env:1",
+              "return_code": 0,
+              "timed_out": false
+            },
+            "source_call_id": "tool:A_cfe005b47ca52d4fcbd8dd0c6e8fa7cf606672f89da0fb8922e4b6f094883c8b"
+          }
+        ]
+      },
+      "source": "agent",
+      "step_id": 4,
+      "tool_calls": [
+        {
+          "arguments": {
+            "command": "cat /workspace/result.txt",
+            "mutates_environment": false,
+            "timeout_seconds": 120,
+            "type": "shell"
+          },
+          "function_name": "terminal.shell",
+          "tool_call_id": "tool:A_cfe005b47ca52d4fcbd8dd0c6e8fa7cf606672f89da0fb8922e4b6f094883c8b"
+        }
+      ]
+    },
+    {
+      "extra": {
+        "action_id": "A_cdc62855f6d84d2691f0a44d9c230f4d754fc6cf7c1acd399a3a78c43aa2facc",
+        "causal_decision": "admit",
+        "kind": "causal_evidence_decision",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "reason_code": "neutral_mutation_acknowledgement",
+        "signal_id": "S_harbor_284d85ff015ee22ceee7c812a5bd6f298a1ae81668465574121427ed9e6759a0"
+      },
+      "llm_call_count": 0,
+      "message": "Causal evidence route evaluated.",
+      "source": "agent",
+      "step_id": 5
+    },
+    {
+      "extra": {
+        "action_id": "A_cfe005b47ca52d4fcbd8dd0c6e8fa7cf606672f89da0fb8922e4b6f094883c8b",
+        "causal_decision": "admit",
+        "kind": "causal_evidence_decision",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "reason_code": "verified_postcondition",
+        "signal_id": "S_harbor_7eeaa29edec311937875150e226d28762e66d201b450e07c3f1db4f68a945a22"
+      },
+      "llm_call_count": 0,
+      "message": "Causal evidence route evaluated.",
+      "source": "agent",
+      "step_id": 6
+    },
+    {
+      "extra": {
+        "action_id": "A_7847aa7231115f1d82d5e7e50c5d98ca43f893f6b7878694e267b429dd875d31",
+        "causal_decision": "discard",
+        "kind": "causal_evidence_decision",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "reason_code": "target_mismatch",
+        "signal_id": "S_harbor_ec18cc389c1b0b041767d12dca0006607d636ec575f4778f66d2afc2908bade8"
+      },
+      "llm_call_count": 0,
+      "message": "Causal evidence route evaluated.",
+      "source": "agent",
+      "step_id": 7
+    },
+    {
+      "extra": {
+        "evidence_id": "terminal_inspect_intervene_verify_cycle_1_E_b153ed68580b93ba47dbd30ce67fcfc7a20a6339c06ea13e8106b02279a1e54a_1",
+        "evidence_status": "discarded",
+        "kind": "bayesprobe_transition",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "signal_id": "S_harbor_ec18cc389c1b0b041767d12dca0006607d636ec575f4778f66d2afc2908bade8",
+        "update_ids": []
+      },
+      "llm_call_count": 0,
+      "message": "BayesProbe evidence state recorded.",
+      "source": "agent",
+      "step_id": 8,
+      "timestamp": "2026-07-17T10:36:09.701872+00:00"
+    },
+    {
+      "extra": {
+        "evidence_id": "terminal_inspect_intervene_verify_cycle_1_E_500fa23775a305b8b981f16c0f917133ed12b4c4e9ff9cb506ef985097e4487b_1",
+        "evidence_status": "accepted",
+        "kind": "bayesprobe_transition",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "signal_id": "S_harbor_284d85ff015ee22ceee7c812a5bd6f298a1ae81668465574121427ed9e6759a0",
+        "update_ids": []
+      },
+      "llm_call_count": 0,
+      "message": "BayesProbe evidence state recorded.",
+      "source": "agent",
+      "step_id": 9,
+      "timestamp": "2026-07-17T10:36:09.701925+00:00"
+    },
+    {
+      "extra": {
+        "evidence_id": "terminal_inspect_intervene_verify_cycle_1_E_b74affbaffb9c0e5c020e7304f8aaa54f17819df9e0702ee9faec38e2fe15acf_1",
+        "evidence_status": "accepted",
+        "kind": "bayesprobe_transition",
+        "probe_id": "P_cycle_0_fdbc04eb5851_terminal_inspect_intervene_verify_cycle_1",
+        "signal_id": "S_harbor_7eeaa29edec311937875150e226d28762e66d201b450e07c3f1db4f68a945a22",
+        "update_ids": [
+          "terminal_inspect_intervene_verify_terminal_inspect_intervene_verify_cycle_1_U1_H1",
+          "terminal_inspect_intervene_verify_terminal_inspect_intervene_verify_cycle_1_U1_H2"
+        ]
+      },
+      "llm_call_count": 0,
+      "message": "BayesProbe evidence state recorded.",
+      "source": "agent",
+      "step_id": 10,
+      "timestamp": "2026-07-17T10:36:09.701985+00:00"
+    },
+    {
+      "extra": {
+        "artifact_id": "trajectory:terminal_inspect_intervene_verify",
+        "kind": "termination",
+        "stop_reason": "max_cycles"
+      },
+      "message": "Trial terminated.",
+      "source": "system",
+      "step_id": 11
+    }
+  ],
+  "trajectory_id": "trajectory:terminal_inspect_intervene_verify"
+}

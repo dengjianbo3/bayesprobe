@@ -1,0 +1,193 @@
+# Task 8 Report: Reusable Causal Conformance Validator
+
+## Status
+
+`DONE`
+
+Task 8 is implemented and verified. The benchmark now exposes one strict,
+offline `validate_trial_trace(Path)` API and both validation scripts delegate
+causal trace judgment to it. The 39 previously deferred
+`test_benchmark_lock.py` failures were removed by updating only their stale
+synthetic artifact helper to the current registry-bound causal and ATIF
+contract; experiment-lock assertions and semantics were not weakened.
+
+No live provider, network, Harbor or Docker job, credentials, official reward,
+or `.runs` generation was used. No file under `bayesprobe/` was changed, and
+the pre-existing untracked `reports/` directory was left untouched.
+
+Commit subject:
+`feat(terminal-bench): validate causal trace conformance`
+
+## Scope
+
+Production and script files:
+
+- `benchmarks/terminal_bench/src/bayesprobe_terminal_bench/conformance.py`
+- `benchmarks/terminal_bench/scripts/validate_smoke_run.py`
+- `benchmarks/terminal_bench/scripts/validate_paired_gate.py`
+
+Tests and deterministic fixtures:
+
+- `benchmarks/terminal_bench/tests/test_conformance.py`
+- `benchmarks/terminal_bench/tests/test_benchmark_lock.py`
+- `benchmarks/terminal_bench/tests/fixtures/causal_traces/`
+
+Required report:
+
+- `.superpowers/sdd/task-8-report.md`
+
+No other production or test file was modified.
+
+## Public API
+
+`conformance.py` implements the fixed benchmark-local API from the brief:
+
+- the exact five-member `TraceClassification` enum;
+- a strict, frozen, extra-forbidden `ConformanceReport` with the prescribed
+  fields;
+- `validate_trial_trace(artifact_root: Path) -> ConformanceReport`.
+
+The validator is independent of official reward and parses JSON/JSONL through
+structured Pydantic models and duplicate-key-rejecting JSON readers. It
+recomputes causal identities and fingerprints rather than trusting copied
+artifact fields.
+
+## Validation Semantics
+
+The validator fails closed over the complete Task 3-7 artifact contract:
+
+1. Provider contract attempts must have bounded, contiguous initial/repair
+   sequences, correct tasks and terminal valid outcomes.
+2. Plans, executed actions, causal actions, Signals, Evidence events, and
+   decisions must have exact cardinality and unique identities.
+3. Request fingerprints, action IDs, Signal IDs, canonical content hashes,
+   environment states, intervention generations, policy attempts, and subject
+   state lineage are recomputed and reconciled.
+4. Evidence admission/discard records must correspond to their causal guard
+   decisions. A conformant guard discard is counted and remains non-failing.
+5. Discarded Evidence cannot contribute or cause an Update. Every non-neutral
+   contribution and Update must declare exactly one admitted causal route, and
+   each Update must have exactly one matching non-neutral contribution.
+6. Task-frame and Evidence prompt/schema provenance must retain the active
+   `v0.2` identities.
+7. Summary counters, configured/default limits, provider token totals, provider
+   model and system fingerprint identity, and ATIF final metrics must agree.
+8. Harbor's installed `TrajectoryValidator` must accept ATIF-v1.7, and every
+   exported action must have exact tool-call/result/action/Signal linkage.
+9. All artifact text is scanned with the established secret and evaluator-path
+   patterns. Symlinks and unreadable artifact content fail closed.
+
+The deterministic classification table is encoded in one ordered constant and
+table-tested:
+
+```text
+security/evaluator access -> causal_conformance_error
+causal violation          -> causal_conformance_error
+provider violation        -> provider_contract_error
+budget violation          -> budget_error
+adapter violation         -> adapter_error
+no violation              -> conformant
+```
+
+This preserves the fixed public enum while giving security violations the
+planned highest precedence and top-level causal classification.
+
+## Fixtures and Historical Replay
+
+The content-addressed fixture set contains one valid inspect/intervene/verify
+trace and four one-defect causal variants:
+
+- request fingerprint mismatch;
+- environment-state mismatch;
+- discarded Evidence causing an Update;
+- an ambiguous multi-Evidence Update route.
+
+`manifest.json` pins SHA-256 for all 45 artifact files. Tests reject digest
+drift, absolute source paths, symlinks, secrets, and evaluator paths. The valid
+trace includes an observable guard discard and classifies `conformant`; every
+broken trace classifies `causal_conformance_error`.
+
+Historical expectations are now evaluated through the reusable API: the two
+pre-Probe traces classify `provider_contract_error`, while the old completed
+Semaphore/TaskGroup trace classifies `causal_conformance_error`.
+
+## Script Integration
+
+`validate_smoke_run.py` retains its lock, Harbor result, exception, output, and
+CLI compatibility. Its former script-local causal parser was removed;
+`_complete_trace()` is now a compatibility boolean wrapper around
+`validate_trial_trace()`. Provider failure detection also consumes the report
+before preserving the existing Harbor exception fallback.
+
+`validate_paired_gate.py` likewise keeps its injectable boolean callback and
+existing output surface while its default callback delegates to the reusable
+validator. No experiment-lock semantics changed.
+
+## Benchmark-Lock Compatibility
+
+The authorized helper in `test_benchmark_lock.py` now constructs current
+`TerminalProbePlan`, `CausalTraceRegistry`, action, Signal, decision, provider
+contract, telemetry, summary, and strict ATIF artifacts. Policy-denied cases
+retain their original assertions while reconciling reserved action counters
+and removing causal artifacts only where no observation exists.
+
+Before modernization, the file reported exactly:
+
+```text
+39 failed, 26 passed
+```
+
+All 39 failures came from the removed standalone
+`signal_from_observation(observation=...)` API. After modernization:
+
+```text
+65 passed
+```
+
+## TDD Evidence
+
+Tests and fixtures were written before production implementation. The required
+initial focused command failed during collection for the intended reason:
+
+```text
+ModuleNotFoundError: No module named 'bayesprobe_terminal_bench.conformance'
+```
+
+After implementation and wrapper migration, the final focused/wrapper suite
+completed with:
+
+```text
+102 passed
+```
+
+The focused set includes conformance, historical replay, benchmark-lock, smoke
+wrapper, and paired-gate coverage.
+
+## Final Verification
+
+Fresh final commands produced:
+
+```text
+Nested benchmark suite: 544 passed
+Root public/paradigm suite: 50 passed
+Broad root suite: 1766 passed, 11 skipped
+```
+
+Additional checks completed successfully:
+
+- `python -m compileall -q src scripts tests`
+- `git diff --check`
+- `git diff --name-only -- bayesprobe` returned no paths
+- causal fixture secret/evaluator scan returned no matches
+- causal fixture symlink scan returned no paths
+- manifest integrity and portability tests passed in the nested suite
+
+## Self-Review
+
+The final diff remains inside the authorized Task 8 ownership boundary. The
+validator does not introduce an evidence integrator, posterior updater, task
+loop, or core-control-flow change. It does not read official reward. The
+scripts contain no second generic validator, active Task 7 ATIF identities are
+unchanged, and fixture helper updates preserve the benchmark lock's assertions.
+
+No unresolved correctness finding remains from self-review.

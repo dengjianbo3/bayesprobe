@@ -7,12 +7,15 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+from bayesprobe_terminal_bench.conformance import (
+    TraceClassification,
+    validate_trial_trace,
+)
 from bayesprobe_terminal_bench.experiment_lock import (
     FROZEN_GATE_TASK_IDS,
     PAIRED_GATE_ARMS,
     PairedGateLock,
 )
-from validate_smoke_run import _complete_trace
 
 
 _SECRET_PATTERN = re.compile(
@@ -22,12 +25,19 @@ _SECRET_PATTERN = re.compile(
 )
 
 
+def _trace_is_conformant(artifact_root: Path) -> bool:
+    return (
+        validate_trial_trace(artifact_root).classification
+        is TraceClassification.CONFORMANT
+    )
+
+
 def validate_paired_gate_jobs(
     *,
     lock_path: Path,
     direct_job: Path,
     bayesprobe_job: Path,
-    trace_validator: Callable[[Path], bool] = _complete_trace,
+    trace_validator: Callable[[Path], bool] = _trace_is_conformant,
 ) -> dict[str, object]:
     try:
         lock = PairedGateLock.model_validate_json(
