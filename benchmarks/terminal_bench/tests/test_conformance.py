@@ -702,6 +702,154 @@ def test_empty_artifact_directory_is_adapter_error(tmp_path: Path) -> None:
     assert any("envelope" in violation for violation in report.violations)
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "bayesprobe_ledger.jsonl",
+        "errors.jsonl",
+        "provider_contract.jsonl",
+        "provider_telemetry.jsonl",
+        "plans.jsonl",
+        "environment_actions.jsonl",
+        "causal_actions.jsonl",
+        "causal_decisions.jsonl",
+        "summary.json",
+        "trajectory.json",
+    ],
+)
+@pytest.mark.parametrize(
+    "contents",
+    ["", " \n\t", "{}\n"],
+    ids=["empty", "whitespace", "empty-object"],
+)
+def test_isolated_meaningless_envelope_file_is_adapter_error(
+    tmp_path: Path,
+    filename: str,
+    contents: str,
+) -> None:
+    artifact_root = tmp_path / "isolated-envelope"
+    artifact_root.mkdir()
+    (artifact_root / filename).write_text(contents, encoding="utf-8")
+
+    report = validate_trial_trace(artifact_root)
+
+    assert report.classification is TraceClassification.ADAPTER_ERROR
+    assert report.violations
+    assert all(item.startswith("adapter:") for item in report.violations)
+
+
+def test_nonempty_non_substantive_ledger_is_adapter_error(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "non-substantive-ledger"
+    artifact_root.mkdir()
+    _write_jsonl_objects(
+        artifact_root / "bayesprobe_ledger.jsonl",
+        [
+            {
+                "record_type": "task_admission",
+                "payload": {"status": "admitted"},
+            }
+        ],
+    )
+
+    report = validate_trial_trace(artifact_root)
+
+    assert report.classification is TraceClassification.ADAPTER_ERROR
+    assert any("substantive" in item for item in report.violations)
+
+
+def test_artifact_root_symlink_is_security_violation_without_following(
+    tmp_path: Path,
+) -> None:
+    target = _copy_conformant_fixture(tmp_path, "symlink-target")
+    artifact_root = tmp_path / "artifact-root-link"
+    artifact_root.symlink_to(target, target_is_directory=True)
+
+    report = validate_trial_trace(artifact_root)
+
+    assert report.classification is TraceClassification.CAUSAL_CONFORMANCE_ERROR
+    assert report.complete_cycles == 0
+    assert report.plans == 0
+    assert report.violations == ("security:artifact root symlink is forbidden",)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{}, {"category": ""}, {"category": "unknown_error"}],
+    ids=["missing", "empty", "unknown"],
+)
+def test_invalid_errors_category_is_adapter_error(
+    tmp_path: Path,
+    record: dict[str, str],
+) -> None:
+    fixture = _copy_conformant_fixture(tmp_path, "invalid-error-category")
+    _write_jsonl_objects(fixture / "errors.jsonl", [record])
+
+    report = validate_trial_trace(fixture)
+
+    assert report.classification is TraceClassification.ADAPTER_ERROR
+    assert "adapter:invalid errors.jsonl category at record 1" in report.violations
+
+
+@pytest.mark.parametrize(
+    ("category", "expected", "bucket"),
+    [
+        (
+            "causal_conformance_error",
+            TraceClassification.CAUSAL_CONFORMANCE_ERROR,
+            "causal",
+        ),
+        (
+            "provider_contract_error",
+            TraceClassification.PROVIDER_CONTRACT_ERROR,
+            "provider",
+        ),
+        ("budget_error", TraceClassification.BUDGET_ERROR, "budget"),
+        ("adapter_error", TraceClassification.ADAPTER_ERROR, "adapter"),
+    ],
+)
+def test_isolated_explicit_terminal_error_keeps_its_classification(
+    tmp_path: Path,
+    category: str,
+    expected: TraceClassification,
+    bucket: str,
+) -> None:
+    artifact_root = tmp_path / category
+    artifact_root.mkdir()
+    _write_jsonl_objects(
+        artifact_root / "errors.jsonl",
+        [{"category": category}],
+    )
+
+    report = validate_trial_trace(artifact_root)
+
+    assert report.classification is expected
+    assert report.violations == (f"{bucket}:recorded {category}",)
+
+
+def test_policy_error_category_uses_policy_validation_not_adapter_fallback(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "policy-error"
+    artifact_root.mkdir()
+    _write_jsonl_objects(
+        artifact_root / "errors.jsonl",
+        [
+            {
+                "action_index": 1,
+                "category": "policy_error",
+                "error_type": "PolicyViolation",
+                "probe_id": "P1",
+            }
+        ],
+    )
+
+    report = validate_trial_trace(artifact_root)
+
+    assert report.classification is TraceClassification.CAUSAL_CONFORMANCE_ERROR
+    assert any("causal diagnostics" in item for item in report.violations)
+    assert not any("invalid errors.jsonl category" in item for item in report.violations)
+
+
 def test_completed_trace_without_plans_or_actions_is_causal_error(
     tmp_path: Path,
 ) -> None:

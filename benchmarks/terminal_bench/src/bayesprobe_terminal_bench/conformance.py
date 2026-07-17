@@ -392,24 +392,27 @@ _ERROR_CATEGORY_MAP = {
     "adapter_error": "adapter",
     "plan_error": "adapter",
 }
+_KNOWN_ERROR_CATEGORIES = frozenset((*_ERROR_CATEGORY_MAP, "policy_error"))
 
 
 def validate_trial_trace(artifact_root: Path) -> ConformanceReport:
     """Validate one BayesProbe trial artifact directory without using reward."""
     root = Path(artifact_root)
     violations = _ViolationBuckets()
+    if root.is_symlink():
+        violations.add("security", "artifact root symlink is forbidden")
+        return _report(violations=violations)
     if not root.is_dir():
         violations.add("adapter", "artifact root is not a directory")
         return _report(violations=violations)
 
     trajectory_path = _trajectory_path(root)
     _scan_artifacts(root, trajectory_path=trajectory_path, violations=violations)
-    if trajectory_path is None and not any(
-        (root / name).is_file() for name in _TRACE_ENVELOPE_FILES
-    ):
-        violations.add("adapter", "trace envelope is absent")
+    if not _has_structured_trace_envelope(root, trajectory_path=trajectory_path):
+        violations.add("adapter", "trace envelope has no structured records")
+        return _report(violations=violations)
     errors = _read_jsonl(root / "errors.jsonl", violations, "adapter", required=False)
-    _classify_recorded_errors(errors, violations=violations)
+    has_terminal_error = _classify_recorded_errors(errors, violations=violations)
     denied_actions = _policy_denied_action_count(errors, violations=violations)
 
     ledger = _read_jsonl(
@@ -472,6 +475,8 @@ def validate_trial_trace(artifact_root: Path) -> ConformanceReport:
         or by_type.get("external_signal")
         or by_type.get("evidence_event")
     )
+    if not (substantive_trace or complete_cycles or has_terminal_error):
+        violations.add("adapter", "trace has no substantive or completed outcome")
     if (attempts or substantive_trace or complete_cycles) and not provider_records:
         violations.add("provider", "required provider telemetry is missing")
     if substantive_trace and not attempts:
@@ -639,6 +644,34 @@ def _scan_artifacts(
             violations.add("security", f"secret-shaped content found: {path.name}")
         if _EVALUATOR_PATH_PATTERN.search(text) or _EVALUATOR_PATH.search(text):
             violations.add("security", f"evaluator-path content found: {path.name}")
+
+
+def _has_structured_trace_envelope(
+    root: Path,
+    *,
+    trajectory_path: Path | None,
+) -> bool:
+    paths = [root / name for name in _TRACE_ENVELOPE_FILES]
+    if trajectory_path is not None:
+        paths.append(trajectory_path)
+    for path in dict.fromkeys(paths):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        chunks = text.splitlines() if path.suffix == ".jsonl" else [text]
+        for chunk in chunks:
+            if not chunk.strip():
+                continue
+            try:
+                value = json.loads(chunk, object_pairs_hook=_unique_object)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(value, Mapping) and value:
+                return True
+    return False
 
 
 def _trajectory_path(root: Path) -> Path | None:
@@ -1730,12 +1763,21 @@ def _classify_recorded_errors(
     records: Sequence[Mapping[str, Any]],
     *,
     violations: _ViolationBuckets,
-) -> None:
-    for record in records:
+) -> bool:
+    has_terminal_error = False
+    for index, record in enumerate(records, start=1):
         category = record.get("category")
-        bucket = _ERROR_CATEGORY_MAP.get(category) if isinstance(category, str) else None
-        if bucket is not None:
-            violations.add(bucket, f"recorded {category}")
+        if not isinstance(category, str) or category not in _KNOWN_ERROR_CATEGORIES:
+            violations.add(
+                "adapter",
+                f"invalid errors.jsonl category at record {index}",
+            )
+            continue
+        if category == "policy_error":
+            continue
+        violations.add(_ERROR_CATEGORY_MAP[category], f"recorded {category}")
+        has_terminal_error = True
+    return has_terminal_error
 
 
 def _policy_denied_action_count(
