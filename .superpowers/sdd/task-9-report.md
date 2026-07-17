@@ -488,3 +488,12 @@ UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run --offline python \
 ```
 
 No live command was run during this corrective cycle.
+
+### Final Timestamp Correction
+
+The focused re-review found one remaining fail-open case: Oracle completion
+accepted any nonempty string. Parameterized tests added malformed and naive
+timestamps alongside the empty-string case. Before implementation, the empty
+case passed while the two new cases failed (`2 failed, 1 passed`). Lock writing
+now parses ISO-8601 and requires timezone information; the same check is
+`3 passed`. No other re-review finding was reported.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 
@@ -176,6 +177,15 @@ def _require_oracle_result(result: Mapping[str, object]) -> None:
         raise ValueError("Oracle agent provenance is invalid")
     finished_at = result.get("finished_at")
     if not isinstance(finished_at, str) or not finished_at.strip():
+        raise ValueError("Oracle result completion is invalid")
+    normalized = (
+        f"{finished_at[:-1]}+00:00" if finished_at.endswith("Z") else finished_at
+    )
+    try:
+        completed_at = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ValueError("Oracle result completion is invalid") from None
+    if completed_at.tzinfo is None or completed_at.utcoffset() is None:
         raise ValueError("Oracle result completion is invalid")
 
 

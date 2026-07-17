@@ -503,13 +503,18 @@ def test_causal_lock_writer_rejects_non_oracle_provenance(
         )
 
 
-def test_causal_lock_writer_rejects_empty_oracle_completion_time(
+@pytest.mark.parametrize(
+    "finished_at",
+    ["", "not-a-timestamp", "2026-07-17T00:00:00"],
+)
+def test_causal_lock_writer_rejects_invalid_oracle_completion_time(
     tmp_path: Path,
+    finished_at: str,
 ) -> None:
     job = _oracle_job(tmp_path / "oracle")
     result_path = job / "break-filter-js-from-html__oracle" / "result.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    result["finished_at"] = ""
+    result["finished_at"] = finished_at
     _write_json(result_path, result)
 
     with pytest.raises(ValueError, match="completion"):
