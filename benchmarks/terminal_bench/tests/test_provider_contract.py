@@ -451,7 +451,7 @@ def _public_probe_context() -> ProbeDesignContext:
     )
 
 
-def test_adapter_rejects_payloads_that_public_framers_and_designers_accept(tmp_path) -> None:
+def test_adapter_rejects_policy_frame_that_public_framer_accepts(tmp_path) -> None:
     policy_frame = _frame(hypothesis_type="implementation_policy")
     public_framer = ModelTaskFramer(RecordingGateway([policy_frame]))
     accepted_frame = public_framer.frame(
@@ -464,16 +464,46 @@ def test_adapter_rejects_payloads_that_public_framers_and_designers_accept(tmp_p
     )
     assert accepted_frame.hypothesis_frame.hypotheses[0].type == "implementation_policy"
 
-    public_probe = _probe()
-    public_probe["proposals"][0]["support_condition"] = {"H1": "partial support"}
-    accepted_probes = ModelProbeDesigner(RecordingGateway([public_probe])).propose(
-        _public_probe_context()
-    )
-    assert len(accepted_probes.candidates) == 1
-
     contract = TerminalContractModelGateway(
         RecordingGateway([policy_frame, policy_frame, policy_frame]),
         artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
     )
     with pytest.raises(ProviderContractError):
         contract.complete_structured(_frame_request())
+
+
+def test_adapter_rejects_partial_probe_map_that_public_designer_accepts(tmp_path) -> None:
+    partial_probe = _probe()
+    partial_probe["proposals"][0]["support_condition"] = {
+        "H1": "partial support"
+    }
+
+    accepted_probes = ModelProbeDesigner(RecordingGateway([partial_probe])).propose(
+        _public_probe_context()
+    )
+    assert len(accepted_probes.candidates) == 1
+
+    delegate = RecordingGateway([partial_probe, partial_probe, partial_probe])
+    contract = TerminalContractModelGateway(
+        delegate,
+        artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
+    )
+    with pytest.raises(ProviderContractError, match="terminal_probe_design") as raised:
+        contract.complete_structured(_probe_request())
+
+    assert raised.value.attempts == 3
+    assert [request.task for request in delegate.requests] == [
+        "design_probes",
+        "repair_probe_design",
+        "repair_probe_design",
+    ]
+    attempts = _attempts(tmp_path / "provider_contract.jsonl")
+    assert [attempt["validation"] for attempt in attempts] == [
+        "invalid",
+        "invalid",
+        "invalid",
+    ]
+    assert all(
+        "proposals.0.support_condition:value_error" in attempt["field_errors"]
+        for attempt in attempts
+    )

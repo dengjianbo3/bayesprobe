@@ -110,3 +110,76 @@ The decorator is intentionally not wired into `build_live_session` in this
 task: `runner_factory.py` is outside the explicit ownership boundary. A later
 integration task must compose `TerminalContractModelGateway` around the shared
 budgeted provider gateway so live framing and Probe design use this contract.
+
+## Review Fix Cycle 1
+
+### Coverage Fix
+
+Added an explicit differential Probe-design test using one partial-map payload
+for both paths. The existing public `ModelProbeDesigner` accepts the payload,
+whose `support_condition` names only `H1` while the proposal targets `H1` and
+`H2`. The same payload is then returned for all three calls made through
+`TerminalContractModelGateway`.
+
+The test proves that the terminal contract:
+
+- makes only the initial `design_probes` call and two numbered
+  `repair_probe_design` calls;
+- raises `ProviderContractError` with `attempts == 3` after exhaustion;
+- records exactly three `invalid` attempts; and
+- records the safe Pydantic diagnostic
+  `proposals.0.support_condition:value_error` for every attempt.
+
+The new focused test passed on its first run, so this cycle is honestly
+classified as coverage-only. No production defect was found and
+`provider_contract.py` was not modified.
+
+### Exact Test Evidence
+
+New differential test during development:
+
+```text
+uv run pytest tests/test_provider_contract.py::test_adapter_rejects_partial_probe_map_that_public_designer_accepts -q
+1 passed in 0.04s
+```
+
+Focused contract and artifact suites:
+
+```text
+uv run pytest tests/test_provider_contract.py tests/test_artifacts.py -q
+29 passed in 0.06s
+```
+
+Specified runner/public-reuse suites:
+
+```text
+uv run pytest tests/test_runner_factory.py tests/test_public_reuse.py -q
+76 passed in 0.27s
+```
+
+Full nested suite:
+
+```text
+uv run pytest tests -q
+338 passed in 8.17s
+```
+
+The first focused command launch was blocked before pytest started because the
+sandbox could not access uv's existing cache. It was rerun with approved cache
+access; only the successful pytest execution above is test evidence.
+
+### Self-Review
+
+- Confirmed the exact same partial-map dictionary is accepted by the public
+  designer and reused for every terminal-contract response.
+- Confirmed the test checks both bounded delegate tasks and persisted invalid
+  attempt telemetry, not merely the final exception.
+- Confirmed the expected field diagnostic contains only a Pydantic location
+  and error type.
+- Confirmed no production file, BayesProbe core file, Task 1 fixture, plan,
+  specification, generated lock, or pre-existing `reports/` content changed.
+
+### Concerns
+
+None for this review fix. The previously documented later live-session wiring
+boundary remains unchanged.
