@@ -1181,14 +1181,100 @@ def _judgment_response_sha256(response: Mapping[str, Any]) -> str:
     try:
         serialized = canonical_json(response)
     except (TypeError, ValueError):
-        serialized = json.dumps(
-            response,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=lambda value: type(value).__qualname__,
-        )
+        serialized = _malformed_judgment_json(response)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _malformed_judgment_json(response: Mapping[str, Any]) -> str:
+    try:
+        tagged = _type_tagged_canonical_value(response, active_ids=set())
+        return canonical_json(tagged)
+    except Exception:
+        return canonical_json(["unserializable", _stable_type_name(response)])
+
+
+def _type_tagged_canonical_value(
+    value: Any,
+    *,
+    active_ids: set[int],
+) -> Any:
+    if value is None:
+        return ["none"]
+    if type(value) is bool:
+        return ["bool", value]
+    if type(value) is int:
+        sign = "negative" if value < 0 else "nonnegative"
+        return ["int", sign, format(abs(value), "x")]
+    if type(value) is float:
+        return ["float", value.hex()]
+    if type(value) is complex:
+        return ["complex", value.real.hex(), value.imag.hex()]
+    if isinstance(value, str):
+        return ["str", value]
+    if isinstance(value, bytes | bytearray | memoryview):
+        return [type(value).__name__, bytes(value).hex()]
+
+    value_id = id(value)
+    if value_id in active_ids:
+        return ["cycle", _stable_type_name(value)]
+
+    if isinstance(value, Mapping):
+        active_ids.add(value_id)
+        try:
+            entries = [
+                [
+                    _type_tagged_canonical_value(key, active_ids=active_ids),
+                    _type_tagged_canonical_value(item, active_ids=active_ids),
+                ]
+                for key, item in value.items()
+            ]
+        finally:
+            active_ids.discard(value_id)
+        entries.sort(key=canonical_json)
+        return ["mapping", _stable_type_name(value), entries]
+
+    if isinstance(value, list | tuple):
+        active_ids.add(value_id)
+        try:
+            items = [
+                _type_tagged_canonical_value(item, active_ids=active_ids)
+                for item in value
+            ]
+        finally:
+            active_ids.discard(value_id)
+        return [type(value).__name__, items]
+
+    if isinstance(value, set | frozenset):
+        active_ids.add(value_id)
+        try:
+            items = [
+                _type_tagged_canonical_value(item, active_ids=active_ids)
+                for item in value
+            ]
+        finally:
+            active_ids.discard(value_id)
+        items.sort(key=canonical_json)
+        return [type(value).__name__, items]
+
+    active_ids.add(value_id)
+    try:
+        try:
+            state = vars(value)
+        except (TypeError, AttributeError):
+            state = None
+        tagged_state = (
+            None
+            if not isinstance(state, Mapping)
+            else _type_tagged_canonical_value(state, active_ids=active_ids)
+        )
+    finally:
+        active_ids.discard(value_id)
+    return ["object", _stable_type_name(value), tagged_state]
+
+
+def _stable_type_name(value: object) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
 
 
 def _is_nonstring_sequence(value: object) -> bool:

@@ -1766,6 +1766,49 @@ def test_likelihood_keys_must_be_strings_before_target_set_comparison(
     ]
 
 
+def test_mixed_likelihood_key_types_record_one_stable_target_mismatch_decision(
+    probe,
+    execution_context,
+) -> None:
+    registry, request, _ = _current_case(
+        probe=probe,
+        execution_context=execution_context,
+        role="inspect",
+        hypothesis_types={"H1": "root_cause"},
+    )
+    likelihood_orders = (
+        {"H1": "strongly_confirming", 1: "neutral"},
+        {1: "neutral", "H1": "strongly_confirming"},
+    )
+    judgment_hashes: list[str] = []
+
+    for likelihoods in likelihood_orders:
+        events: list[str] = []
+        response = _judgment(["H1"], likelihoods=likelihoods)
+        delegate = _RecordingDelegate(response, events=events)
+        artifacts = _RecordingDecisionSink(events)
+        gateway = causal_module.CausalEvidenceModelGateway(
+            delegate=delegate,
+            registry=registry,
+            artifacts=artifacts,
+        )
+
+        with pytest.raises(ModelGatewayValidationError) as raised:
+            gateway.complete_structured(request)
+
+        assert str(raised.value) == "causal_admissibility:target_mismatch"
+        assert events == ["delegate", "decision"]
+        assert delegate.requests == [request]
+        assert len(artifacts.decisions) == 1
+        decision = artifacts.decisions[0]
+        assert decision["decision"] == "discard"
+        assert decision["reason_code"] == "target_mismatch"
+        assert len(decision["judgment_response_sha256"]) == 64
+        judgment_hashes.append(decision["judgment_response_sha256"])
+
+    assert judgment_hashes[0] == judgment_hashes[1]
+
+
 @pytest.mark.parametrize(
     ("request_initial_type", "expected_reason"),
     [
