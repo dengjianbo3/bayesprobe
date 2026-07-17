@@ -7,7 +7,7 @@ from threading import Lock
 from typing import Any
 
 from bayesprobe_terminal_bench.actions import ShellAction
-from bayesprobe_terminal_bench.config import BudgetExhausted
+from bayesprobe_terminal_bench.config import BudgetExhausted, DeadlineExhausted
 
 
 class TrialDeadline:
@@ -45,7 +45,7 @@ class TrialDeadline:
             )
             timeout = min(configured_timeout_seconds, remaining)
             if timeout <= 0:
-                raise BudgetExhausted("trial deadline exhausted")
+                raise DeadlineExhausted("trial deadline exhausted")
             return timeout
 
 

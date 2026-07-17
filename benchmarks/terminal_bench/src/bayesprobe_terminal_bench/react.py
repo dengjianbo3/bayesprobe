@@ -18,6 +18,7 @@ from bayesprobe_terminal_bench.actions import (
 )
 from bayesprobe_terminal_bench.config import (
     BudgetExhausted,
+    DeadlineExhausted,
     ProviderIdentityError,
     RunBudget,
     TerminalBenchConfig,
@@ -474,6 +475,11 @@ class ReActController:
             for action in step.actions:
                 try:
                     action_index = self._budget.reserve_action()
+                except DeadlineExhausted as error:
+                    self._artifacts.append_error(
+                        {"category": error.category, "step": step_index}
+                    )
+                    raise
                 except BudgetExhausted:
                     self._artifacts.append_error(
                         {"category": "budget_error", "step": step_index}

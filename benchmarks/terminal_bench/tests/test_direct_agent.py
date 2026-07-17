@@ -256,6 +256,90 @@ async def test_direct_agent_persists_classified_post_artifact_failure(
 
 
 @pytest.mark.asyncio
+async def test_direct_agent_propagates_expired_action_as_budget_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bayesprobe_terminal_bench.actions import ShellAction
+    from bayesprobe_terminal_bench.config import DeadlineExhausted, RunBudget
+    from bayesprobe_terminal_bench.deadline import (
+        DeadlineEnvironmentBridge,
+        TrialDeadline,
+    )
+    from bayesprobe_terminal_bench.react import ReActController, ReActStep
+
+    class ControllerArtifacts(_Artifacts):
+        def __init__(self) -> None:
+            super().__init__()
+            self.plans: list[object] = []
+
+        def append_plan(self, payload: object) -> None:
+            self.plans.append(payload)
+
+    class Planner:
+        def next_step(self, **_: object) -> ReActStep:
+            return ReActStep(
+                thought_summary="inspect",
+                actions=(ShellAction(command="pwd"),),
+                done=False,
+            )
+
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, int]] = []
+
+        def execute(self, action: object, action_index: int) -> object:
+            self.calls.append((action, action_index))
+            raise AssertionError("expired action must not reach the delegate")
+
+    artifacts = ControllerArtifacts()
+    deadline = TrialDeadline(timeout_seconds=5, monotonic=lambda: 0.0)
+    budget = RunBudget(
+        max_actions=1,
+        reservation_guard=deadline.require_active,
+    )
+    bridge = Bridge()
+    controller = ReActController(
+        planner=Planner(),
+        bridge=DeadlineEnvironmentBridge(
+            delegate=bridge,
+            deadline=deadline,
+            configured_timeout_seconds=120,
+        ),
+        artifacts=artifacts,
+        budget=budget,
+    )
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.direct_agent.TrialArtifactStore",
+        lambda *args, **kwargs: artifacts,
+    )
+    monkeypatch.setattr(
+        "bayesprobe_terminal_bench.direct_agent.build_direct_session",
+        lambda **kwargs: SimpleNamespace(
+            controller=controller,
+            artifacts=artifacts,
+            budget=budget,
+        ),
+    )
+    context = AgentContext(metadata={"harbor_owned": "preserved"})
+
+    with pytest.raises(DirectHarborAgentError) as failure:
+        await _agent(tmp_path).run("solve it", object(), context)
+
+    assert failure.value.category == "budget_error"
+    assert failure.value.__cause__ is None
+    assert failure.value.__context__ is None
+    assert artifacts.errors == [
+        {"category": "budget_error", "step": 1},
+        {"category": "budget_error", "error_type": DeadlineExhausted.__name__},
+    ]
+    assert artifacts.summaries == []
+    assert context.metadata == {"harbor_owned": "preserved"}
+    assert budget.actions_used == 0
+    assert bridge.calls == []
+
+
+@pytest.mark.asyncio
 async def test_direct_agent_propagates_cancellation_without_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

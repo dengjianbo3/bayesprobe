@@ -117,11 +117,14 @@ Harbor action bridge, and reactive planner. It is also bound to the shared
 `RunBudget`, which rejects an already-expired operation before either a model
 call or action reservation can increment. The OpenAI and environment proxies
 retain the definitive timeout check immediately before their external
-delegates. The benchmark-local environment proxy clamps shell action timeouts
-and temporarily clamps the existing Harbor bridge's non-shell timeout per
-invocation, restoring it afterward. The terminal planner proxy recovers
-pending deadline/accounting exceptions after the out-of-scope planner maps
-transport failures.
+delegates. Deadline expiry uses the typed `DeadlineExhausted` subtype while
+retaining the public `budget_error` category, so the reactive controller
+rethrows it while preserving normal action-cap exhaustion as a clean stop. The
+benchmark-local environment proxy clamps shell action timeouts and temporarily
+clamps the existing Harbor bridge's non-shell timeout per invocation,
+restoring it afterward. The terminal planner proxy recovers pending
+deadline/accounting exceptions after the out-of-scope planner maps transport
+failures.
 
 ### Reactive baseline and failures
 
@@ -224,11 +227,20 @@ cross-operation deadline cap independence
 
 pre-reservation deadline guard + both live compositions
 6 failed: four missing require_active guards + two missing budget bindings
+
+typed reactive deadline propagation
+2 failed: DeadlineExhausted missing
+2 failed after subtype addition: controller returned normal success
 ```
 
-Each set passed after its narrow implementation change: `1 passed`,
+The eight earlier correction sets passed after their narrow implementation
+changes: `1 passed`,
 `4 passed`, `2 passed`, `1 passed`, `1 passed`, `1 passed`, and `1 passed`,
 and `6 passed`, respectively.
+
+The typed deadline correction then passed its two controller/Direct-agent
+regressions (`2 passed in 0.04s`). The expanded check including ordinary
+max-action exhaustion passed separately (`3 passed in 0.03s`).
 
 ### Final focused GREEN
 
@@ -244,7 +256,7 @@ UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run pytest \
   tests/test_direct_agent.py \
   tests/test_public_reuse.py -q
 
-158 passed in 1.38s
+159 passed in 1.33s
 ```
 
 Compilation check:
@@ -290,7 +302,7 @@ Count proof: `4 + 1 + 1 + 3 + 1 + 1 + 1 + 3 + 6 + 2 + 4 + 12 = 39`.
 
 No new full-suite failure appeared. The suite was not rerun after narrow
 owned-boundary review fixes, honoring the explicit one-run requirement; every
-post-run change is covered by the final 158-test focused gate.
+post-run change is covered by the final 159-test focused gate.
 
 ## Root and Security Verification
 

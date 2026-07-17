@@ -559,6 +559,7 @@ def test_controller_stops_cleanly_when_action_budget_is_exhausted() -> None:
 
 
 def test_expired_deadline_rejects_react_action_before_action_reservation() -> None:
+    from bayesprobe_terminal_bench.config import DeadlineExhausted
     from bayesprobe_terminal_bench.deadline import (
         DeadlineEnvironmentBridge,
         TrialDeadline,
@@ -591,9 +592,10 @@ def test_expired_deadline_rejects_react_action_before_action_reservation() -> No
         budget=budget,
     )
 
-    result = controller.run("repair the task")
+    with pytest.raises(DeadlineExhausted) as failure:
+        controller.run("repair the task")
 
-    assert result.stop_reason == "action_budget_exhausted"
+    assert failure.value.category == "budget_error"
     assert artifacts.errors == [{"category": "budget_error", "step": 1}]
     assert budget.actions_used == 0
     assert delegate.actions == []

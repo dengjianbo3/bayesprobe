@@ -22,6 +22,10 @@ class ProviderIdentityError(BudgetExhausted):
     category = "provider_identity_error"
 
 
+class DeadlineExhausted(BudgetExhausted):
+    pass
+
+
 _STABLE_TRIAL_CATEGORIES = frozenset(
     {
         "provider_contract_error",
