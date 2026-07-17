@@ -17,9 +17,12 @@ from bayesprobe_terminal_bench.actions import (
     ApplyPatchAction,
     ShellAction,
     TerminalAction,
+    TerminalPlanStep,
     TerminalProbePlan,
+    TransitionPrediction,
     WriteFileAction,
 )
+from bayesprobe_terminal_bench.causal import CausalActionRecord, CausalTraceRegistry
 from bayesprobe_terminal_bench.config import BudgetExhausted, RunBudget
 from bayesprobe_terminal_bench.environment import PolicyViolation
 from bayesprobe_terminal_bench.gateway import HarborProbeToolGateway
@@ -31,6 +34,8 @@ from bayesprobe_terminal_bench.signals import signal_from_observation
 class RecordedArtifacts:
     plans: list[dict[str, Any]]
     observations: list[ActionObservation]
+    causal_actions: list[CausalActionRecord]
+    causal_decisions: list[dict[str, Any]]
     errors: list[dict[str, Any]]
 
     def append_plan(self, payload: dict[str, Any]) -> None:
@@ -38,6 +43,12 @@ class RecordedArtifacts:
 
     def append_observation(self, payload: ActionObservation) -> None:
         self.observations.append(payload)
+
+    def append_causal_action(self, payload: CausalActionRecord) -> None:
+        self.causal_actions.append(payload)
+
+    def append_causal_decision(self, payload: dict[str, Any]) -> None:
+        self.causal_decisions.append(payload)
 
     def append_error(self, payload: dict[str, Any]) -> None:
         self.errors.append(payload)
@@ -117,7 +128,10 @@ class BlockingPlanner:
 def _plan(*commands: str) -> TerminalProbePlan:
     return TerminalProbePlan(
         mode="inspect",
-        actions=tuple(ShellAction(command=command) for command in commands),
+        steps=tuple(
+            TerminalPlanStep(role="inspect", action=ShellAction(command=command))
+            for command in commands
+        ),
         expected_observation="The task workspace state is observed.",
     )
 
@@ -125,8 +139,21 @@ def _plan(*commands: str) -> TerminalProbePlan:
 def _intervention_plan(action: TerminalAction) -> TerminalProbePlan:
     return TerminalProbePlan(
         mode="intervene",
-        actions=(action,),
-        expected_observation="The requested workspace mutation is observed.",
+        steps=(
+            TerminalPlanStep(role="intervene", action=action),
+            TerminalPlanStep(
+                role="verify",
+                action=ShellAction(command="cat /workspace/model-authored-write.txt"),
+                verification_target="the requested workspace mutation persists",
+            ),
+        ),
+        expected_observation="The requested workspace mutation is acknowledged and verified.",
+        transition_predictions=(
+            TransitionPrediction(
+                hypothesis_id="H_workspace",
+                expected_transition="The workspace defect is repaired.",
+            ),
+        ),
     )
 
 
@@ -162,7 +189,41 @@ def _canonical_fingerprint(source_identity: str, raw_content: str) -> str:
 
 
 def _artifacts() -> RecordedArtifacts:
-    return RecordedArtifacts(plans=[], observations=[], errors=[])
+    return RecordedArtifacts(
+        plans=[],
+        observations=[],
+        causal_actions=[],
+        causal_decisions=[],
+        errors=[],
+    )
+
+
+def _record_for_signal(
+    *,
+    observation: ActionObservation,
+    probe: Any,
+    context: Any,
+    role: str = "inspect",
+    verification_target: str | None = None,
+) -> CausalActionRecord:
+    plan = TerminalProbePlan(
+        mode=role,
+        steps=(
+            TerminalPlanStep(
+                role=role,
+                action=observation.action,
+                verification_target=verification_target,
+            ),
+        ),
+        expected_observation="The action result is observed.",
+    )
+    registry = CausalTraceRegistry()
+    registered = registry.register_plan(probe=probe, context=context, plan=plan)
+    return registry.register_action(
+        plan=registered,
+        step_index=0,
+        observation=observation,
+    )
 
 
 def _gateway(
@@ -196,11 +257,19 @@ def test_signal_exposes_exact_executed_shell_request_separately_from_observation
         pre_environment_state_id="env:7",
         post_environment_state_id="env:8",
     )
+    causal_record = _record_for_signal(
+        observation=observation,
+        probe=probe,
+        context=execution_context,
+        role="verify",
+        verification_target="the cancellation cleanup invariant",
+    )
 
     signal = signal_from_observation(
         observation=observation,
         probe=probe,
         context=execution_context,
+        causal_record=causal_record,
     )
     payload = json.loads(signal.raw_content)
 
@@ -209,7 +278,15 @@ def test_signal_exposes_exact_executed_shell_request_separately_from_observation
     assert signal.provenance.epistemic_origin is EpistemicOrigin.TOOL_RESULT
     assert payload == {
         "action_index": 4,
-        "error_category": None,
+        "causal_binding": {
+            "action_id": causal_record.action_id,
+            "action_role": "verify",
+            "plan_id": causal_record.plan_id,
+            "policy_attempt_id": causal_record.policy_attempt_id,
+            "request_fingerprint": causal_record.request_fingerprint,
+            "subject_environment_state_id": "env:7",
+            "verification_target": "the cancellation cleanup invariant",
+        },
         "executed_request": {
             "command": "printf tests passed",
             "mutates_environment": True,
@@ -217,11 +294,8 @@ def test_signal_exposes_exact_executed_shell_request_separately_from_observation
             "type": "shell",
         },
         "observation": '{"stdout":"only this capped view"}',
-        "output_truncated": True,
         "post_environment_state_id": "env:8",
         "pre_environment_state_id": "env:7",
-        "return_code": 0,
-        "timed_out": False,
     }
     assert "full stdout" not in signal.raw_content
     assert "full stderr" not in signal.raw_content
@@ -232,8 +306,11 @@ def test_signal_exposes_exact_executed_shell_request_separately_from_observation
     )
     assert signal.provenance.derivation_root_id.startswith("harbor-action:sha256:")
     assert signal.provenance.correlation_group.startswith("harbor-env:sha256:")
-    assert signal.provenance.environment_state_id == "env:8"
-    assert signal.provenance.artifact_refs == ["environment_actions.jsonl#4"]
+    assert signal.provenance.environment_state_id == "env:7"
+    assert signal.provenance.artifact_refs == [
+        "environment_actions.jsonl#4",
+        f"causal_actions.jsonl#{causal_record.action_id}",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -281,13 +358,22 @@ def test_gateway_keeps_large_write_and_patch_inputs_out_of_signal_payloads(
         action=action,
         model_facing_output='{"stdout":"mutation completed"}',
         full_output_sha256="c" * 64,
+        pre_environment_state_id="env:0",
+        post_environment_state_id="env:1",
+    )
+    verification = _observation(
+        action=ShellAction(command="cat /workspace/model-authored-write.txt"),
+        action_index=2,
+        model_facing_output='{"stdout":"done"}',
+        pre_environment_state_id="env:1",
+        post_environment_state_id="env:1",
     )
     artifacts = _artifacts()
     gateway = _gateway(
         planner=ScriptedPlanner(plan=_intervention_plan(action)),
-        bridge=ScriptedBridge([observation]),
+        bridge=ScriptedBridge([observation, verification]),
         artifacts=artifacts,
-        budget=RunBudget(max_actions=1),
+        budget=RunBudget(max_actions=2),
     )
 
     signals = gateway.execute_probe(probe=probe, context=execution_context)
@@ -295,10 +381,14 @@ def test_gateway_keeps_large_write_and_patch_inputs_out_of_signal_payloads(
 
     assert payload["executed_request"] == expected_request
     assert payload["observation"] == '{"stdout":"mutation completed"}'
+    assert payload["causal_binding"]["action_role"] == "intervene"
+    assert payload["causal_binding"]["verification_target"] is None
     assert "action" not in payload
     assert marker not in signals[0].raw_content
     assert len(signals[0].raw_content) < 1_024
-    assert artifacts.observations == [observation]
+    assert len(signals) == 2
+    assert artifacts.observations == [observation, verification]
+    assert len(artifacts.causal_actions) == 2
     assert marker in json.dumps(artifacts.observations[0].model_dump(mode="json"))
 
 
@@ -310,44 +400,74 @@ def test_signal_caps_an_oversized_observation_independently_of_action_artifact(
         action=ShellAction(command="printf tests passed"),
         model_facing_output="z" * 1_000_000,
     )
+    causal_record = _record_for_signal(
+        observation=observation,
+        probe=probe,
+        context=execution_context,
+        role="verify",
+        verification_target="the command completes",
+    )
 
     signal = signal_from_observation(
         observation=observation,
         probe=probe,
         context=execution_context,
+        causal_record=causal_record,
     )
     payload = json.loads(signal.raw_content)
 
     assert len(payload["observation"].encode("utf-8")) <= 32_768
-    assert payload["output_truncated"] is True
     assert len(signal.raw_content.encode("utf-8")) < 66_000
 
 
 def test_signal_identity_and_roots_are_deterministic_and_distinct_across_lineages(probe, execution_context) -> None:
+    first_observation = _observation(action_index=1)
+    equivalent_observation = _observation(action_index=1)
+    different_action_observation = _observation(action_index=2)
+    different_probe_value = probe.model_copy(update={"id": "P_cycle_1_verify"})
+    first_record = _record_for_signal(
+        observation=first_observation, probe=probe, context=execution_context
+    )
+    equivalent_record = _record_for_signal(
+        observation=equivalent_observation, probe=probe, context=execution_context
+    )
+    different_action_record = _record_for_signal(
+        observation=different_action_observation, probe=probe, context=execution_context
+    )
+    different_probe_record = _record_for_signal(
+        observation=first_observation,
+        probe=different_probe_value,
+        context=execution_context,
+    )
     first = signal_from_observation(
-        observation=_observation(action_index=1),
+        observation=first_observation,
         probe=probe,
         context=execution_context,
+        causal_record=first_record,
     )
     equivalent = signal_from_observation(
-        observation=_observation(action_index=1),
+        observation=equivalent_observation,
         probe=probe,
         context=execution_context,
+        causal_record=equivalent_record,
     )
     different_action = signal_from_observation(
-        observation=_observation(action_index=2),
+        observation=different_action_observation,
         probe=probe,
         context=execution_context,
+        causal_record=different_action_record,
     )
     different_probe = signal_from_observation(
-        observation=_observation(action_index=1),
-        probe=probe.model_copy(update={"id": "P_cycle_1_verify"}),
+        observation=first_observation,
+        probe=different_probe_value,
         context=execution_context,
+        causal_record=different_probe_record,
     )
-    different_cycle = signal_from_observation(
-        observation=_observation(action_index=1, post_environment_state_id="env:1"),
-        probe=probe.model_copy(update={"cycle_id": "cycle_2"}),
-        context=type(execution_context)(
+    different_cycle_observation = _observation(
+        action_index=1, post_environment_state_id="env:1"
+    )
+    different_cycle_probe = probe.model_copy(update={"cycle_id": "cycle_2"})
+    different_cycle_context = type(execution_context)(
             run_id=execution_context.run_id,
             cycle_id="cycle_2",
             problem=execution_context.problem,
@@ -381,7 +501,17 @@ def test_signal_identity_and_roots_are_deterministic_and_distinct_across_lineage
             provider_schema_version=execution_context.provider_schema_version,
             hypotheses=execution_context.hypotheses,
             metadata=dict(execution_context.metadata),
-        ),
+        )
+    different_cycle_record = _record_for_signal(
+        observation=different_cycle_observation,
+        probe=different_cycle_probe,
+        context=different_cycle_context,
+    )
+    different_cycle = signal_from_observation(
+        observation=different_cycle_observation,
+        probe=different_cycle_probe,
+        context=different_cycle_context,
+        causal_record=different_cycle_record,
     )
 
     assert first.id == equivalent.id
@@ -402,7 +532,10 @@ def test_signal_identity_and_roots_are_deterministic_and_distinct_across_lineage
 
 def test_gateway_emits_one_tool_result_signal_per_completed_observation(probe, execution_context) -> None:
     artifacts = _artifacts()
-    observations = [_observation(action_index=1), _observation(action_index=2)]
+    observations = [
+        _observation(action=ShellAction(command="pwd"), action_index=1),
+        _observation(action=ShellAction(command="ls"), action_index=2),
+    ]
     planner = ScriptedPlanner(plan=_plan("pwd", "ls"))
     gateway = _gateway(
         planner=planner,
@@ -420,12 +553,14 @@ def test_gateway_emits_one_tool_result_signal_per_completed_observation(probe, e
         for signal in signals
     )
     assert [item.action_index for item in artifacts.observations] == [1, 2]
+    assert len(artifacts.causal_actions) == 2
+    assert len({item.action_id for item in artifacts.causal_actions}) == 2
     assert planner.histories == [()]
     assert len(artifacts.plans) == 1
     assert artifacts.errors == []
 
 
-def test_gateway_records_expected_planner_failure_without_a_signal_or_history(probe, execution_context) -> None:
+def test_gateway_records_and_reraises_expected_planner_failure_without_a_signal_or_history(probe, execution_context) -> None:
     artifacts = _artifacts()
     gateway = _gateway(
         planner=ScriptedPlanner(error=TerminalPlanError("planner-secret")),
@@ -434,7 +569,8 @@ def test_gateway_records_expected_planner_failure_without_a_signal_or_history(pr
         budget=RunBudget(),
     )
 
-    assert gateway.execute_probe(probe=probe, context=execution_context) == []
+    with pytest.raises(TerminalPlanError, match="planner-secret"):
+        gateway.execute_probe(probe=probe, context=execution_context)
     assert artifacts.plans == []
     assert artifacts.observations == []
     assert artifacts.errors == [
@@ -444,10 +580,51 @@ def test_gateway_records_expected_planner_failure_without_a_signal_or_history(pr
             "probe_id": probe.id,
         }
     ]
+    assert artifacts.causal_decisions == [
+        {
+            "category": "plan_error",
+            "cycle_id": execution_context.cycle_id,
+            "error_type": "TerminalPlanError",
+            "probe_id": probe.id,
+            "run_id": execution_context.run_id,
+            "stage": "planning",
+        }
+    ]
     assert "planner-secret" not in json.dumps(artifacts.errors)
 
 
-def test_gateway_returns_no_signal_when_planning_budget_is_exhausted(probe, execution_context) -> None:
+def test_gateway_records_stable_provider_contract_category_before_reraising(
+    probe,
+    execution_context,
+) -> None:
+    artifacts = _artifacts()
+    gateway = _gateway(
+        planner=ScriptedPlanner(
+            error=TerminalPlanError(
+                "contract-secret",
+                category="provider_contract_error",
+                attempts=2,
+            )
+        ),
+        bridge=ScriptedBridge([]),
+        artifacts=artifacts,
+        budget=RunBudget(),
+    )
+
+    with pytest.raises(TerminalPlanError, match="contract-secret"):
+        gateway.execute_probe(probe=probe, context=execution_context)
+
+    assert artifacts.errors == [
+        {
+            "category": "provider_contract_error",
+            "error_type": "TerminalPlanError",
+            "probe_id": probe.id,
+        }
+    ]
+    assert artifacts.causal_decisions[0]["category"] == "provider_contract_error"
+
+
+def test_gateway_records_and_reraises_when_planning_budget_is_exhausted(probe, execution_context) -> None:
     artifacts = _artifacts()
     gateway = _gateway(
         planner=ScriptedPlanner(error=BudgetExhausted("budget-secret")),
@@ -456,10 +633,20 @@ def test_gateway_returns_no_signal_when_planning_budget_is_exhausted(probe, exec
         budget=RunBudget(),
     )
 
-    assert gateway.execute_probe(probe=probe, context=execution_context) == []
+    with pytest.raises(BudgetExhausted, match="budget-secret"):
+        gateway.execute_probe(probe=probe, context=execution_context)
     assert artifacts.plans == []
     assert artifacts.observations == []
     assert artifacts.errors == [{"category": "budget_exhausted", "probe_id": probe.id}]
+    assert artifacts.causal_decisions == [
+        {
+            "category": "budget_exhausted",
+            "cycle_id": execution_context.cycle_id,
+            "probe_id": probe.id,
+            "run_id": execution_context.run_id,
+            "stage": "planning",
+        }
+    ]
     assert "budget-secret" not in json.dumps(artifacts.errors)
 
 
@@ -485,6 +672,8 @@ def test_gateway_continues_after_policy_rejection_without_fabricating_an_observa
     assert [call[1] for call in bridge.calls] == [1, 2]
     assert budget.calls == 2
     assert [item.action_index for item in artifacts.observations] == [2]
+    assert [item.observation.action_index for item in artifacts.causal_actions] == [2]
+    assert gateway._causal.record_for_signal(signals[0].id).observation.action_index == 2
     assert artifacts.errors == [
         {
             "action_index": 1,
@@ -496,7 +685,7 @@ def test_gateway_continues_after_policy_rejection_without_fabricating_an_observa
     assert "policy-secret" not in json.dumps(artifacts.errors)
 
 
-def test_gateway_stops_after_action_budget_exhaustion_without_executing_the_action(probe, execution_context) -> None:
+def test_gateway_reraises_after_action_budget_exhaustion_without_executing_the_action(probe, execution_context) -> None:
     artifacts = _artifacts()
     bridge = ScriptedBridge([_observation(action_index=1)])
     budget = CountingBudget(outcomes=[BudgetExhausted("budget-secret")])
@@ -507,11 +696,14 @@ def test_gateway_stops_after_action_budget_exhaustion_without_executing_the_acti
         budget=budget,
     )
 
-    assert gateway.execute_probe(probe=probe, context=execution_context) == []
+    with pytest.raises(BudgetExhausted, match="budget-secret"):
+        gateway.execute_probe(probe=probe, context=execution_context)
     assert budget.calls == 1
     assert bridge.calls == []
     assert artifacts.observations == []
     assert artifacts.errors == [{"category": "budget_exhausted", "probe_id": probe.id}]
+    assert artifacts.causal_decisions[0]["category"] == "budget_exhausted"
+    assert artifacts.causal_decisions[0]["stage"] == "action_budget"
     assert "budget-secret" not in json.dumps(artifacts.errors)
 
 
@@ -521,7 +713,7 @@ def test_gateway_preserves_only_actual_observations_in_later_planner_history(pro
         [
             PolicyViolation("rejected"),
             _observation(action_index=2),
-            _observation(action_index=3),
+            _observation(action=ShellAction(command="ls"), action_index=3),
             _observation(action_index=4),
         ]
     )
@@ -534,7 +726,10 @@ def test_gateway_preserves_only_actual_observations_in_later_planner_history(pro
     )
 
     gateway.execute_probe(probe=probe, context=execution_context)
-    gateway.execute_probe(probe=probe, context=execution_context)
+    gateway.execute_probe(
+        probe=probe.model_copy(update={"id": "P_cycle_1_followup"}),
+        context=execution_context,
+    )
 
     assert planner.histories == [(), (artifacts.observations[0],)]
     assert [item.action_index for item in artifacts.observations] == [2, 3, 4]
@@ -564,7 +759,10 @@ def test_gateway_scopes_history_to_each_run_id(probe, execution_context) -> None
 
     gateway.execute_probe(probe=probe, context=execution_context)
     gateway.execute_probe(probe=probe, context=other_run_context)
-    gateway.execute_probe(probe=probe, context=execution_context)
+    gateway.execute_probe(
+        probe=probe.model_copy(update={"id": "P_cycle_1_followup"}),
+        context=execution_context,
+    )
 
     assert planner.histories == [(), (), (first_run_observation,)]
 
@@ -600,7 +798,12 @@ def test_gateway_serializes_concurrent_probe_execution(
         if is_second:
             second_attempted.set()
         try:
-            gateway.execute_probe(probe=probe, context=context)
+            selected_probe = (
+                probe.model_copy(update={"id": "P_cycle_1_concurrent"})
+                if is_second
+                else probe
+            )
+            gateway.execute_probe(probe=selected_probe, context=context)
         except BaseException as error:
             errors.append(error)
 

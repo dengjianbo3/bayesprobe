@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import unicodedata
 from typing import Any
 
@@ -16,16 +15,22 @@ from bayesprobe import (
 
 from bayesprobe_terminal_bench.actions import (
     ActionObservation,
-    ApplyPatchAction,
     ShellAction,
-    TerminalAction,
-    WriteFileAction,
+    TerminalPlanStep,
+    TerminalProbePlan,
     action_may_mutate,
+)
+from bayesprobe_terminal_bench.causal import (
+    CausalActionRecord,
+    CausalTraceRegistry,
+    canonical_json,
+    canonical_sha256,
+    executed_request_from_action,
 )
 
 
 _HARBOR_TOOL_IDENTITY = "harbor:0.18.0"
-_SIGNAL_SCHEMA_VERSION = "harbor-observation:v2"
+_SIGNAL_SCHEMA_VERSION = "harbor-observation:v3"
 _MAX_OBSERVATION_BYTES = 32_768
 
 
@@ -34,21 +39,34 @@ def signal_from_observation(
     observation: ActionObservation,
     probe: ProbeDesign,
     context: ProbeExecutionBrief,
+    causal_record: CausalActionRecord | None = None,
 ) -> ExternalSignal:
     """Convert one completed Harbor action into one public external signal."""
-    raw_content = _canonical_json(_observation_payload(observation))
-    environment_digest = _digest(
+    if causal_record is None:
+        causal_record = _standalone_causal_record(
+            observation=observation,
+            probe=probe,
+            context=context,
+        )
+    _validate_causal_binding(
+        observation=observation,
+        probe=probe,
+        context=context,
+        causal_record=causal_record,
+    )
+    raw_content = canonical_json(_observation_payload(observation, causal_record))
+    environment_digest = canonical_sha256(
         {
             "run_id": context.run_id,
             "schema_version": _SIGNAL_SCHEMA_VERSION,
-            "post_environment_state_id": observation.post_environment_state_id,
+            "subject_environment_state_id": causal_record.subject_environment_state_id,
         }
     )
     source_identity = f"harbor-terminal:sha256:{environment_digest}"
     derivation_root_id = (
-        f"harbor-action:sha256:{_digest(_root_inputs(observation, probe, context))}"
+        f"harbor-action:sha256:{canonical_sha256(_root_inputs(causal_record))}"
     )
-    signal_id = f"S_harbor_{_digest(_signal_id_inputs(observation, probe, context))}"
+    signal_id = f"S_harbor_{canonical_sha256(_signal_id_inputs(causal_record))}"
     provenance = SignalProvenance(
         epistemic_origin=EpistemicOrigin.TOOL_RESULT,
         source_identity=source_identity,
@@ -59,8 +77,11 @@ def signal_from_observation(
             source_identity,
             raw_content,
         ),
-        artifact_refs=[f"environment_actions.jsonl#{observation.action_index}"],
-        environment_state_id=observation.post_environment_state_id,
+        artifact_refs=[
+            f"environment_actions.jsonl#{observation.action_index}",
+            f"causal_actions.jsonl#{causal_record.action_id}",
+        ],
+        environment_state_id=causal_record.subject_environment_state_id,
     )
     return ExternalSignal(
         id=signal_id,
@@ -75,48 +96,42 @@ def signal_from_observation(
     )
 
 
-def _observation_payload(observation: ActionObservation) -> dict[str, Any]:
-    bounded_observation, additionally_truncated = _bounded_text(
+def _observation_payload(
+    observation: ActionObservation,
+    causal_record: CausalActionRecord,
+) -> dict[str, Any]:
+    bounded_observation, _ = _bounded_text(
         observation.model_facing_output,
         _MAX_OBSERVATION_BYTES,
     )
     return {
         "action_index": observation.action_index,
-        "error_category": observation.error_category,
+        "causal_binding": {
+            "action_id": causal_record.action_id,
+            "action_role": causal_record.action_role,
+            "plan_id": causal_record.plan_id,
+            "policy_attempt_id": causal_record.policy_attempt_id,
+            "request_fingerprint": causal_record.request_fingerprint,
+            "subject_environment_state_id": causal_record.subject_environment_state_id,
+            "verification_target": causal_record.verification_target,
+        },
         "executed_request": executed_request_from_action(observation.action),
         "observation": bounded_observation,
-        "output_truncated": observation.output_truncated or additionally_truncated,
         "post_environment_state_id": observation.post_environment_state_id,
         "pre_environment_state_id": observation.pre_environment_state_id,
-        "return_code": observation.return_code,
-        "timed_out": observation.timed_out,
     }
 
 
-def _root_inputs(
-    observation: ActionObservation,
-    probe: ProbeDesign,
-    context: ProbeExecutionBrief,
-) -> dict[str, Any]:
+def _root_inputs(causal_record: CausalActionRecord) -> dict[str, Any]:
     return {
-        "action_index": observation.action_index,
-        "cycle_id": context.cycle_id,
-        "executed_request": executed_request_from_action(observation.action),
-        "full_output_sha256": observation.full_output_sha256,
-        "post_environment_state_id": observation.post_environment_state_id,
-        "pre_environment_state_id": observation.pre_environment_state_id,
-        "probe_id": probe.id,
-        "run_id": context.run_id,
+        "action_id": causal_record.action_id,
+        "full_output_sha256": causal_record.observation.full_output_sha256,
         "schema_version": _SIGNAL_SCHEMA_VERSION,
     }
 
 
-def _signal_id_inputs(
-    observation: ActionObservation,
-    probe: ProbeDesign,
-    context: ProbeExecutionBrief,
-) -> dict[str, Any]:
-    return _root_inputs(observation, probe, context)
+def _signal_id_inputs(causal_record: CausalActionRecord) -> dict[str, Any]:
+    return _root_inputs(causal_record)
 
 
 def _canonical_content_fingerprint(source_identity: str, raw_content: str) -> str:
@@ -127,45 +142,74 @@ def _canonical_content_fingerprint(source_identity: str, raw_content: str) -> st
     return f"sha256:{digest}"
 
 
-def _digest(payload: dict[str, Any]) -> str:
-    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+def _validate_causal_binding(
+    *,
+    observation: ActionObservation,
+    probe: ProbeDesign,
+    context: ProbeExecutionBrief,
+    causal_record: CausalActionRecord,
+) -> None:
+    if causal_record.observation != observation:
+        raise ValueError("causal record does not contain the completed observation")
+    if causal_record.probe_id != probe.id:
+        raise ValueError("causal record does not match the Probe")
+    if (
+        causal_record.run_id != context.run_id
+        or causal_record.cycle_id != context.cycle_id
+    ):
+        raise ValueError("causal record does not match the execution context")
 
 
-def _canonical_json(payload: dict[str, Any]) -> str:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+def _standalone_causal_record(
+    *,
+    observation: ActionObservation,
+    probe: ProbeDesign,
+    context: ProbeExecutionBrief,
+) -> CausalActionRecord:
+    """Support deterministic fixture construction outside the execution gateway."""
+    if not action_may_mutate(observation.action):
+        step = TerminalPlanStep(role="inspect", action=observation.action)
+        plan = TerminalProbePlan(
+            mode="inspect",
+            steps=(step,),
+            expected_observation="The completed action is observed.",
+        )
+        step_index = 0
+    elif isinstance(observation.action, ShellAction):
+        step = TerminalPlanStep(
+            role="verify",
+            action=observation.action,
+            verification_target="the completed action result",
+        )
+        plan = TerminalProbePlan(
+            mode="verify",
+            steps=(step,),
+            expected_observation="The completed verification is observed.",
+        )
+        step_index = 0
+    else:
+        step = TerminalPlanStep(role="intervene", action=observation.action)
+        plan = TerminalProbePlan(
+            mode="intervene",
+            steps=(
+                step,
+                TerminalPlanStep(
+                    role="verify",
+                    action=ShellAction(command="pwd"),
+                    verification_target="the completed intervention state",
+                ),
+            ),
+            expected_observation="The completed intervention is acknowledged.",
+        )
+        step_index = 0
+
+    registry = CausalTraceRegistry()
+    registered = registry.register_plan(probe=probe, context=context, plan=plan)
+    return registry.register_action(
+        plan=registered,
+        step_index=step_index,
+        observation=observation,
     )
-
-
-def executed_request_from_action(action: TerminalAction) -> dict[str, Any]:
-    if isinstance(action, ShellAction):
-        return {
-            "command": action.command,
-            "mutates_environment": action_may_mutate(action),
-            "timeout_seconds": action.timeout_seconds,
-            "type": action.type,
-        }
-    if isinstance(action, WriteFileAction):
-        content = action.content.encode("utf-8")
-        return {
-            "content_bytes": len(content),
-            "content_sha256": hashlib.sha256(content).hexdigest(),
-            "path": action.path,
-            "type": action.type,
-        }
-    if isinstance(action, ApplyPatchAction):
-        patch = action.patch.encode("utf-8")
-        return {
-            "patch_bytes": len(patch),
-            "patch_sha256": hashlib.sha256(patch).hexdigest(),
-            "strip": action.strip,
-            "type": action.type,
-        }
-    raise TypeError(f"unsupported terminal action: {type(action).__name__}")
 
 
 def _bounded_text(value: str, limit: int) -> tuple[str, bool]:

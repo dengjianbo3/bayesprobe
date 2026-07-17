@@ -37,6 +37,12 @@ class TrialArtifactStore:
     def append_observation(self, payload: Any) -> None:
         self._append("environment_actions.jsonl", payload)
 
+    def append_causal_action(self, payload: Any) -> None:
+        self._append("causal_actions.jsonl", payload)
+
+    def append_causal_decision(self, payload: Any) -> None:
+        self._append("causal_decisions.jsonl", payload)
+
     def append_provider_call(self, payload: Any) -> None:
         self._append("provider_telemetry.jsonl", payload)
 
