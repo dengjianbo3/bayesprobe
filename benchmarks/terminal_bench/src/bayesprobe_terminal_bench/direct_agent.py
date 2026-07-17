@@ -89,12 +89,13 @@ def build_direct_session(
         Path(logs_dir) / "direct",
         restricted_values=(api_key,),
     )
+    deadline = TrialDeadline(timeout_seconds=config.task_timeout_seconds)
     budget = RunBudget(
         max_actions=config.max_total_actions,
         max_model_calls=config.max_model_calls,
         max_provider_tokens=config.max_provider_tokens,
+        reservation_guard=deadline.require_active,
     )
-    deadline = TrialDeadline(timeout_seconds=config.task_timeout_seconds)
     base_client = OpenAI(
         api_key=api_key,
         base_url=config.base_url,

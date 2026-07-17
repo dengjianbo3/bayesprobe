@@ -121,6 +121,7 @@ async def test_direct_session_shares_budget_deadline_and_provider_identity(
     assert session.budget.max_provider_tokens == 160_000
     assert session.controller._planner._client._deadline is session.deadline
     assert session.controller._bridge._deadline is session.deadline
+    assert session.budget._reservation_guard.__self__ is session.deadline
 
 
 @pytest.mark.asyncio

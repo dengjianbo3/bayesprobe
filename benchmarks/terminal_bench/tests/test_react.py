@@ -290,6 +290,35 @@ def test_planner_records_usage_before_return_and_stops_on_token_overflow() -> No
     assert len(client.chat.completions.requests) == 1
 
 
+def test_expired_deadline_rejects_react_plan_before_model_reservation() -> None:
+    from bayesprobe_terminal_bench.deadline import DeadlineOpenAIClient, TrialDeadline
+
+    deadline = TrialDeadline(timeout_seconds=5, monotonic=lambda: 0.0)
+    budget = RunBudget(
+        max_model_calls=3,
+        reservation_guard=deadline.require_active,
+    )
+    base_client = _Client([])
+    planner = OpenAICompatibleReActPlanner(
+        config=_config(),
+        budget=budget,
+        client=DeadlineOpenAIClient(
+            base_client=base_client,
+            deadline=deadline,
+            configured_timeout_seconds=360,
+        ),
+        expected_provider_model="test-model",
+        expected_system_fingerprint="fp-test",
+    )
+
+    with pytest.raises(BudgetExhausted) as failure:
+        planner.next_step(instruction="repair the task", history=())
+
+    assert failure.value.category == "budget_error"
+    assert budget.model_calls_used == 0
+    assert base_client.chat.completions.requests == []
+
+
 def test_react_history_is_bounded_redacted_and_omits_written_content() -> None:
     secret = "sk-abcdefghijklmnop1234567890"
     action = WriteFileAction(path="/app/result.txt", content="private" * 10_000)
@@ -527,3 +556,44 @@ def test_controller_stops_cleanly_when_action_budget_is_exhausted() -> None:
     assert result.steps == 2
     assert result.observations == 1
     assert artifacts.errors == [{"category": "budget_error", "step": 2}]
+
+
+def test_expired_deadline_rejects_react_action_before_action_reservation() -> None:
+    from bayesprobe_terminal_bench.deadline import (
+        DeadlineEnvironmentBridge,
+        TrialDeadline,
+    )
+
+    deadline = TrialDeadline(timeout_seconds=5, monotonic=lambda: 0.0)
+    budget = RunBudget(
+        max_actions=1,
+        reservation_guard=deadline.require_active,
+    )
+    planner = _Planner(
+        [
+            ReActStep(
+                thought_summary="inspect",
+                actions=(ShellAction(command="pwd"),),
+                done=False,
+            )
+        ]
+    )
+    delegate = _Bridge()
+    artifacts = _Artifacts()
+    controller = ReActController(
+        planner=planner,
+        bridge=DeadlineEnvironmentBridge(
+            delegate=delegate,
+            deadline=deadline,
+            configured_timeout_seconds=120,
+        ),
+        artifacts=artifacts,
+        budget=budget,
+    )
+
+    result = controller.run("repair the task")
+
+    assert result.stop_reason == "action_budget_exhausted"
+    assert artifacts.errors == [{"category": "budget_error", "step": 1}]
+    assert budget.actions_used == 0
+    assert delegate.actions == []

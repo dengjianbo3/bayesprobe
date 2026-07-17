@@ -613,6 +613,40 @@ def test_openai_deadline_proxy_recomputes_timeout_and_disables_sdk_retries() -> 
     assert len(base_client.requests) == 2
 
 
+def test_expired_deadline_rejects_terminal_plan_before_model_reservation(
+    probe: object,
+    execution_context: object,
+) -> None:
+    from bayesprobe_terminal_bench.deadline import DeadlineOpenAIClient, TrialDeadline
+    from bayesprobe_terminal_bench.planning import (
+        OpenAICompatibleTerminalProbePlanner,
+    )
+
+    deadline = TrialDeadline(timeout_seconds=5, monotonic=lambda: 0.0)
+    budget = RunBudget(
+        max_model_calls=3,
+        reservation_guard=deadline.require_active,
+    )
+    base_client = RecordingOpenAIClient([])
+    planner = OpenAICompatibleTerminalProbePlanner(
+        config=TerminalBenchConfig(model="test-model"),
+        budget=budget,
+        client=DeadlineOpenAIClient(
+            base_client=base_client,
+            deadline=deadline,
+            configured_timeout_seconds=360,
+        ),
+    )
+
+    with pytest.raises(BudgetExhausted) as failure:
+        planner.plan(probe=probe, context=execution_context, history=())
+
+    assert failure.value.category == "budget_error"
+    assert budget.model_calls_used == 0
+    assert base_client.options == []
+    assert base_client.requests == []
+
+
 def test_environment_deadline_proxy_clamps_shell_timeout_and_stops_after_expiry() -> None:
     from bayesprobe_terminal_bench.actions import ShellAction
     from bayesprobe_terminal_bench.deadline import (
@@ -677,6 +711,69 @@ def test_environment_deadline_proxy_clamps_non_shell_bridge_timeout() -> None:
     )
     assert bridge.timeouts == [15]
     assert bridge._NON_SHELL_TIMEOUT_SECONDS == 120
+
+
+def test_expired_deadline_rejects_terminal_action_before_action_reservation(
+    tmp_path: Path,
+    probe: object,
+    execution_context: object,
+) -> None:
+    from bayesprobe_terminal_bench.actions import (
+        ShellAction,
+        TerminalPlanStep,
+        TerminalProbePlan,
+    )
+    from bayesprobe_terminal_bench.deadline import (
+        DeadlineEnvironmentBridge,
+        TrialDeadline,
+    )
+
+    plan = TerminalProbePlan(
+        mode="inspect",
+        steps=(
+            TerminalPlanStep(
+                role="inspect",
+                action=ShellAction(command="pwd"),
+            ),
+        ),
+        expected_observation="current workspace path",
+    )
+
+    class Planner:
+        def plan(self, **_: object) -> TerminalProbePlan:
+            return plan
+
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, int]] = []
+
+        def execute(self, action: object, action_index: int) -> object:
+            self.calls.append((action, action_index))
+            raise AssertionError("expired action must not reach the delegate")
+
+    deadline = TrialDeadline(timeout_seconds=5, monotonic=lambda: 0.0)
+    budget = RunBudget(
+        max_actions=1,
+        reservation_guard=deadline.require_active,
+    )
+    delegate = Bridge()
+    gateway = HarborProbeToolGateway(
+        planner=Planner(),
+        bridge=DeadlineEnvironmentBridge(
+            delegate=delegate,
+            deadline=deadline,
+            configured_timeout_seconds=120,
+        ),
+        artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
+        budget=budget,
+    )
+
+    with pytest.raises(BudgetExhausted) as failure:
+        gateway.execute_probe(probe=probe, context=execution_context)
+
+    assert failure.value.category == "budget_error"
+    assert budget.actions_used == 0
+    assert delegate.calls == []
 
 
 def test_terminal_plan_failure_propagates_without_starting_an_action(
@@ -1165,6 +1262,7 @@ async def test_live_session_injects_one_deadline_into_every_request_and_action_p
     assert provider._client._deadline is session.deadline
     assert probe_gateway._planner._deadline is session.deadline
     assert probe_gateway._bridge._deadline is session.deadline
+    assert session.budget._reservation_guard.__self__ is session.deadline
 
 
 @pytest.mark.asyncio

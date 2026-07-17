@@ -113,11 +113,15 @@ proxy calls `base_client.with_options(timeout=current, max_retries=0)` on every
 request.
 
 The same deadline object reaches the public-core provider, terminal planner,
-Harbor action bridge, and reactive planner. The benchmark-local environment
-proxy clamps shell action timeouts and temporarily clamps the existing Harbor
-bridge's non-shell timeout per invocation, restoring it afterward. The
-terminal planner proxy recovers pending deadline/accounting exceptions after
-the out-of-scope planner maps transport failures.
+Harbor action bridge, and reactive planner. It is also bound to the shared
+`RunBudget`, which rejects an already-expired operation before either a model
+call or action reservation can increment. The OpenAI and environment proxies
+retain the definitive timeout check immediately before their external
+delegates. The benchmark-local environment proxy clamps shell action timeouts
+and temporarily clamps the existing Harbor bridge's non-shell timeout per
+invocation, restoring it afterward. The terminal planner proxy recovers
+pending deadline/accounting exceptions after the out-of-scope planner maps
+transport failures.
 
 ### Reactive baseline and failures
 
@@ -217,11 +221,14 @@ reactive accounting exception priority
 
 cross-operation deadline cap independence
 1 failed: command cap leaked into provider timeout (120 != 360)
+
+pre-reservation deadline guard + both live compositions
+6 failed: four missing require_active guards + two missing budget bindings
 ```
 
 Each set passed after its narrow implementation change: `1 passed`,
 `4 passed`, `2 passed`, `1 passed`, `1 passed`, `1 passed`, and `1 passed`,
-respectively.
+and `6 passed`, respectively.
 
 ### Final focused GREEN
 
@@ -237,7 +244,7 @@ UV_CACHE_DIR=/tmp/bayesprobe-uv-cache uv run pytest \
   tests/test_direct_agent.py \
   tests/test_public_reuse.py -q
 
-154 passed in 1.44s
+158 passed in 1.38s
 ```
 
 Compilation check:
@@ -283,7 +290,7 @@ Count proof: `4 + 1 + 1 + 3 + 1 + 1 + 1 + 3 + 6 + 2 + 4 + 12 = 39`.
 
 No new full-suite failure appeared. The suite was not rerun after narrow
 owned-boundary review fixes, honoring the explicit one-run requirement; every
-post-run change is covered by the final 153-test focused gate.
+post-run change is covered by the final 158-test focused gate.
 
 ## Root and Security Verification
 

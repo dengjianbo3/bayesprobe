@@ -29,6 +29,9 @@ class TrialDeadline:
         with self._lock:
             return self._deadline - self._monotonic()
 
+    def require_active(self) -> None:
+        self.timeout_for(configured_timeout_seconds=1)
+
     def timeout_for(self, *, configured_timeout_seconds: int) -> int:
         if (
             type(configured_timeout_seconds) is not int

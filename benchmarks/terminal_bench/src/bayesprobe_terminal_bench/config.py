@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from threading import Lock
 from typing import Self
@@ -74,16 +74,19 @@ class RunBudget:
         max_actions: int = 24,
         max_model_calls: int = 40,
         max_provider_tokens: int = 160_000,
+        reservation_guard: Callable[[], None] | None = None,
     ) -> None:
         self.max_actions = max_actions
         self.max_model_calls = max_model_calls
         self.max_provider_tokens = max_provider_tokens
+        self._reservation_guard = reservation_guard
         self._actions = 0
         self._model_calls = 0
         self._provider_tokens = 0
         self._lock = Lock()
 
     def reserve_action(self) -> int:
+        self._require_reservation_allowed()
         with self._lock:
             if self._actions >= self.max_actions:
                 raise BudgetExhausted("terminal action budget exhausted")
@@ -91,6 +94,7 @@ class RunBudget:
             return self._actions
 
     def reserve_model_call(self) -> int:
+        self._require_reservation_allowed()
         with self._lock:
             if self._model_calls >= self.max_model_calls:
                 raise BudgetExhausted("model call budget exhausted")
@@ -107,6 +111,10 @@ class RunBudget:
             if self._provider_tokens > self.max_provider_tokens:
                 raise BudgetExhausted("provider token budget exhausted")
             return self._provider_tokens
+
+    def _require_reservation_allowed(self) -> None:
+        if self._reservation_guard is not None:
+            self._reservation_guard()
 
     @property
     def actions_used(self) -> int:

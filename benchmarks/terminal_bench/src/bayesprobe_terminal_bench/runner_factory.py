@@ -853,12 +853,13 @@ def build_live_session(
         Path(logs_dir) / "bayesprobe",
         restricted_values=(api_key,),
     )
+    deadline = TrialDeadline(timeout_seconds=config.task_timeout_seconds)
     budget = RunBudget(
         max_actions=config.max_total_actions,
         max_model_calls=config.max_model_calls,
         max_provider_tokens=config.max_provider_tokens,
+        reservation_guard=deadline.require_active,
     )
-    deadline = TrialDeadline(timeout_seconds=config.task_timeout_seconds)
     observer = ArtifactInvocationObserver(
         artifacts,
         budget=budget,
