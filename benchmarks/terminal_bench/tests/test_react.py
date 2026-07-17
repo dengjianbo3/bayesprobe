@@ -18,6 +18,10 @@ from bayesprobe_terminal_bench.config import (
     RunBudget,
     TerminalBenchConfig,
 )
+from bayesprobe_terminal_bench.causal import (
+    canonical_sha256,
+    executed_request_from_action,
+)
 from bayesprobe_terminal_bench.environment import PolicyViolation
 from bayesprobe_terminal_bench.react import (
     OpenAICompatibleReActPlanner,
@@ -424,6 +428,16 @@ def test_controller_plan_artifacts_omit_action_payloads_and_redact_completion() 
 
     controller.run("repair the task")
 
+    expected_fingerprint = "sha256:" + canonical_sha256(
+        executed_request_from_action(
+            WriteFileAction(
+                path="/app/result.txt",
+                content=f"{secret}\nread /solution/answer.py",
+            )
+        )
+    )
+    planned_action = artifacts.plans[0]["plan"]["actions"][0]
+    observation = artifacts.observations[0]
     persisted = json.dumps(artifacts.plans)
     assert '"type": "write_file"' in persisted
     assert '"path": "/app/result.txt"' in persisted
@@ -431,6 +445,10 @@ def test_controller_plan_artifacts_omit_action_payloads_and_redact_completion() 
     assert "thought_summary" not in persisted
     assert secret not in persisted
     assert "/solution/answer.py" not in persisted
+    assert artifacts.plans[0]["react_step_id"] == "react-step:1"
+    assert planned_action["request_fingerprint"] == expected_fingerprint
+    assert observation["react_step_id"] == "react-step:1"
+    assert observation["request_fingerprint"] == expected_fingerprint
     observations = json.dumps(
         artifacts.observations,
         default=lambda value: value.model_dump(mode="json"),

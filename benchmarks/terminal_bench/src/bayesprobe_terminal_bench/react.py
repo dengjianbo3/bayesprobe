@@ -23,6 +23,10 @@ from bayesprobe_terminal_bench.config import (
     RunBudget,
     TerminalBenchConfig,
 )
+from bayesprobe_terminal_bench.causal import (
+    canonical_sha256,
+    executed_request_from_action,
+)
 from bayesprobe_terminal_bench.environment import PolicyViolation
 from bayesprobe_terminal_bench.planning import (
     _bounded_text,
@@ -377,41 +381,55 @@ class ReActRunResult:
 
 
 def _safe_plan_action(action: TerminalAction) -> dict[str, object]:
+    request_fingerprint = "sha256:" + canonical_sha256(
+        executed_request_from_action(action)
+    )
     if isinstance(action, ShellAction):
         return {
             "type": action.type,
             "command": _bounded_text(_redact_sensitive_text(action.command), 4_096),
             "timeout_seconds": action.timeout_seconds,
             "mutates_environment": action.mutates_environment,
+            "request_fingerprint": request_fingerprint,
         }
     if isinstance(action, WriteFileAction):
         return {
             "type": action.type,
             "path": _redact_sensitive_text(action.path),
+            "request_fingerprint": request_fingerprint,
         }
     if isinstance(action, ApplyPatchAction):
         return {
             "type": action.type,
             "strip": action.strip,
+            "request_fingerprint": request_fingerprint,
         }
     raise TypeError(f"unsupported ReAct action: {type(action).__name__}")
 
 
-def _safe_observation_artifact(observation: ActionObservation) -> dict[str, Any]:
+def _safe_observation_artifact(
+    observation: ActionObservation,
+    *,
+    react_step_id: str,
+) -> dict[str, Any]:
     payload = _sanitize_outbound(observation.model_dump(mode="json"))
     action = observation.action
+    safe_action = _safe_plan_action(action)
+    request_fingerprint = safe_action.pop("request_fingerprint")
     if isinstance(action, WriteFileAction):
         payload["action"] = {
-            **_safe_plan_action(action),
+            **safe_action,
             "content": _REDACTION_MARKER,
         }
     elif isinstance(action, ApplyPatchAction):
         payload["action"] = {
-            **_safe_plan_action(action),
+            **safe_action,
             "patch": _REDACTION_MARKER,
         }
     else:
-        payload["action"] = _safe_plan_action(action)
+        payload["action"] = safe_action
+    payload["react_step_id"] = react_step_id
+    payload["request_fingerprint"] = request_fingerprint
     for key in ("stdout", "stderr", "model_facing_output"):
         payload[key] = _bounded_text(payload[key], 32_768)
     return payload
@@ -450,6 +468,7 @@ class ReActController:
             self._artifacts.append_plan(
                 {
                     "step": step_index,
+                    "react_step_id": f"react-step:{step_index}",
                     "plan": {
                         "actions": [_safe_plan_action(action) for action in step.actions],
                         "done": step.done,
@@ -504,5 +523,8 @@ class ReActController:
                     continue
                 history.append(observation)
                 self._artifacts.append_observation(
-                    _safe_observation_artifact(observation)
+                    _safe_observation_artifact(
+                        observation,
+                        react_step_id=f"react-step:{step_index}",
+                    )
                 )

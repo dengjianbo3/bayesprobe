@@ -4,7 +4,7 @@
 
 `DONE_WITH_CONCERNS`
 
-Task 7 is implemented in the four owned benchmark files. Both Harbor agents
+Task 7 is implemented in the scoped benchmark adapter files. Both Harbor agents
 now publish exactly `self.logs_dir / "trajectory.json"` for successful runs
 and classified post-artifact failures. Publication uses Harbor 0.18.0's real
 ATIF models and `TrajectoryValidator`, validates the final redacted payload
@@ -27,10 +27,14 @@ Production files:
 - `benchmarks/terminal_bench/src/bayesprobe_terminal_bench/trajectory.py`
 - `benchmarks/terminal_bench/src/bayesprobe_terminal_bench/agent.py`
 - `benchmarks/terminal_bench/src/bayesprobe_terminal_bench/direct_agent.py`
+- `benchmarks/terminal_bench/src/bayesprobe_terminal_bench/react.py`
 
-Test file:
+Test files:
 
 - `benchmarks/terminal_bench/tests/test_trajectory.py`
+- `benchmarks/terminal_bench/tests/test_react.py`
+- `benchmarks/terminal_bench/tests/test_agent.py`
+- `benchmarks/terminal_bench/tests/test_direct_agent.py`
 
 Required report:
 
@@ -67,9 +71,10 @@ payload raises stable `TrajectoryExportError(category="adapter_error")`.
 
 Only after validator acceptance does the exporter create a temporary file in
 the Harbor agent log directory, flush and `fsync` it, then use `os.replace()`
-to publish `trajectory.json`. Temporary files are cleaned on every exit. A
-validation test proves that a forced validator rejection does not replace an
-existing destination.
+to publish `trajectory.json`. Temporary files are cleaned on every exit. Tests
+prove that validator rejection does not replace an existing destination and
+that `os.replace()` failure preserves the destination, removes only the
+current temporary file, and leaves an unrelated stale temporary file intact.
 
 Both agents set `SUPPORTS_ATIF = True` because every supported publication
 path passes through this validation-before-replace function. Any trajectory
@@ -106,6 +111,13 @@ call ID. The action request is validated through the existing strict terminal
 action models and `ActionPolicy` before export, so evaluator-only targets
 cannot be published.
 
+`environment_actions.jsonl` is the BayesProbe executed-action source of truth.
+Every row is parsed as a strict `ActionObservation` and reconciled one-to-one,
+in environment-file order, with a strict `CausalActionRecord`. Missing,
+duplicate, extra, mismatched, or malformed causal rows fail export. Nested
+observations must equal the executed observation, and action and Signal
+identities must be unique.
+
 BayesProbe action `extra` uses the existing benchmark artifacts' actual:
 
 - `plan_id`
@@ -115,16 +127,23 @@ BayesProbe action `extra` uses the existing benchmark artifacts' actual:
 - `signal_id`
 - `request_fingerprint`
 
-Signal identity is recovered from the public ledger's artifact reference when
-present. For a completed action whose ledger write was interrupted, the
-exporter deterministically recomputes the same `S_harbor_...` identity from
-the action ID, full-output hash, and frozen `harbor-observation:v3` schema.
+The request fingerprint is recomputed from `executed_request_from_action()`;
+the exporter requires exact equality instead of copying the causal row's raw
+value. Signal identity is recovered from the public ledger's artifact
+reference when present. For a completed causal action whose Signal ledger
+write was interrupted, the exporter deterministically recomputes the same
+`S_harbor_...` identity from the action ID, full-output hash, and frozen
+`harbor-observation:v3` schema. An environment append interrupted before the
+causal append instead fails closed as `adapter_error`.
 
 The reactive arm has no BayesProbe epistemic loop. Its trajectory-only
-lineage uses stable `react-plan`, `react-policy`, `react-step`, `react-action`,
-and `react-signal` identities derived from the existing ReAct plan/action
-ordering. This records ATIF linkage without creating a benchmark-local
-belief, Probe, Evidence, or posterior mechanism.
+lineage uses stable `react-plan`, `react-step`, `react-action`, and
+`react-signal` identities. `react.py` records a privacy-safe canonical request
+fingerprint from the full normalized action on every planned action and
+observation while retaining write/patch redaction. The exporter matches
+`(react_step_id, request_fingerprint)` exactly and in sequence, rejecting
+ambiguous, missing, duplicate, or unmatched lineage. Direct ATIF contains no
+`probe_id`, policy-attempt, Belief, Probe, Evidence, or posterior field.
 
 ### BayesProbe transitions and discarded Evidence
 
@@ -147,12 +166,13 @@ identity fields is preserved without inventing identities.
 
 ### Tokens and privacy
 
-`final_metrics.extra.provider_tokens_used` is taken from the one shared
-`RunBudget.provider_tokens_used` whenever the session exists. It is never
-recomputed in place of the shared budget. The standard ATIF prompt and
-completion totals are summed from existing provider telemetry; tests assert
-exact `10 + 7 = 17` fixture accounting and exact equality with the shared
-provider-token total.
+`final_metrics.extra.provider_tokens_used`, `model_calls_used`, and
+`terminal_actions_used` are taken exactly from the one shared `RunBudget`.
+All three values must be real, nonnegative integers. A missing or malformed
+budget fails export as `adapter_error`; provider telemetry never substitutes
+for the shared provider total. Standard ATIF prompt and completion totals may
+still be summed from provider telemetry. Tests assert exact `10 + 7 = 17`
+fixture accounting and exact equality with the shared provider-token total.
 
 Before Harbor validation, every string in the payload passes through both:
 
@@ -233,6 +253,37 @@ uv run pytest tests/test_trajectory.py tests/test_agent.py \
 30 passed in 1.27s
 ```
 
+### Review corrective RED/GREEN
+
+The review regressions were added before production changes. The first
+trajectory run exposed all permissive paths:
+
+```text
+uv run --project benchmarks/terminal_bench pytest -q \
+  benchmarks/terminal_bench/tests/test_trajectory.py
+24 failed, 11 passed in 0.33s
+```
+
+Failures covered missing/duplicate/extra causal rows, nested observation and
+fingerprint mismatch, duplicate action/Signal identity, direct same-target
+write/patch misbinding, missing/ambiguous/duplicate/unmatched direct lineage,
+and missing/malformed shared budgets. The focused ReAct telemetry test also
+failed first with missing `react_step_id`.
+
+After the strict implementation and authorized fixture updates:
+
+```text
+test_trajectory.py: 39 passed in 0.12s
+test_react.py: 15 passed in 0.03s
+test_agent.py + test_direct_agent.py: 19 passed in 1.22s
+combined Task 7 focused suite: 73 passed in 1.23s
+```
+
+The 39 trajectory tests include Harbor-validator success paths for both arms,
+classified failure paths, environment-order preservation, exact canonical
+fingerprints, malformed-budget adapter precedence through both agents, and
+the `os.replace()` destination/current-temp/stale-temp edge case.
+
 Every generated trajectory assertion in `test_trajectory.py` invokes
 Harbor's installed `TrajectoryValidator` against the generated payload or
 file.
@@ -243,16 +294,14 @@ file.
 
 ```text
 uv run pytest -q
-461 passed, 39 failed in 9.42s
+490 passed, 39 failed in 9.30s
 ```
 
 All 39 failures are in `tests/test_benchmark_lock.py`. They are the exact
 deferred Task 8 fixture failures: the stale fixture calls the old
 `signal_from_observation(observation=...)` API and does not yet build the
 registry-bound causal artifacts required by Tasks 3-5. No Task 7 or other
-nested test failed. The broad suite was not rerun after the narrow
-self-review fix, honoring the instruction to run it once; the affected
-focused suites were rerun and passed.
+nested test failed. The corrective cycle ran this nested inventory once.
 
 ### Root public and paradigm tests
 
@@ -261,7 +310,13 @@ Run from the repository root:
 ```text
 uv run pytest tests/test_public_api_and_config.py \
   tests/test_paradigm_conformance.py -q -rA
-44 passed in 0.27s
+44 passed in 0.28s
+```
+
+An additional repository-root suite completed with:
+
+```text
+1766 passed, 11 skipped in 13.87s
 ```
 
 ### Repository hygiene
@@ -271,8 +326,8 @@ uv run pytest tests/test_public_api_and_config.py \
 - Staged secret/evaluator scan: no credential pattern, generated evaluator
   path, unfinished marker, or `.runs` path. The sole `/tests/hidden.py`
   occurrence is the intentional negative behavior test.
-- Staged file set contains only the four owned implementation/test files and
-  this required report.
+- Corrective file set contains only scoped trajectory/ReAct implementation,
+  the four authorized tests, and this required report.
 - User-owned untracked `reports/` remains untouched.
 
 ## Concerns

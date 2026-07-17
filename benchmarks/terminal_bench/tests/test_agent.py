@@ -75,7 +75,11 @@ def _session(*, runner: object, artifacts: SpyArtifacts) -> object:
         runner=runner,
         input=SimpleNamespace(run_id="tb_harbor-run"),
         artifacts=artifacts,
-        budget=SimpleNamespace(actions_used=3, model_calls_used=4),
+        budget=SimpleNamespace(
+            provider_tokens_used=0,
+            actions_used=3,
+            model_calls_used=4,
+        ),
     )
 
 
@@ -338,13 +342,19 @@ async def test_agent_persists_classified_post_artifact_construction_failure(
     with pytest.raises(BayesProbeHarborAgentError) as failure:
         await _agent(tmp_path).run("solve the task", object(), AgentContext())
 
-    assert failure.value.category == "provider_contract_error"
+    assert failure.value.category == "adapter_error"
     assert artifacts.errors == [
         {
             "category": "provider_contract_error",
             "error_type": "ProviderContractError",
-        }
+        },
+        {
+            "category": "adapter_error",
+            "error_type": "TrajectoryExportError",
+            "stage": "trajectory_export",
+        },
     ]
+    assert not (tmp_path / "trajectory.json").exists()
 
 
 @pytest.mark.asyncio

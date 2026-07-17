@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import tempfile
@@ -18,16 +17,20 @@ from harbor.models.trajectories import (
     Trajectory,
 )
 from harbor.utils.trajectory_validator import TrajectoryValidator
-from pydantic import TypeAdapter
 
-from bayesprobe_terminal_bench.actions import TerminalAction
+from bayesprobe_terminal_bench.actions import ActionObservation, TerminalAction
+from bayesprobe_terminal_bench.causal import (
+    CausalActionRecord,
+    canonical_sha256,
+    executed_request_from_action,
+)
 from bayesprobe_terminal_bench.environment import ActionPolicy, PolicyViolation
 from bayesprobe_terminal_bench.planning import _redact_sensitive_text
 
 
 Arm = Literal["bayesprobe", "direct"]
-_ACTION_ADAPTER = TypeAdapter(TerminalAction)
 _SIGNAL_SCHEMA_VERSION = "harbor-observation:v3"
+_REDACTION_MARKER = "[REDACTED]"
 
 
 class TrajectoryExportError(RuntimeError):
@@ -93,6 +96,7 @@ def _build_trajectory(
 ) -> Trajectory:
     if arm not in {"bayesprobe", "direct"}:
         raise ValueError("unsupported trajectory arm")
+    provider_tokens, model_calls, terminal_actions = _budget_counters(budget)
 
     steps = [Step(step_id=1, source="user", message=instruction)]
     if arm == "bayesprobe":
@@ -113,25 +117,15 @@ def _build_trajectory(
             },
         )
     )
-    prompt_tokens, completion_tokens, recorded_provider_tokens = _provider_totals(
-        artifact_root
-    )
-    provider_tokens = _nonnegative_int(
-        getattr(budget, "provider_tokens_used", None),
-        fallback=recorded_provider_tokens,
-    )
+    prompt_tokens, completion_tokens = _provider_totals(artifact_root)
     final_metrics = FinalMetrics(
         total_prompt_tokens=prompt_tokens,
         total_completion_tokens=completion_tokens,
         total_steps=len(steps),
         extra={
             "provider_tokens_used": provider_tokens,
-            "model_calls_used": _nonnegative_int(
-                getattr(budget, "model_calls_used", None)
-            ),
-            "terminal_actions_used": _nonnegative_int(
-                getattr(budget, "actions_used", None)
-            ),
+            "model_calls_used": model_calls,
+            "terminal_actions_used": terminal_actions,
         },
     )
     return Trajectory(
@@ -154,27 +148,83 @@ def _build_trajectory(
 
 
 def _bayesprobe_steps(artifact_root: Path, *, starting_at: int) -> list[Step]:
-    causal_actions = _read_jsonl(artifact_root / "causal_actions.jsonl")
+    observations = [
+        ActionObservation.model_validate(record)
+        for record in _read_jsonl(artifact_root / "environment_actions.jsonl")
+    ]
+    observation_indexes: set[int] = set()
+    for observation in observations:
+        if observation.action_index in observation_indexes:
+            raise ValueError("duplicate executed action_index")
+        observation_indexes.add(observation.action_index)
+
+    causal_actions = [
+        CausalActionRecord.model_validate(record)
+        for record in _read_jsonl(artifact_root / "causal_actions.jsonl")
+    ]
+    if len(causal_actions) != len(observations):
+        raise ValueError("executed and causal action cardinality differs")
+
+    causal_by_index: dict[int, CausalActionRecord] = {}
+    action_ids: set[str] = set()
+    for record in causal_actions:
+        action_index = record.observation.action_index
+        if action_index in causal_by_index:
+            raise ValueError("duplicate causal action_index")
+        action_id = _nonempty_text(record.action_id, "action_id")
+        if action_id in action_ids:
+            raise ValueError("duplicate causal action_id")
+        if record.step_index < 0:
+            raise ValueError("causal step_index must be nonnegative")
+        expected_fingerprint = _request_fingerprint(record.observation.action)
+        if record.request_fingerprint != expected_fingerprint:
+            raise ValueError("causal request fingerprint mismatch")
+        if (
+            record.pre_environment_state_id
+            != record.observation.pre_environment_state_id
+            or record.post_environment_state_id
+            != record.observation.post_environment_state_id
+        ):
+            raise ValueError("causal environment state mismatch")
+        causal_by_index[action_index] = record
+        action_ids.add(action_id)
+
+    if set(causal_by_index) != observation_indexes:
+        raise ValueError("causal action lineage is unmatched")
+
     ledger = _read_jsonl(artifact_root / "bayesprobe_ledger.jsonl")
-    signal_by_action = _signal_ids_by_action(ledger)
+    signal_by_action = _signal_ids_by_action(
+        ledger,
+        known_action_ids=action_ids,
+    )
     action_lineage: dict[str, dict[str, str]] = {}
     lineage_by_action: dict[str, dict[str, str]] = {}
+    signal_ids: set[str] = set()
     steps: list[Step] = []
 
-    for record in causal_actions:
-        observation = _mapping(record.get("observation"), "causal action observation")
-        action_id = _required_text(record, "action_id")
+    for observation in observations:
+        record = causal_by_index[observation.action_index]
+        if record.observation != observation:
+            raise ValueError("causal observation does not match executed action")
+        action_id = _nonempty_text(record.action_id, "action_id")
         signal_id = signal_by_action.get(action_id) or _derived_signal_id(
             action_id=action_id,
             observation=observation,
         )
+        if signal_id in signal_ids:
+            raise ValueError("duplicate causal signal_id")
+        signal_ids.add(signal_id)
+        request_fingerprint = _request_fingerprint(observation.action)
         lineage = {
-            "plan_id": _required_text(record, "plan_id"),
-            "policy_attempt_id": _required_text(record, "policy_attempt_id"),
-            "probe_id": _required_text(record, "probe_id"),
+            "plan_id": _nonempty_text(record.plan_id, "plan_id"),
+            "policy_attempt_id": _nonempty_text(
+                record.policy_attempt_id,
+                "policy_attempt_id",
+            ),
+            "probe_id": _nonempty_text(record.probe_id, "probe_id"),
             "action_id": action_id,
             "signal_id": signal_id,
-            "request_fingerprint": _required_text(record, "request_fingerprint"),
+            "request_fingerprint": request_fingerprint,
         }
         action_lineage[signal_id] = lineage
         lineage_by_action[action_id] = lineage
@@ -252,36 +302,70 @@ def _bayesprobe_steps(artifact_root: Path, *, starting_at: int) -> list[Step]:
 
 def _direct_steps(artifact_root: Path, *, starting_at: int) -> list[Step]:
     plans = _read_jsonl(artifact_root / "plans.jsonl")
-    planned_actions: list[tuple[int, Mapping[str, Any]]] = []
+    planned_actions: dict[
+        tuple[str, str],
+        tuple[int, int, Mapping[str, Any]],
+    ] = {}
+    react_step_ids: set[str] = set()
+    plan_position = 0
     for record in plans:
-        step_number = _positive_int(record.get("step"), fallback=len(planned_actions) + 1)
-        plan = record.get("plan")
-        if not isinstance(plan, Mapping):
-            continue
+        step_number = _required_positive_int(record.get("step"), "react step")
+        react_step_id = _required_text(record, "react_step_id")
+        if react_step_id != f"react-step:{step_number}":
+            raise ValueError("react_step_id does not match plan step")
+        if react_step_id in react_step_ids:
+            raise ValueError("duplicate react_step_id")
+        react_step_ids.add(react_step_id)
+        plan = _mapping(record.get("plan"), "direct plan")
         actions = plan.get("actions")
         if not isinstance(actions, Sequence) or isinstance(actions, str | bytes):
-            continue
-        planned_actions.extend(
-            (step_number, action) for action in actions if isinstance(action, Mapping)
-        )
+            raise ValueError("direct plan actions must be a sequence")
+        for action in actions:
+            safe_action = _mapping(action, "direct planned action")
+            request_fingerprint = _required_fingerprint(safe_action)
+            _validate_direct_plan_action(safe_action)
+            key = (react_step_id, request_fingerprint)
+            if key in planned_actions:
+                raise ValueError("ambiguous direct plan action lineage")
+            planned_actions[key] = (plan_position, step_number, safe_action)
+            plan_position += 1
 
-    cursor = 0
+    cursor = -1
+    action_indexes: set[int] = set()
+    executed_lineage: set[tuple[str, str]] = set()
     steps: list[Step] = []
-    for observation in _read_jsonl(artifact_root / "environment_actions.jsonl"):
-        action = _mapping(observation.get("action"), "direct action")
-        plan_step: int | None = None
-        for index in range(cursor, len(planned_actions)):
-            candidate_step, candidate_action = planned_actions[index]
-            if _actions_match(candidate_action, action):
-                plan_step = candidate_step
-                cursor = index + 1
-                break
-        action_index = _positive_int(observation.get("action_index"), fallback=len(steps) + 1)
-        request_fingerprint = "sha256:" + _canonical_sha256(action)
+    for raw_observation in _read_jsonl(
+        artifact_root / "environment_actions.jsonl"
+    ):
+        observation_payload = dict(raw_observation)
+        react_step_id = _required_text(observation_payload, "react_step_id")
+        request_fingerprint = _required_fingerprint(observation_payload)
+        observation_payload.pop("react_step_id")
+        observation_payload.pop("request_fingerprint")
+        observation = ActionObservation.model_validate(observation_payload)
+        action_index = observation.action_index
+        if action_index in action_indexes:
+            raise ValueError("duplicate direct action_index")
+        action_indexes.add(action_index)
+
+        key = (react_step_id, request_fingerprint)
+        if key in executed_lineage:
+            raise ValueError("duplicate direct executed lineage")
+        executed_lineage.add(key)
+        planned = planned_actions.get(key)
+        if planned is None:
+            raise ValueError("unmatched direct plan/action lineage")
+        position, plan_step, safe_action = planned
+        if position <= cursor:
+            raise ValueError("direct action lineage is out of sequence")
+        cursor = position
+        _validate_direct_observation(
+            safe_action=safe_action,
+            observation=observation,
+        )
         lineage = {
-            "plan_id": f"react-plan:{plan_step or 'unmatched'}",
-            "policy_attempt_id": f"react-policy:{plan_step or 'unmatched'}",
-            "probe_id": f"react-step:{plan_step or 'unmatched'}",
+            "plan_id": f"react-plan:{plan_step}",
+            "react_step_id": react_step_id,
             "action_id": f"react-action:{action_index}",
             "signal_id": f"react-signal:{action_index}",
             "request_fingerprint": request_fingerprint,
@@ -299,26 +383,15 @@ def _direct_steps(artifact_root: Path, *, starting_at: int) -> list[Step]:
 def _action_step(
     *,
     step_id: int,
-    observation: Mapping[str, Any],
+    observation: ActionObservation,
     lineage: Mapping[str, str],
 ) -> Step:
-    action = _mapping(observation.get("action"), "terminal action")
-    parsed_action = _ACTION_ADAPTER.validate_python(action)
+    parsed_action = observation.action
     ActionPolicy().validate(parsed_action)
     arguments = parsed_action.model_dump(mode="json")
     action_id = lineage["action_id"]
     tool_call_id = f"tool:{action_id}"
-    result_content = observation.get("model_facing_output")
-    if not isinstance(result_content, str):
-        result_content = json.dumps(
-            {
-                "return_code": observation.get("return_code"),
-                "stderr": observation.get("stderr", ""),
-                "stdout": observation.get("stdout", ""),
-                "timed_out": observation.get("timed_out", False),
-            },
-            sort_keys=True,
-        )
+    result_content = observation.model_facing_output
     return Step(
         step_id=step_id,
         source="agent",
@@ -337,16 +410,14 @@ def _action_step(
                     source_call_id=tool_call_id,
                     content=result_content,
                     extra={
-                        "action_index": _positive_int(
-                            observation.get("action_index"), fallback=1
+                        "action_index": observation.action_index,
+                        "return_code": observation.return_code,
+                        "timed_out": observation.timed_out,
+                        "pre_environment_state_id": (
+                            observation.pre_environment_state_id
                         ),
-                        "return_code": observation.get("return_code"),
-                        "timed_out": bool(observation.get("timed_out", False)),
-                        "pre_environment_state_id": observation.get(
-                            "pre_environment_state_id"
-                        ),
-                        "post_environment_state_id": observation.get(
-                            "post_environment_state_id"
+                        "post_environment_state_id": (
+                            observation.post_environment_state_id
                         ),
                     },
                 )
@@ -358,8 +429,11 @@ def _action_step(
 
 def _signal_ids_by_action(
     ledger: Sequence[Mapping[str, Any]],
+    *,
+    known_action_ids: set[str],
 ) -> dict[str, str]:
     result: dict[str, str] = {}
+    action_by_signal: dict[str, str] = {}
     prefix = "causal_actions.jsonl#"
     for record in ledger:
         if record.get("record_type") != "external_signal":
@@ -373,12 +447,18 @@ def _signal_ids_by_action(
         refs = provenance.get("artifact_refs")
         if not isinstance(refs, Sequence) or isinstance(refs, str | bytes):
             continue
-        signal_id = payload.get("id")
-        if not isinstance(signal_id, str) or not signal_id:
-            continue
         for ref in refs:
             if isinstance(ref, str) and ref.startswith(prefix):
-                result[ref.removeprefix(prefix)] = signal_id
+                signal_id = _required_text(payload, "id")
+                action_id = ref.removeprefix(prefix)
+                if not action_id or action_id not in known_action_ids:
+                    raise ValueError("external signal references an unknown action")
+                if action_id in result:
+                    raise ValueError("duplicate external signal action lineage")
+                if signal_id in action_by_signal:
+                    raise ValueError("duplicate external signal identity")
+                result[action_id] = signal_id
+                action_by_signal[signal_id] = action_id
     return result
 
 
@@ -408,21 +488,20 @@ def _updates_by_evidence(
 def _derived_signal_id(
     *,
     action_id: str,
-    observation: Mapping[str, Any],
+    observation: ActionObservation,
 ) -> str:
-    return "S_harbor_" + _canonical_sha256(
+    return "S_harbor_" + canonical_sha256(
         {
             "action_id": action_id,
-            "full_output_sha256": _required_text(observation, "full_output_sha256"),
+            "full_output_sha256": observation.full_output_sha256,
             "schema_version": _SIGNAL_SCHEMA_VERSION,
         }
     )
 
 
-def _provider_totals(artifact_root: Path) -> tuple[int | None, int | None, int]:
+def _provider_totals(artifact_root: Path) -> tuple[int | None, int | None]:
     prompt = 0
     completion = 0
-    provider = 0
     saw_prompt = False
     saw_completion = False
     for record in _read_jsonl(artifact_root / "provider_telemetry.jsonl"):
@@ -431,33 +510,106 @@ def _provider_totals(artifact_root: Path) -> tuple[int | None, int | None, int]:
             continue
         input_tokens = usage.get("input_tokens")
         output_tokens = usage.get("output_tokens")
-        total_tokens = usage.get("total_tokens")
         if type(input_tokens) is int and input_tokens >= 0:
             prompt += input_tokens
             saw_prompt = True
         if type(output_tokens) is int and output_tokens >= 0:
             completion += output_tokens
             saw_completion = True
-        if type(total_tokens) is int and total_tokens >= 0:
-            provider += total_tokens
     return (
         prompt if saw_prompt else None,
         completion if saw_completion else None,
-        provider,
     )
 
 
-def _actions_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    action_type = left.get("type")
-    if action_type != right.get("type"):
-        return False
+def _budget_counters(budget: object | None) -> tuple[int, int, int]:
+    if budget is None:
+        raise ValueError("trajectory export requires the shared run budget")
+    counters: list[int] = []
+    for field in ("provider_tokens_used", "model_calls_used", "actions_used"):
+        value = getattr(budget, field, None)
+        if type(value) is not int or value < 0:
+            raise ValueError(f"shared run budget has invalid {field}")
+        counters.append(value)
+    return counters[0], counters[1], counters[2]
+
+
+def _request_fingerprint(action: TerminalAction) -> str:
+    return "sha256:" + canonical_sha256(executed_request_from_action(action))
+
+
+def _required_fingerprint(value: Mapping[str, Any]) -> str:
+    fingerprint = _required_text(value, "request_fingerprint")
+    digest = fingerprint.removeprefix("sha256:")
+    if (
+        not fingerprint.startswith("sha256:")
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValueError("request_fingerprint must be canonical sha256 text")
+    return fingerprint
+
+
+def _validate_direct_plan_action(action: Mapping[str, Any]) -> None:
+    action_type = action.get("type")
+    expected_keys: set[str]
     if action_type == "shell":
-        return left.get("command") == right.get("command")
-    if action_type == "write_file":
-        return left.get("path") == right.get("path")
-    if action_type == "apply_patch":
-        return left.get("strip", 0) == right.get("strip", 0)
-    return False
+        expected_keys = {
+            "type",
+            "command",
+            "timeout_seconds",
+            "mutates_environment",
+            "request_fingerprint",
+        }
+        if (
+            not isinstance(action.get("command"), str)
+            or not action["command"]
+            or type(action.get("timeout_seconds")) is not int
+            or type(action.get("mutates_environment")) is not bool
+        ):
+            raise ValueError("invalid safe shell plan action")
+    elif action_type == "write_file":
+        expected_keys = {"type", "path", "request_fingerprint"}
+        if not isinstance(action.get("path"), str) or not action["path"]:
+            raise ValueError("invalid safe write plan action")
+    elif action_type == "apply_patch":
+        expected_keys = {"type", "strip", "request_fingerprint"}
+        if type(action.get("strip")) is not int:
+            raise ValueError("invalid safe patch plan action")
+    else:
+        raise ValueError("unsupported direct plan action")
+    if set(action) != expected_keys:
+        raise ValueError("direct plan action has unsafe or missing fields")
+
+
+def _validate_direct_observation(
+    *,
+    safe_action: Mapping[str, Any],
+    observation: ActionObservation,
+) -> None:
+    action = observation.action.model_dump(mode="json")
+    action_type = safe_action["type"]
+    if action.get("type") != action_type:
+        raise ValueError("direct action type does not match its plan")
+    if action_type == "shell":
+        expected = {
+            key: value
+            for key, value in safe_action.items()
+            if key != "request_fingerprint"
+        }
+        if action != expected:
+            raise ValueError("direct shell action does not match its plan")
+    elif action_type == "write_file":
+        if (
+            action.get("path") != safe_action.get("path")
+            or action.get("content") != _REDACTION_MARKER
+        ):
+            raise ValueError("direct write action does not match safe telemetry")
+    elif action_type == "apply_patch" and (
+        action.get("strip") != safe_action.get("strip")
+        or action.get("patch") != _REDACTION_MARKER
+    ):
+        raise ValueError("direct patch action does not match safe telemetry")
 
 
 def _read_jsonl(path: Path) -> list[Mapping[str, Any]]:
@@ -491,22 +643,16 @@ def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _positive_int(value: object, *, fallback: int) -> int:
-    return value if type(value) is int and value > 0 else fallback
+def _nonempty_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be non-empty text")
+    return value
 
 
-def _nonnegative_int(value: object, *, fallback: int = 0) -> int:
-    return value if type(value) is int and value >= 0 else fallback
-
-
-def _canonical_sha256(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def _required_positive_int(value: object, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return value
 
 
 def _redact(value: Any, *, restricted_values: tuple[str, ...]) -> Any:

@@ -141,7 +141,11 @@ async def test_direct_agent_runs_once_in_worker_and_records_safe_summary(
     session = SimpleNamespace(
         controller=controller,
         artifacts=artifacts,
-        budget=SimpleNamespace(actions_used=2, model_calls_used=3),
+        budget=SimpleNamespace(
+            provider_tokens_used=0,
+            actions_used=2,
+            model_calls_used=3,
+        ),
     )
     arguments: dict[str, object] = {}
 
@@ -243,16 +247,20 @@ async def test_direct_agent_persists_classified_post_artifact_failure(
     with pytest.raises(DirectHarborAgentError) as failure:
         await _agent(tmp_path).run("solve it", object(), AgentContext())
 
-    assert str(failure.value) == (
-        "Direct Harbor agent failed: provider_contract_error"
-    )
-    assert failure.value.category == "provider_contract_error"
+    assert str(failure.value) == "Direct Harbor agent failed: adapter_error"
+    assert failure.value.category == "adapter_error"
     assert artifacts.errors == [
         {
             "category": "provider_contract_error",
             "error_type": "ProviderContractError",
-        }
+        },
+        {
+            "category": "adapter_error",
+            "error_type": "TrajectoryExportError",
+            "stage": "trajectory_export",
+        },
     ]
+    assert not (tmp_path / "trajectory.json").exists()
 
 
 @pytest.mark.asyncio
