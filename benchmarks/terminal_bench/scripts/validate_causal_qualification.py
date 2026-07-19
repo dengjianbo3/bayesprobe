@@ -23,6 +23,7 @@ from freeze_historical_traces import FROZEN_TASKS, HistoricalTraceManifest
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _BAYESPROBE_AGENT = "bayesprobe_terminal_bench.agent:BayesProbeHarborAgent"
+_TASK_TIMEOUT_PLACEHOLDER = "${BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS}"
 _NONRETRYABLE_CATEGORIES = frozenset(
     {
         "adapter_error",
@@ -465,10 +466,18 @@ def _validate_harbor_job_provenance(
     retry = config.get("retry")
     if (
         config.get("job_name") != expected_job_name
-        or not _exact_int(config.get("n_attempts"), 1)
+        or (
+            "n_attempts" in config
+            and not _exact_int(config.get("n_attempts"), 1)
+        )
         or not _exact_int(config.get("n_concurrent_trials"), 1)
-        or not isinstance(retry, Mapping)
-        or not _exact_int(retry.get("max_retries"), 0)
+        or (
+            "retry" in config
+            and (
+                not isinstance(retry, Mapping)
+                or not _exact_int(retry.get("max_retries"), 0)
+            )
+        )
         or not isinstance(dataset, Mapping)
         or dataset.get("name") != lock.dataset_name
         or dataset.get("ref") != lock.dataset_revision
@@ -513,7 +522,8 @@ def _agent_matches_lock(
         and isinstance(env, Mapping)
         and env.get("BAYESPROBE_BENCH_MODEL") == lock.model
         and env.get("BAYESPROBE_BENCH_BASE_URL") == lock.base_url
-        and env.get("BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS") == str(timeout)
+        and env.get("BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS")
+        in {str(timeout), _TASK_TIMEOUT_PLACEHOLDER}
         and isinstance(env.get("BAYESPROBE_BENCH_LOCK_PATH"), str)
         and bool(str(env["BAYESPROBE_BENCH_LOCK_PATH"]).strip())
     )

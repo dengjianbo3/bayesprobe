@@ -796,6 +796,38 @@ def test_live_qualification_rejects_noncanonical_job_shape(tmp_path: Path) -> No
         )
 
 
+def test_live_qualification_accepts_harbor_resolved_defaults_and_env_placeholder(
+    tmp_path: Path,
+) -> None:
+    lock_path = _write_lock(tmp_path)
+    jobs = _live_jobs(tmp_path / "live", lock_path=lock_path)
+
+    for job in jobs:
+        config_path = job / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config.pop("n_attempts")
+        config.pop("retry")
+        config["agents"][0]["env"][
+            "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS"
+        ] = "${BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS}"
+        _write_json(config_path, config)
+
+        job_lock_path = job / "lock.json"
+        job_lock = json.loads(job_lock_path.read_text(encoding="utf-8"))
+        job_lock["trials"][0]["agent"]["env"][
+            "BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS"
+        ] = "${BAYESPROBE_BENCH_TASK_TIMEOUT_SECONDS}"
+        _write_json(job_lock_path, job_lock)
+
+    report = validate_causal_qualification_job(
+        lock_path=lock_path,
+        job_dirs=jobs,
+        provider_identity_path=_provider_identity_path(tmp_path),
+    )
+
+    assert report["qualification_passed"] is True
+
+
 @pytest.mark.parametrize(
     "case",
     [
