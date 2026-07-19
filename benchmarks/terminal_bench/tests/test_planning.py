@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from bayesprobe import CapabilityKind, ProbePurpose
 from bayesprobe_terminal_bench.actions import (
     ActionObservation,
     ApplyPatchAction,
@@ -35,6 +36,28 @@ VALID_PLAN = json.dumps(
             }
         ],
         "expected_observation": "The working directory is visible.",
+    }
+)
+
+INTERVENTION_PLAN = json.dumps(
+    {
+        "mode": "intervene",
+        "steps": [
+            {
+                "role": "intervene",
+                "action": {
+                    "type": "write_file",
+                    "path": "/app/result",
+                    "content": "done",
+                },
+            },
+            {
+                "role": "verify",
+                "action": {"type": "shell", "command": "cat /app/result"},
+                "verification_target": "The result contains done.",
+            },
+        ],
+        "expected_observation": "The result changes.",
     }
 )
 
@@ -341,6 +364,64 @@ def test_transition_predictions_must_cover_probe_targets(probe, execution_contex
     assert any("transition_predictions" in item for item in repair["validation_error"])
 
 
+def test_frame_coverage_probe_declares_required_inspect_mode(
+    probe,
+    execution_context,
+) -> None:
+    coverage_probe = probe.model_copy(
+        update={
+            "purpose": ProbePurpose.FRAME_COVERAGE,
+            "required_capability": CapabilityKind.REPOSITORY_READ,
+        }
+    )
+
+    payload = terminal_plan_input(
+        probe=coverage_probe,
+        context=execution_context,
+        history=(),
+    )
+
+    assert payload["probe"]["purpose"] == "frame_coverage"
+    assert payload["probe"]["required_capability"] == "repository_read"
+    assert payload["probe"]["required_plan_mode"] == "inspect"
+
+
+def test_frame_coverage_probe_repairs_intervention_until_inspect(
+    probe,
+    execution_context,
+) -> None:
+    coverage_probe = probe.model_copy(
+        update={
+            "purpose": ProbePurpose.FRAME_COVERAGE,
+            "required_capability": CapabilityKind.REPOSITORY_READ,
+        }
+    )
+    planner, client = _planner(
+        [INTERVENTION_PLAN, INTERVENTION_PLAN, VALID_PLAN]
+    )
+
+    plan = planner.plan(
+        probe=coverage_probe,
+        context=execution_context,
+        history=(),
+    )
+
+    assert plan.mode == "inspect"
+    assert len(client.chat.completions.calls) == 3
+    for call in client.chat.completions.calls[1:]:
+        repair = json.loads(call["messages"][1]["content"])
+        assert "plan:required_probe_mode" in repair["validation_error"]
+
+
+def test_noncoverage_probe_retains_intervention_mode(probe, execution_context) -> None:
+    planner, client = _planner([INTERVENTION_PLAN])
+
+    plan = planner.plan(probe=probe, context=execution_context, history=())
+
+    assert plan.mode == "intervene"
+    assert len(client.chat.completions.calls) == 1
+
+
 def test_planner_instruction_states_causal_execution_semantics(probe, execution_context) -> None:
     planner, client = _planner([VALID_PLAN])
 
@@ -362,6 +443,7 @@ def test_planner_instruction_states_causal_execution_semantics(probe, execution_
     assert '"non_empty_verification_target"' in instruction
     assert '"intervene"' in instruction
     assert '"optional_inspect_one_intervene_one_or_more_verify"' in instruction
+    assert '"required_plan_mode"' in instruction
 
 
 def test_planner_request_uses_the_existing_chat_completion_token_parameter(probe, execution_context) -> None:

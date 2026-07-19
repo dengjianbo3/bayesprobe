@@ -7,12 +7,18 @@ import time
 import unicodedata
 from collections.abc import Callable, Mapping
 from hashlib import sha256
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from openai import OpenAI
 from pydantic import ValidationError
 
-from bayesprobe import ExternalSignal, ProbeDesign, ProbeExecutionBrief
+from bayesprobe import (
+    CapabilityKind,
+    ExternalSignal,
+    ProbeDesign,
+    ProbeExecutionBrief,
+    ProbePurpose,
+)
 from bayesprobe_terminal_bench.actions import (
     ActionObservation,
     ApplyPatchAction,
@@ -88,6 +94,9 @@ _SAFE_PLAN_SEMANTIC_ERROR_CODES = {
     ),
     "transition prediction IDs must equal Probe targets": (
         "transition_predictions:target_ids_must_equal_probe_targets"
+    ),
+    "plan mode must equal the required Probe plan mode": (
+        "plan:required_probe_mode"
     ),
     "inspect plans require inspect roles": "plan:inspect_roles_only",
     "inspect plans require provably read-only actions": (
@@ -208,6 +217,15 @@ _ASSIGNMENT_PATTERN = re.compile(
 )
 
 
+def _required_plan_mode(probe: ProbeDesign) -> Literal["inspect"] | None:
+    if (
+        probe.purpose is ProbePurpose.FRAME_COVERAGE
+        and probe.required_capability is CapabilityKind.REPOSITORY_READ
+    ):
+        return "inspect"
+    return None
+
+
 def terminal_plan_input(
     *,
     probe: ProbeDesign,
@@ -233,10 +251,13 @@ def terminal_plan_input(
         ],
         "probe": {
             "id": probe.id,
+            "purpose": probe.purpose.value,
             "inquiry_goal": probe.inquiry_goal,
             "method": probe.method,
             "expected_observation": probe.expected_observation,
             "target_hypotheses": list(probe.target_hypotheses),
+            "required_capability": probe.required_capability.value,
+            "required_plan_mode": _required_plan_mode(probe),
             "support_condition": dict(probe.support_condition),
             "weaken_condition": dict(probe.weaken_condition),
             "reframe_condition": (
@@ -396,7 +417,10 @@ class OpenAICompatibleTerminalProbePlanner:
         try:
             plan = TerminalProbePlan.model_validate_json(
                 content,
-                context={"target_hypotheses": tuple(probe.target_hypotheses)},
+                context={
+                    "target_hypotheses": tuple(probe.target_hypotheses),
+                    "required_plan_mode": _required_plan_mode(probe),
+                },
             )
         except ValidationError as error:
             field_errors = _safe_field_errors(error)
@@ -528,6 +552,10 @@ def _planner_instruction(*, repair: bool) -> str:
                     "coverage": "exactly_probe_target_hypotheses",
                     "expected_transitions": "distinct_non_empty_text",
                     "required": False,
+                },
+                "required_plan_mode": {
+                    "source": "probe.required_plan_mode",
+                    "rule": "plan_mode_must_equal_when_present",
                 },
             },
             sort_keys=True,

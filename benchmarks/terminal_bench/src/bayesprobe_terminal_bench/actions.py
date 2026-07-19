@@ -200,7 +200,12 @@ class TerminalProbePlan(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_mode(self) -> TerminalProbePlan:
+    def validate_mode(self, info: ValidationInfo) -> TerminalProbePlan:
+        context = info.context if isinstance(info.context, Mapping) else {}
+        required_mode = context.get("required_plan_mode")
+        if required_mode is not None and self.mode != required_mode:
+            raise ValueError("plan mode must equal the required Probe plan mode")
+
         if self.mode == "inspect":
             if any(step.role != "inspect" for step in self.steps):
                 raise ValueError("inspect plans require inspect roles")

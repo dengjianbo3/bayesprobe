@@ -175,6 +175,50 @@ def test_intervene_accepts_inspect_then_one_mutation_then_verify() -> None:
     assert [step.role for step in plan.steps] == ["inspect", "intervene", "verify"]
 
 
+def test_required_probe_plan_mode_rejects_only_mismatched_modes() -> None:
+    intervention = {
+        "mode": "intervene",
+        "steps": [
+            {
+                "role": "intervene",
+                "action": {
+                    "type": "write_file",
+                    "path": "/app/result",
+                    "content": "done",
+                },
+            },
+            {
+                "role": "verify",
+                "action": {"type": "shell", "command": "cat /app/result"},
+                "verification_target": "The result contains done.",
+            },
+        ],
+        "expected_observation": "The result changes.",
+    }
+
+    with pytest.raises(ValidationError, match="required Probe plan mode"):
+        TerminalProbePlan.model_validate(
+            intervention,
+            context={"required_plan_mode": "inspect"},
+        )
+
+    assert TerminalProbePlan.model_validate(intervention).mode == "intervene"
+    inspect = TerminalProbePlan.model_validate(
+        {
+            "mode": "inspect",
+            "steps": [
+                {
+                    "role": "inspect",
+                    "action": {"type": "shell", "command": "git status"},
+                }
+            ],
+            "expected_observation": "The repository state is visible.",
+        },
+        context={"required_plan_mode": "inspect"},
+    )
+    assert inspect.mode == "inspect"
+
+
 def test_intervene_rejects_two_mutations() -> None:
     with pytest.raises(ValidationError, match="exactly one intended mutation"):
         TerminalProbePlan(
