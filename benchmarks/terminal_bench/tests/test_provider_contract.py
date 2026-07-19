@@ -186,13 +186,24 @@ def test_terminal_frame_contract_adds_policy_hashes_response_and_forwards_identi
     assert attempts == [
         {
             "attempt_index": 0,
+            "control_policy": None,
+            "control_policy_sha256": None,
             "field_errors": [],
+            "normalized_response_sha256": sha256(
+                json.dumps(
+                    _frame(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
             "request_task": "frame_open_question",
             "required_keys_present": sorted(_frame()),
             "response_sha256": sha256(
                 json.dumps(_frame(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
             "stage": "terminal_task_frame",
+            "server_owned_fields": [],
             "validation": "valid",
         }
     ]
@@ -321,6 +332,33 @@ def test_initial_open_probe_fills_server_owned_slot_without_mutating_provider_pa
         "required_capability": "repository_read",
         "target_hypotheses": ["H1", "H2"],
     }
+    attempt = _attempts(tmp_path / "provider_contract.jsonl")[0]
+    raw_sha256 = sha256(
+        json.dumps(
+            provider_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    normalized_sha256 = sha256(
+        json.dumps(
+            normalized,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert attempt["response_sha256"] == raw_sha256
+    assert attempt["normalized_response_sha256"] == normalized_sha256
+    assert attempt["control_policy"] == "initial_open_frame_coverage"
+    assert attempt["control_policy_sha256"].startswith("sha256:")
+    assert len(attempt["control_policy_sha256"]) == 71
+    assert attempt["server_owned_fields"] == [
+        "proposals.0.purpose",
+        "proposals.0.required_capability",
+        "proposals.0.target_hypotheses",
+    ]
 
 
 def test_later_probe_preserves_model_owned_structure(tmp_path) -> None:
@@ -349,6 +387,27 @@ def test_later_probe_preserves_model_owned_structure(tmp_path) -> None:
     assert normalized_proposal["purpose"] == "hypothesis_falsification"
     assert normalized_proposal["target_hypotheses"] == ["H1"]
     assert normalized_proposal["required_capability"] == "test_execution"
+    attempt = _attempts(tmp_path / "provider_contract.jsonl")[0]
+    assert attempt["normalized_response_sha256"] == attempt["response_sha256"]
+    assert attempt["control_policy"] is None
+    assert attempt["control_policy_sha256"] is None
+    assert attempt["server_owned_fields"] == []
+
+
+def test_contract_audit_never_persists_provider_semantic_text(tmp_path) -> None:
+    secret = "sk-providersemantic123456789"
+    provider_payload = _probe()
+    provider_payload["proposals"][0]["inquiry_goal"] = secret
+    gateway = TerminalContractModelGateway(
+        RecordingGateway([provider_payload]),
+        artifacts=TrialArtifactStore(tmp_path, restricted_values=(secret,)),
+    )
+
+    normalized = gateway.complete_structured(_probe_request())
+
+    assert normalized["proposals"][0]["inquiry_goal"] == secret
+    artifact = (tmp_path / "provider_contract.jsonl").read_text(encoding="utf-8")
+    assert secret not in artifact
 
 
 def test_initial_slot_does_not_invent_missing_model_semantics(tmp_path) -> None:

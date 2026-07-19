@@ -37,6 +37,11 @@ _FRAME_REQUIRED_KEYS = frozenset(
     }
 )
 _PROBE_REQUIRED_KEYS = frozenset({"proposals"})
+_INITIAL_SLOT_SERVER_FIELDS = (
+    "proposals.0.purpose",
+    "proposals.0.required_capability",
+    "proposals.0.target_hypotheses",
+)
 
 
 class ProviderContractError(RuntimeError):
@@ -53,6 +58,10 @@ class ContractAttempt(BaseModel):
     attempt_index: int
     request_task: str
     response_sha256: str | None
+    normalized_response_sha256: str | None = None
+    control_policy: Literal["initial_open_frame_coverage"] | None = None
+    control_policy_sha256: str | None = None
+    server_owned_fields: tuple[str, ...] = ()
     required_keys_present: tuple[str, ...]
     validation: Literal["valid", "invalid", "provider_error", "empty"]
     field_errors: tuple[str, ...]
@@ -337,6 +346,11 @@ class TerminalContractModelGateway:
         repair_task: Literal["repair_task_frame", "repair_probe_design"],
     ) -> dict[str, Any]:
         initial_request = self._with_terminal_policy(request, stage=stage)
+        slot = (
+            _initial_open_probe_slot(initial_request.input)
+            if stage == "terminal_probe_design"
+            else None
+        )
         active_request = initial_request
         invalid_payload: Any = None
         field_errors: tuple[str, ...] = ()
@@ -352,6 +366,8 @@ class TerminalContractModelGateway:
                     attempt_index=attempt_index,
                     request_task=active_request.task,
                     response=None,
+                    normalized_response=None,
+                    slot=slot,
                     validation="provider_error",
                     field_errors=(),
                 )
@@ -362,6 +378,8 @@ class TerminalContractModelGateway:
                         attempt_index=attempt_index,
                         request_task=active_request.task,
                         response=None,
+                        normalized_response=None,
+                        slot=slot,
                         validation="empty",
                         field_errors=(),
                     )
@@ -382,6 +400,8 @@ class TerminalContractModelGateway:
                             attempt_index=attempt_index,
                             request_task=active_request.task,
                             response=response,
+                            normalized_response=None,
+                            slot=slot,
                             validation="invalid",
                             field_errors=field_errors,
                         )
@@ -391,6 +411,8 @@ class TerminalContractModelGateway:
                             attempt_index=attempt_index,
                             request_task=active_request.task,
                             response=response,
+                            normalized_response=validated_response,
+                            slot=slot,
                             validation="valid",
                             field_errors=(),
                         )
@@ -483,6 +505,8 @@ class TerminalContractModelGateway:
         attempt_index: int,
         request_task: str,
         response: Any,
+        normalized_response: Any,
+        slot: InitialOpenProbeSlot | None,
         validation: Literal["valid", "invalid", "provider_error", "empty"],
         field_errors: tuple[str, ...],
     ) -> None:
@@ -497,6 +521,22 @@ class TerminalContractModelGateway:
             attempt_index=attempt_index,
             request_task=request_task,
             response_sha256=(None if response is None else _response_sha256(response)),
+            normalized_response_sha256=(
+                None
+                if normalized_response is None
+                else _response_sha256(normalized_response)
+            ),
+            control_policy=(
+                None if slot is None else "initial_open_frame_coverage"
+            ),
+            control_policy_sha256=(
+                None
+                if slot is None
+                else _identity_sha256(slot.model_dump(mode="json"))
+            ),
+            server_owned_fields=(
+                () if slot is None else _INITIAL_SLOT_SERVER_FIELDS
+            ),
             required_keys_present=present,
             validation=validation,
             field_errors=field_errors,
@@ -716,6 +756,14 @@ def contract_identity() -> dict[str, str]:
         "required_fields": sorted(_FRAME_REQUIRED_KEYS),
     }
     probe_prompt = {
+        "initial_open_slot_normalization": {
+            "model_owned_fields": [
+                "proposals.0.expected_observation",
+                "proposals.0.inquiry_goal",
+            ],
+            "proposal_count": 1,
+            "server_owned_fields": list(_INITIAL_SLOT_SERVER_FIELDS),
+        },
         "max_attempts": 3,
         "policy": _terminal_policy(
             "terminal_probe_design",
