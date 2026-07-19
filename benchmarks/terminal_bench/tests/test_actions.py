@@ -175,6 +175,26 @@ def test_intervene_accepts_inspect_then_one_mutation_then_verify() -> None:
     assert [step.role for step in plan.steps] == ["inspect", "intervene", "verify"]
 
 
+def test_intervene_accepts_test_execution_as_trailing_verification() -> None:
+    plan = TerminalProbePlan(
+        mode="intervene",
+        steps=[
+            _step(
+                "intervene",
+                WriteFileAction(path="/app/out.html", content="<p>candidate</p>"),
+            ),
+            _step(
+                "verify",
+                ShellAction(command="python /app/test_outputs.py"),
+                "The public task check passes for /app/out.html.",
+            ),
+        ],
+        expected_observation="The candidate file passes the task check.",
+    )
+
+    assert [step.role for step in plan.steps] == ["intervene", "verify"]
+
+
 def test_required_probe_plan_mode_rejects_only_mismatched_modes() -> None:
     intervention = {
         "mode": "intervene",
@@ -219,15 +239,19 @@ def test_required_probe_plan_mode_rejects_only_mismatched_modes() -> None:
     assert inspect.mode == "inspect"
 
 
-def test_intervene_rejects_two_mutations() -> None:
+def test_intervene_requires_the_declared_intervention_to_mutate() -> None:
     with pytest.raises(ValidationError, match="exactly one intended mutation"):
         TerminalProbePlan(
             mode="intervene",
             steps=[
-                _step("intervene", WriteFileAction(path="/app/one", content="1")),
-                _step("verify", ShellAction(command="touch /app/two"), "The first file exists."),
+                _step("intervene", ShellAction(command="cat /app/result")),
+                _step(
+                    "verify",
+                    ShellAction(command="cat /app/result"),
+                    "The result is visible.",
+                ),
             ],
-            expected_observation="Only one mutation is permitted.",
+            expected_observation="The declared intervention changes the workspace.",
         )
 
 

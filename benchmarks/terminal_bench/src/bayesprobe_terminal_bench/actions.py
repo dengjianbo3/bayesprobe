@@ -241,12 +241,7 @@ class TerminalProbePlan(BaseModel):
             raise ValueError("intervene plans require one or more trailing verify steps")
         if any(action_may_mutate(step.action) for step in self.steps[:intervention_index]):
             raise ValueError("inspect steps require provably read-only actions")
-        mutating_indexes = [
-            index
-            for index, step in enumerate(self.steps)
-            if action_may_mutate(step.action)
-        ]
-        if mutating_indexes != [intervention_index]:
+        if not action_may_mutate(self.steps[intervention_index].action):
             raise ValueError("intervene plans require exactly one intended mutation")
         _validate_verification_steps(verification_steps)
         return self
