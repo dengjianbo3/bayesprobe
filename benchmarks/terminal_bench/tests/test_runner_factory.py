@@ -12,13 +12,23 @@ from typing import Any
 import pytest
 
 from bayesprobe import (
+    AnswerContract,
     AutonomousQuestionRunner,
     BayesProbeCore,
+    BeliefState,
     CapabilityKind,
     DeterministicModelGateway,
     EvidenceJudgmentRepairPolicy,
+    FramedHypothesis,
+    FramingMethod,
+    HypothesisCompetition,
+    HypothesisFrame,
     OpenAIChatCompletionsModelGateway,
+    ProbeDesignContext,
+    ProbePurpose,
     RecordedTaskAdmitter,
+    TaskFrame,
+    TaskKind,
     TaskAwareAnswerProjector,
 )
 from bayesprobe_terminal_bench.artifacts import TrialArtifactStore
@@ -1235,6 +1245,135 @@ async def test_live_session_uses_exact_causal_composition_and_shared_registry(
     assert session.runner.core._judgment_repair_policy == EvidenceJudgmentRepairPolicy(
         max_attempts=2
     )
+
+
+@pytest.mark.asyncio
+async def test_live_session_delivers_initial_probe_slot_to_public_designer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / "benchmark.lock.json"
+    config = TerminalBenchConfig(
+        model="live-model",
+        lock_path=lock_path,
+        task_timeout_seconds=900,
+    )
+    lock = _write_active_lock(lock_path, config)
+    session = build_live_session(
+        config=config,
+        api_key="one-time-live-provider-secret",
+        instruction="Repair the supplied task workspace.",
+        environment=NeverExecutedEnvironment(),
+        event_loop=asyncio.get_running_loop(),
+        logs_dir=tmp_path / "logs",
+        session_id="session/id",
+        context_id="context:id",
+        runtime_git_identity=_runtime_git_identity(lock),
+    )
+    provider_inquiry_goal = "Inspect repository facts against both candidate causes."
+    raw_provider_response = {
+        "proposals": [
+            {
+                "purpose": "hypothesis_falsification",
+                "target_hypotheses": ["H1"],
+                "inquiry_goal": provider_inquiry_goal,
+                "expected_observation": "Repository facts distinguish the causes.",
+                "support_condition": {"H1": "The cleanup path is skipped."},
+                "weaken_condition": {"H1": "Cleanup always runs."},
+                "reframe_condition": None,
+                "required_capability": "test_execution",
+            }
+        ]
+    }
+    provider = session.runner.core._model_gateway._delegate._delegate._delegate
+    monkeypatch.setattr(
+        provider,
+        "complete_structured",
+        lambda request: raw_provider_response,
+    )
+    frame = TaskFrame(
+        task_frame_id="frame",
+        task_kind=TaskKind.DESIGN,
+        answer_relationship="synthesis",
+        normalized_question="Repair the terminal task.",
+        answer_contract=AnswerContract(
+            objective="Repair and verify the task workspace.",
+            answer_value_type="structured_text",
+            answer_format="structured text with verification",
+            required_sections=["result", "verification"],
+            decision_form="environment_change",
+            permits_synthesis=True,
+        ),
+        hypothesis_frame=HypothesisFrame(
+            frame_id="hypotheses",
+            competition=HypothesisCompetition.INDEPENDENT,
+            coverage="open",
+            hypotheses=[
+                FramedHypothesis(
+                    id="H1",
+                    statement="A cancellation path skips cleanup.",
+                    type="root_cause",
+                    scope="The task workspace.",
+                    initial_prior=0.5,
+                    predictions=["A cancellation path remains pending."],
+                    falsifiers=["Every cancellation runs cleanup."],
+                ),
+                FramedHypothesis(
+                    id="H2",
+                    statement="The concurrency limit is not enforced.",
+                    type="root_cause",
+                    scope="The task workspace.",
+                    initial_prior=0.5,
+                    predictions=["Too many jobs run concurrently."],
+                    falsifiers=["Concurrency always remains bounded."],
+                ),
+            ],
+            rival_sets={"H1": [], "H2": []},
+            coverage_statement="The initial cause frame remains open.",
+        ),
+        framing_method=FramingMethod.MODEL,
+    )
+    belief = BeliefState(
+        belief_state_id="belief",
+        run_id="run",
+        cycle_id="cycle_0",
+        cycle_index=0,
+        hypotheses=[
+            {
+                "id": "H1",
+                "statement": "A cancellation path skips cleanup.",
+                "scope": "The task workspace.",
+                "prior": 0.5,
+                "posterior": 0.5,
+                "status": "active",
+            },
+            {
+                "id": "H2",
+                "statement": "The concurrency limit is not enforced.",
+                "scope": "The task workspace.",
+                "prior": 0.5,
+                "posterior": 0.5,
+                "status": "active",
+            },
+        ],
+    )
+
+    designed = session.runner.probe_designer.propose(
+        ProbeDesignContext(
+            run_id="run",
+            cycle_id="cycle_0",
+            task_frame=frame,
+            belief_state=belief,
+            available_capabilities=session.runner.available_capabilities,
+        )
+    )
+
+    candidate = designed.candidates[0].candidate_probe
+    assert candidate.purpose is ProbePurpose.FRAME_COVERAGE
+    assert candidate.target_hypotheses == ["H1", "H2"]
+    assert candidate.required_capability is CapabilityKind.REPOSITORY_READ
+    assert candidate.inquiry_goal == provider_inquiry_goal
+    assert session.budget.model_calls_used == 1
 
 
 @pytest.mark.asyncio

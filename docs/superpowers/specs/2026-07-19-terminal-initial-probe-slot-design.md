@@ -1,6 +1,6 @@
 # Terminal Initial Probe Slot Design
 
-Status: Approved for implementation
+Status: Implemented and offline verified
 
 Date: 2026-07-19
 
@@ -319,3 +319,25 @@ real environment Signals, LLM-interpreted Evidence, and public posterior Update.
 The experimental variable remains the explicit BayesProbe epistemic process.
 Provider compliance with a hidden cross-proposal invariant is removed as an
 unintended confounder.
+
+## 13. Implementation Record
+
+The adapter implementation was completed without changes under `bayesprobe/`.
+The real `build_live_session()` composition was exercised through the public
+`ModelProbeDesigner`: an intentionally malformed provider-owned control
+structure was normalized to the immutable initial slot while preserving the
+provider-authored inquiry goal.
+
+Fresh offline verification on 2026-07-19 produced:
+
+- provider-contract suite: 21 passed;
+- planner and action suites: 74 passed;
+- execution, causal, and trajectory regressions: 148 passed;
+- runner-factory and public-reuse integration: 100 passed;
+- complete Terminal-Bench adapter suite: 697 passed;
+- complete repository suite: 1,766 passed and 11 skipped;
+- `git diff --check`: clean.
+
+The next permitted action is to generate and inspect a new qualification lock
+for the pushed implementation identity. No Harbor task was run as part of this
+offline implementation record.
