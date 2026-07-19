@@ -212,17 +212,19 @@ class _TerminalProbeProposal(BaseModel):
 
     @field_validator("support_condition", "weaken_condition")
     @classmethod
-    def require_exact_target_conditions(
+    def require_condition_text(
         cls,
         value: dict[str, str],
-        info: ValidationInfo,
     ) -> dict[str, str]:
-        targets = info.data.get("target_hypotheses")
-        if not isinstance(targets, list) or set(value) != set(targets):
-            raise ValueError("conditions must be keyed by exactly the targets")
-        if any(not isinstance(item, str) or not item.strip() for item in value.values()):
-            raise ValueError("condition text must be non-empty")
-        return {key: item.strip() for key, item in value.items()}
+        if any(
+            not isinstance(key, str)
+            or not key.strip()
+            or not isinstance(item, str)
+            or not item.strip()
+            for key, item in value.items()
+        ):
+            raise ValueError("conditions must contain non-empty text")
+        return {key.strip(): item.strip() for key, item in value.items()}
 
     @field_validator("reframe_condition")
     @classmethod
@@ -358,7 +360,11 @@ class TerminalContractModelGateway:
                     field_errors = ()
                 else:
                     try:
-                        self._validate_response(stage, response, initial_request.input)
+                        validated_response = self._validate_response(
+                            stage,
+                            response,
+                            initial_request.input,
+                        )
                     except ValidationError as error:
                         field_errors = safe_field_errors(error)
                         invalid_payload = response
@@ -379,9 +385,7 @@ class TerminalContractModelGateway:
                             validation="valid",
                             field_errors=(),
                         )
-                        if not isinstance(response, dict):
-                            raise ProviderContractError(stage=stage, attempts=attempt_index + 1)
-                        return response
+                        return validated_response
 
             if attempt_index == 2:
                 raise ProviderContractError(stage=stage, attempts=3)
@@ -401,14 +405,15 @@ class TerminalContractModelGateway:
         stage: Literal["terminal_task_frame", "terminal_probe_design"],
         response: Any,
         request_input: Mapping[str, Any],
-    ) -> None:
+    ) -> dict[str, Any]:
         if stage == "terminal_task_frame":
-            _TerminalTaskFrame.model_validate(response)
-            return
-        _TerminalProbeResponse.model_validate(
+            parsed = _TerminalTaskFrame.model_validate(response)
+            return response if isinstance(response, dict) else parsed.model_dump(mode="python")
+        parsed = _TerminalProbeResponse.model_validate(
             response,
             context=_probe_validation_context(request_input),
         )
+        return _normalize_probe_conditions(parsed, request_input)
 
     def _with_terminal_policy(
         self,
@@ -508,15 +513,78 @@ def _terminal_policy(
         "requires_initial_open_coverage": context["requires_initial_open_coverage"],
         "condition_maps": {
             "support_condition": {
-                "keys": "exactly_target_hypotheses",
-                "values": "non_empty_text",
+                "provider_values": "non_empty_text_when_present",
+                "server_normalization": "exactly_target_hypotheses",
             },
             "weaken_condition": {
-                "keys": "exactly_target_hypotheses",
-                "values": "non_empty_text",
+                "provider_values": "non_empty_text_when_present",
+                "server_normalization": "exactly_target_hypotheses",
             },
         },
     }
+
+
+def _normalize_probe_conditions(
+    response: _TerminalProbeResponse,
+    request_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = response.model_dump(mode="python")
+    hypotheses = {
+        item["id"]: item
+        for item in request_input.get("hypotheses", ())
+        if isinstance(item, Mapping)
+        and isinstance(item.get("id"), str)
+        and item["id"].strip()
+    }
+    for proposal in payload["proposals"]:
+        targets = proposal["target_hypotheses"]
+        support = proposal["support_condition"]
+        weaken = proposal["weaken_condition"]
+        proposal["support_condition"] = {
+            target: support.get(
+                target,
+                _condition_fallback(
+                    target=target,
+                    hypothesis=hypotheses.get(target),
+                    field="predictions",
+                ),
+            )
+            for target in targets
+        }
+        proposal["weaken_condition"] = {
+            target: weaken.get(
+                target,
+                _condition_fallback(
+                    target=target,
+                    hypothesis=hypotheses.get(target),
+                    field="falsifiers",
+                ),
+            )
+            for target in targets
+        }
+    return payload
+
+
+def _condition_fallback(
+    *,
+    target: str,
+    hypothesis: Any,
+    field: Literal["predictions", "falsifiers"],
+) -> str:
+    values = hypothesis.get(field) if isinstance(hypothesis, Mapping) else None
+    if isinstance(values, Sequence) and not isinstance(values, str):
+        stated = next(
+            (item.strip() for item in values if isinstance(item, str) and item.strip()),
+            None,
+        )
+        if stated is not None:
+            singular = "prediction" if field == "predictions" else "falsifier"
+            return (
+                f"The observation satisfies this stated {singular} for target "
+                f"{target}: {stated}"
+            )
+    singular = "prediction" if field == "predictions" else "falsifier"
+    return f"The observation satisfies the stated {singular} for target {target}."
 
 
 def _probe_validation_context(request_input: Mapping[str, Any]) -> dict[str, Any]:

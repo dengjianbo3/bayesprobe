@@ -136,7 +136,18 @@ def _probe_request() -> StructuredModelRequest:
             "run_id": "run",
             "cycle_id": "cycle_0",
             "task_frame": {"coverage": "open"},
-            "hypotheses": [{"id": "H1"}, {"id": "H2"}],
+            "hypotheses": [
+                {
+                    "id": "H1",
+                    "predictions": ["H1 prediction"],
+                    "falsifiers": ["H1 falsifier"],
+                },
+                {
+                    "id": "H2",
+                    "predictions": ["H2 prediction"],
+                    "falsifiers": ["H2 falsifier"],
+                },
+            ],
             "available_capabilities": [
                 {"kind": "test_execution", "available": True},
                 {"kind": "repository_read", "available": True},
@@ -210,7 +221,7 @@ def test_terminal_frame_rejects_explicit_implementation_policies(tmp_path, polic
     assert all("hypotheses.0.type:literal_error" in item["field_errors"] for item in attempts)
 
 
-def test_probe_contract_rejects_unknown_targets_and_requires_exact_conditions(tmp_path) -> None:
+def test_probe_contract_rejects_unknown_targets(tmp_path) -> None:
     invalid = _probe(targets=["H1", "unknown"])
     invalid["proposals"][0]["support_condition"] = {"H1": "only one target"}
     delegate = RecordingGateway([invalid, invalid, invalid])
@@ -227,29 +238,35 @@ def test_probe_contract_rejects_unknown_targets_and_requires_exact_conditions(tm
     assert all("proposals.0.target_hypotheses:value_error" in item["field_errors"] for item in attempts)
 
 
-def test_probe_contract_exposes_exact_condition_key_rule_to_repairs(tmp_path) -> None:
-    invalid = _probe()
-    invalid["proposals"][0]["support_condition"] = {"H1": "partial support"}
-    delegate = RecordingGateway([invalid, _probe()])
+def test_probe_contract_exposes_server_condition_key_normalization_policy(tmp_path) -> None:
+    partial = _probe()
+    partial["proposals"][0]["support_condition"] = {"H1": "partial support"}
+    delegate = RecordingGateway([partial])
     gateway = TerminalContractModelGateway(
         delegate,
         artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
     )
 
-    assert gateway.complete_structured(_probe_request()) == _probe()
+    normalized = gateway.complete_structured(_probe_request())
 
     expected = {
         "support_condition": {
-            "keys": "exactly_target_hypotheses",
-            "values": "non_empty_text",
+            "provider_values": "non_empty_text_when_present",
+            "server_normalization": "exactly_target_hypotheses",
         },
         "weaken_condition": {
-            "keys": "exactly_target_hypotheses",
-            "values": "non_empty_text",
+            "provider_values": "non_empty_text_when_present",
+            "server_normalization": "exactly_target_hypotheses",
         },
     }
     assert delegate.requests[0].input["terminal_policy"]["condition_maps"] == expected
-    assert delegate.requests[1].input["terminal_policy"]["condition_maps"] == expected
+    assert normalized["proposals"][0]["support_condition"] == {
+        "H1": "partial support",
+        "H2": (
+            "The observation satisfies this stated prediction for target H2: "
+            "H2 prediction"
+        ),
+    }
 
 
 def test_probe_contract_treats_missing_request_targets_as_contract_invalidity(tmp_path) -> None:
@@ -497,10 +514,14 @@ def test_adapter_rejects_policy_frame_that_public_framer_accepts(tmp_path) -> No
         contract.complete_structured(_frame_request())
 
 
-def test_adapter_rejects_partial_probe_map_that_public_designer_accepts(tmp_path) -> None:
+def test_adapter_normalizes_partial_probe_map_that_public_designer_accepts(tmp_path) -> None:
     partial_probe = _probe()
     partial_probe["proposals"][0]["support_condition"] = {
         "H1": "partial support"
+    }
+    partial_probe["proposals"][0]["weaken_condition"] = {
+        "H2": "partial weakening",
+        "unrelated": "drop this condition",
     }
 
     accepted_probes = ModelProbeDesigner(RecordingGateway([partial_probe])).propose(
@@ -508,27 +529,33 @@ def test_adapter_rejects_partial_probe_map_that_public_designer_accepts(tmp_path
     )
     assert len(accepted_probes.candidates) == 1
 
-    delegate = RecordingGateway([partial_probe, partial_probe, partial_probe])
+    delegate = RecordingGateway([partial_probe])
     contract = TerminalContractModelGateway(
         delegate,
         artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
     )
-    with pytest.raises(ProviderContractError, match="terminal_probe_design") as raised:
-        contract.complete_structured(_probe_request())
+    normalized = contract.complete_structured(_probe_request())
 
-    assert raised.value.attempts == 3
-    assert [request.task for request in delegate.requests] == [
-        "design_probes",
-        "repair_probe_design",
-        "repair_probe_design",
+    proposal = normalized["proposals"][0]
+    assert proposal["support_condition"] == {
+        "H1": "partial support",
+        "H2": (
+            "The observation satisfies this stated prediction for target H2: "
+            "H2 prediction"
+        ),
+    }
+    assert proposal["weaken_condition"] == {
+        "H1": (
+            "The observation satisfies this stated falsifier for target H1: "
+            "H1 falsifier"
+        ),
+        "H2": "partial weakening",
+    }
+    designed = ModelProbeDesigner(RecordingGateway([normalized])).propose(
+        _public_probe_context()
+    )
+    assert designed.candidates[0].candidate_probe.support_condition == proposal[
+        "support_condition"
     ]
     attempts = _attempts(tmp_path / "provider_contract.jsonl")
-    assert [attempt["validation"] for attempt in attempts] == [
-        "invalid",
-        "invalid",
-        "invalid",
-    ]
-    assert all(
-        "proposals.0.support_condition:value_error" in attempt["field_errors"]
-        for attempt in attempts
-    )
+    assert [attempt["validation"] for attempt in attempts] == ["valid"]
