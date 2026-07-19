@@ -227,6 +227,31 @@ def test_probe_contract_rejects_unknown_targets_and_requires_exact_conditions(tm
     assert all("proposals.0.target_hypotheses:value_error" in item["field_errors"] for item in attempts)
 
 
+def test_probe_contract_exposes_exact_condition_key_rule_to_repairs(tmp_path) -> None:
+    invalid = _probe()
+    invalid["proposals"][0]["support_condition"] = {"H1": "partial support"}
+    delegate = RecordingGateway([invalid, _probe()])
+    gateway = TerminalContractModelGateway(
+        delegate,
+        artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
+    )
+
+    assert gateway.complete_structured(_probe_request()) == _probe()
+
+    expected = {
+        "support_condition": {
+            "keys": "exactly_target_hypotheses",
+            "values": "non_empty_text",
+        },
+        "weaken_condition": {
+            "keys": "exactly_target_hypotheses",
+            "values": "non_empty_text",
+        },
+    }
+    assert delegate.requests[0].input["terminal_policy"]["condition_maps"] == expected
+    assert delegate.requests[1].input["terminal_policy"]["condition_maps"] == expected
+
+
 def test_probe_contract_treats_missing_request_targets_as_contract_invalidity(tmp_path) -> None:
     request = _probe_request()
     request = StructuredModelRequest(

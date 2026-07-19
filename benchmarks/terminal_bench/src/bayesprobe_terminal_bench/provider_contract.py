@@ -506,6 +506,16 @@ def _terminal_policy(
         "known_target_hypotheses": sorted(context["known_targets"]),
         "available_terminal_capabilities": sorted(context["available_capabilities"]),
         "requires_initial_open_coverage": context["requires_initial_open_coverage"],
+        "condition_maps": {
+            "support_condition": {
+                "keys": "exactly_target_hypotheses",
+                "values": "non_empty_text",
+            },
+            "weaken_condition": {
+                "keys": "exactly_target_hypotheses",
+                "values": "non_empty_text",
+            },
+        },
     }
 
 
