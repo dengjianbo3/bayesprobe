@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -222,6 +223,16 @@ def test_terminal_frame_rejects_explicit_implementation_policies(tmp_path, polic
 
 
 def test_probe_contract_rejects_unknown_targets(tmp_path) -> None:
+    request = _probe_request()
+    later_request = StructuredModelRequest(
+        task=request.task,
+        input={**request.input, "cycle_id": "cycle_1"},
+        prompt_id=request.prompt_id,
+        prompt_version=request.prompt_version,
+        schema_name=request.schema_name,
+        schema_version=request.schema_version,
+        metadata={**request.metadata, "cycle_id": "cycle_1"},
+    )
     invalid = _probe(targets=["H1", "unknown"])
     invalid["proposals"][0]["support_condition"] = {"H1": "only one target"}
     delegate = RecordingGateway([invalid, invalid, invalid])
@@ -231,7 +242,7 @@ def test_probe_contract_rejects_unknown_targets(tmp_path) -> None:
     )
 
     with pytest.raises(ProviderContractError, match="terminal_probe_design"):
-        gateway.complete_structured(_probe_request())
+        gateway.complete_structured(later_request)
 
     attempts = _attempts(tmp_path / "provider_contract.jsonl")
     assert all(item["validation"] == "invalid" for item in attempts)
@@ -269,7 +280,98 @@ def test_probe_contract_exposes_server_condition_key_normalization_policy(tmp_pa
     }
 
 
-def test_probe_contract_treats_missing_request_targets_as_contract_invalidity(tmp_path) -> None:
+def test_initial_open_probe_fills_server_owned_slot_without_mutating_provider_payload(
+    tmp_path,
+) -> None:
+    provider_payload = _probe(targets=["H1"])
+    proposal = provider_payload["proposals"][0]
+    proposal["purpose"] = "hypothesis_falsification"
+    proposal["required_capability"] = "test_execution"
+    proposal["inquiry_goal"] = (
+        "  Inspect the implementation against every framed claim.  "
+    )
+    proposal["expected_observation"] = (
+        "  Repository facts distinguish the frame.  "
+    )
+    provider_payload["proposals"].append(deepcopy(proposal))
+    before = deepcopy(provider_payload)
+    delegate = RecordingGateway([provider_payload])
+    gateway = TerminalContractModelGateway(
+        delegate,
+        artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
+    )
+
+    normalized = gateway.complete_structured(_probe_request())
+
+    assert provider_payload == before
+    assert len(normalized["proposals"]) == 1
+    normalized_proposal = normalized["proposals"][0]
+    assert normalized_proposal["purpose"] == "frame_coverage"
+    assert normalized_proposal["target_hypotheses"] == ["H1", "H2"]
+    assert normalized_proposal["required_capability"] == "repository_read"
+    assert normalized_proposal["inquiry_goal"] == (
+        "Inspect the implementation against every framed claim."
+    )
+    assert normalized_proposal["expected_observation"] == (
+        "Repository facts distinguish the frame."
+    )
+    assert delegate.requests[0].input["terminal_policy"]["initial_probe_slot"] == {
+        "plan_mode": "inspect",
+        "purpose": "frame_coverage",
+        "required_capability": "repository_read",
+        "target_hypotheses": ["H1", "H2"],
+    }
+
+
+def test_later_probe_preserves_model_owned_structure(tmp_path) -> None:
+    request = _probe_request()
+    later_request = StructuredModelRequest(
+        task=request.task,
+        input={**request.input, "cycle_id": "cycle_1"},
+        prompt_id=request.prompt_id,
+        prompt_version=request.prompt_version,
+        schema_name=request.schema_name,
+        schema_version=request.schema_version,
+        metadata={**request.metadata, "cycle_id": "cycle_1"},
+    )
+    provider_payload = _probe(targets=["H1"])
+    proposal = provider_payload["proposals"][0]
+    proposal["purpose"] = "hypothesis_falsification"
+    proposal["required_capability"] = "test_execution"
+    gateway = TerminalContractModelGateway(
+        RecordingGateway([provider_payload]),
+        artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
+    )
+
+    normalized = gateway.complete_structured(later_request)
+
+    normalized_proposal = normalized["proposals"][0]
+    assert normalized_proposal["purpose"] == "hypothesis_falsification"
+    assert normalized_proposal["target_hypotheses"] == ["H1"]
+    assert normalized_proposal["required_capability"] == "test_execution"
+
+
+def test_initial_slot_does_not_invent_missing_model_semantics(tmp_path) -> None:
+    invalid = _probe()
+    invalid["proposals"][0]["inquiry_goal"] = ""
+    delegate = RecordingGateway([deepcopy(invalid) for _ in range(3)])
+    gateway = TerminalContractModelGateway(
+        delegate,
+        artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
+    )
+
+    with pytest.raises(ProviderContractError) as raised:
+        gateway.complete_structured(_probe_request())
+
+    assert raised.value.attempts == 3
+    assert [request.task for request in delegate.requests] == [
+        "design_probes",
+        "repair_probe_design",
+        "repair_probe_design",
+    ]
+
+
+def test_initial_slot_treats_missing_request_targets_as_adapter_error(tmp_path) -> None:
     request = _probe_request()
     request = StructuredModelRequest(
         task=request.task,
@@ -287,10 +389,14 @@ def test_probe_contract_treats_missing_request_targets_as_contract_invalidity(tm
         artifacts=TrialArtifactStore(tmp_path, restricted_values=()),
     )
 
-    with pytest.raises(ProviderContractError, match="terminal_probe_design"):
+    with pytest.raises(
+        ValueError,
+        match="initial open Probe requires distinct active hypotheses",
+    ):
         gateway.complete_structured(request)
 
-    assert all(item["validation"] == "invalid" for item in _attempts(tmp_path / "provider_contract.jsonl"))
+    assert delegate.requests == []
+    assert not (tmp_path / "provider_contract.jsonl").exists()
 
 
 @pytest.mark.parametrize("payload", [{}, {"task_kind": "design"}, ["not", "a", "mapping"]])
@@ -483,6 +589,12 @@ def _public_probe_context() -> ProbeDesignContext:
         task_frame=frame,
         belief_state=belief,
         available_capabilities=(
+            CapabilityDescriptor(
+                kind=CapabilityKind.REPOSITORY_READ,
+                available=True,
+                epistemic_origin=EpistemicOrigin.TOOL_RESULT,
+                executor_adapter_id="terminal:v1",
+            ),
             CapabilityDescriptor(
                 kind=CapabilityKind.TEST_EXECUTION,
                 available=True,

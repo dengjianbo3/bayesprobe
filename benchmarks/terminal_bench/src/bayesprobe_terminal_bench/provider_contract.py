@@ -58,6 +58,15 @@ class ContractAttempt(BaseModel):
     field_errors: tuple[str, ...]
 
 
+class InitialOpenProbeSlot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    purpose: Literal["frame_coverage"] = "frame_coverage"
+    target_hypotheses: tuple[str, ...] = Field(min_length=2)
+    required_capability: Literal["repository_read"] = "repository_read"
+    plan_mode: Literal["inspect"] = "inspect"
+
+
 def safe_field_errors(error: ValidationError) -> tuple[str, ...]:
     return tuple(
         sorted(
@@ -409,8 +418,14 @@ class TerminalContractModelGateway:
         if stage == "terminal_task_frame":
             parsed = _TerminalTaskFrame.model_validate(response)
             return response if isinstance(response, dict) else parsed.model_dump(mode="python")
+        slot = _initial_open_probe_slot(request_input)
+        normalized_response = (
+            response
+            if slot is None
+            else _fill_initial_open_probe_slot(response, slot)
+        )
         parsed = _TerminalProbeResponse.model_validate(
-            response,
+            normalized_response,
             context=_probe_validation_context(request_input),
         )
         return _normalize_probe_conditions(parsed, request_input)
@@ -505,12 +520,16 @@ def _terminal_policy(
             "answer_value": None,
         }
     context = _probe_validation_context(request_input)
+    slot = _initial_open_probe_slot(request_input)
     return {
         "stage": stage,
         "proposal_count": {"minimum": 1, "maximum": 3},
         "known_target_hypotheses": sorted(context["known_targets"]),
         "available_terminal_capabilities": sorted(context["available_capabilities"]),
         "requires_initial_open_coverage": context["requires_initial_open_coverage"],
+        "initial_probe_slot": (
+            None if slot is None else slot.model_dump(mode="json")
+        ),
         "condition_maps": {
             "support_condition": {
                 "provider_values": "non_empty_text_when_present",
@@ -522,6 +541,43 @@ def _terminal_policy(
             },
         },
     }
+
+
+def _initial_open_probe_slot(
+    request_input: Mapping[str, Any],
+) -> InitialOpenProbeSlot | None:
+    context = _probe_validation_context(request_input)
+    if not context["requires_initial_open_coverage"]:
+        return None
+    targets = context["ordered_known_targets"]
+    if len(targets) < 2 or len(targets) != len(set(targets)):
+        raise ValueError(
+            "initial open Probe requires distinct active hypotheses"
+        )
+    if "repository_read" not in context["available_capabilities"]:
+        raise ValueError("initial open Probe requires repository_read")
+    return InitialOpenProbeSlot(target_hypotheses=targets)
+
+
+def _fill_initial_open_probe_slot(
+    response: Any,
+    slot: InitialOpenProbeSlot,
+) -> Any:
+    if not isinstance(response, Mapping):
+        return response
+    proposals = response.get("proposals")
+    if not isinstance(proposals, list) or not proposals:
+        return response
+    first = proposals[0]
+    if not isinstance(first, Mapping):
+        return response
+    normalized = dict(first)
+    normalized.update(
+        purpose=slot.purpose,
+        target_hypotheses=list(slot.target_hypotheses),
+        required_capability=slot.required_capability,
+    )
+    return {"proposals": [normalized]}
 
 
 def _normalize_probe_conditions(
@@ -590,13 +646,14 @@ def _condition_fallback(
 def _probe_validation_context(request_input: Mapping[str, Any]) -> dict[str, Any]:
     hypotheses = request_input.get("hypotheses")
     hypothesis_items = hypotheses if isinstance(hypotheses, list) else []
-    known_targets = {
-        item.get("id")
+    ordered_known_targets = tuple(
+        item["id"].strip()
         for item in hypothesis_items
         if isinstance(item, Mapping)
         and isinstance(item.get("id"), str)
         and item["id"].strip()
-    }
+    )
+    known_targets = set(ordered_known_targets)
     capabilities = request_input.get("available_capabilities")
     capability_items = capabilities if isinstance(capabilities, list) else []
     available_capabilities = {
@@ -610,6 +667,7 @@ def _probe_validation_context(request_input: Mapping[str, Any]) -> dict[str, Any
     coverage = task_frame.get("coverage") if isinstance(task_frame, Mapping) else None
     return {
         "known_targets": tuple(sorted(known_targets)),
+        "ordered_known_targets": ordered_known_targets,
         "available_capabilities": tuple(sorted(available_capabilities)),
         "requires_initial_open_coverage": (
             coverage == "open" and request_input.get("cycle_id") == "cycle_0"
@@ -667,7 +725,10 @@ def contract_identity() -> dict[str, str]:
                     {"available": True, "kind": "test_execution"},
                 ],
                 "cycle_id": "cycle_0",
-                "hypotheses": [{"id": "<target_hypothesis>"}],
+                "hypotheses": [
+                    {"id": "<target_hypothesis_1>"},
+                    {"id": "<target_hypothesis_2>"},
+                ],
                 "task_frame": {"coverage": "open"},
             },
         ),
