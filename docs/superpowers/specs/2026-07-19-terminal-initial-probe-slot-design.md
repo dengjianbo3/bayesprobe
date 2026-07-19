@@ -1,6 +1,6 @@
 # Terminal Initial Probe Slot Design
 
-Status: Approved for specification review
+Status: Approved for implementation
 
 Date: 2026-07-19
 
