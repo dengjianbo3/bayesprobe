@@ -154,7 +154,9 @@ def _qualification_dataset(job_config: Mapping[str, object]) -> Mapping[str, obj
 
 
 def _require_oracle_job_config(job_config: Mapping[str, object]) -> None:
-    agents = job_config.get("agents")
+    if "agents" not in job_config:
+        return
+    agents = job_config["agents"]
     if (
         not isinstance(agents, list)
         or len(agents) != 1

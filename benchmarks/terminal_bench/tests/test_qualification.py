@@ -463,6 +463,29 @@ def test_causal_lock_writer_rejects_oracle_failure_dirty_tree_or_missing_canary(
         )
 
 
+def test_causal_lock_writer_accepts_harbor_resolved_default_oracle_config(
+    tmp_path: Path,
+) -> None:
+    job = _oracle_job(tmp_path / "oracle")
+    config_path = job / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.pop("agents")
+    config.pop("n_attempts")
+    _write_json(config_path, config)
+
+    lock = build_causal_qualification_lock(
+        job_dir=job,
+        config=_config(),
+        runtime_identity=_runtime(),
+        provider_identity_path=_provider_identity_path(tmp_path),
+        task_identity_resolver=_cached_task,
+    )
+
+    assert [task["task_id"] for task in lock["tasks"]] == list(
+        FROZEN_GATE_TASK_IDS
+    )
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
