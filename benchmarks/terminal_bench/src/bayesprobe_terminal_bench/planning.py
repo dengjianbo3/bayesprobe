@@ -503,6 +503,10 @@ def _planner_instruction(*, repair: bool) -> str:
         + " Writes and patches are interventions."
         + " Successful mutation output is acknowledgement, not verification."
         + " Verification must follow the mutation."
+        + " When the task text names a public test or validation command that"
+        + " directly checks the expected observation, use that command as the"
+        + " final verification step. A weaker proxy observation is not equivalent"
+        + " to the task-supplied behavioral check."
         + " Transition predictions are optional; when provided, they must be declared"
         + " before execution, cover every Probe target hypothesis, and have"
         + " differentiated expected transitions."
@@ -538,6 +542,12 @@ def _planner_instruction(*, repair: bool) -> str:
                     "actions": "shell_only",
                     "requirement": "non_empty_verification_target",
                     "roles": ["verify"],
+                    "task_supplied_check": (
+                        "use_as_final_verify_when_it_directly_tests_the_expected_observation"
+                    ),
+                    "proxy_observation": (
+                        "does_not_replace_a_named_public_behavioral_check"
+                    ),
                 },
                 "intervene": {
                     "mutation_count": 1,

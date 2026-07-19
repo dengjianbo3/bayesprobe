@@ -432,6 +432,8 @@ def test_planner_instruction_states_causal_execution_semantics(probe, execution_
     assert "Writes and patches are interventions" in instruction
     assert "Successful mutation output is acknowledgement, not verification" in instruction
     assert "Verification must follow the mutation" in instruction
+    assert "task text names a public test or validation command" in instruction
+    assert "weaker proxy observation is not equivalent" in instruction
     assert "Transition predictions are optional; when provided" in instruction
     assert "they must be declared before execution" in instruction
     assert "cover every Probe target hypothesis" in instruction
@@ -441,6 +443,8 @@ def test_planner_instruction_states_causal_execution_semantics(probe, execution_
     assert '"provably_read_only_shell_only"' in instruction
     assert '"verify"' in instruction
     assert '"non_empty_verification_target"' in instruction
+    assert '"task_supplied_check"' in instruction
+    assert '"proxy_observation"' in instruction
     assert '"intervene"' in instruction
     assert '"optional_inspect_one_intervene_one_or_more_verify"' in instruction
     assert '"required_plan_mode"' in instruction
