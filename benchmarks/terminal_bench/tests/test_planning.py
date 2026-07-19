@@ -169,6 +169,35 @@ def test_planner_uses_initial_attempt_and_two_targeted_repairs(probe, execution_
     assert "not-json" not in json.dumps(first_repair["invalid_payload"])
 
 
+def test_planner_repair_exposes_safe_semantic_error_code(
+    probe,
+    execution_context,
+) -> None:
+    invalid_inspect_plan = json.dumps(
+        {
+            "mode": "inspect",
+            "steps": [
+                {
+                    "role": "inspect",
+                    "action": {
+                        "type": "shell",
+                        "command": "python -V",
+                        "timeout_seconds": 30,
+                        "mutates_environment": False,
+                    },
+                }
+            ],
+            "expected_observation": "The Python version is visible.",
+        }
+    )
+    planner, client = _planner([invalid_inspect_plan, VALID_PLAN])
+
+    planner.plan(probe=probe, context=execution_context, history=())
+
+    repair = json.loads(client.chat.completions.calls[1]["messages"][1]["content"])
+    assert repair["validation_error"] == ["plan:inspect_read_only_actions"]
+
+
 def test_planner_never_falls_back_to_an_imagined_action(probe, execution_context) -> None:
     planner, client = _planner(["bad", "still bad", "bad a third time"])
 
@@ -327,6 +356,12 @@ def test_planner_instruction_states_causal_execution_semantics(probe, execution_
     assert "cover every Probe target hypothesis" in instruction
     assert "differentiated expected transitions" in instruction
     assert "Transition predictions must be declared" not in instruction
+    assert '"inspect"' in instruction
+    assert '"provably_read_only_shell_only"' in instruction
+    assert '"verify"' in instruction
+    assert '"non_empty_verification_target"' in instruction
+    assert '"intervene"' in instruction
+    assert '"optional_inspect_one_intervene_one_or_more_verify"' in instruction
 
 
 def test_planner_request_uses_the_existing_chat_completion_token_parameter(probe, execution_context) -> None:

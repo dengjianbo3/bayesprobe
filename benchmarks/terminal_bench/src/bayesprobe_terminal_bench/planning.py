@@ -79,6 +79,40 @@ _SAFE_PLAN_FIELD_LOCATION_COMPONENTS = frozenset(
     }
 )
 _UNKNOWN_PLAN_FIELD_LOCATION = "<field>"
+_SAFE_PLAN_SEMANTIC_ERROR_CODES = {
+    "transition predictions require intervene mode": (
+        "transition_predictions:requires_intervene_mode"
+    ),
+    "transition predictions require distinct normalized texts": (
+        "transition_predictions:distinct_expected_transitions"
+    ),
+    "transition prediction IDs must equal Probe targets": (
+        "transition_predictions:target_ids_must_equal_probe_targets"
+    ),
+    "inspect plans require inspect roles": "plan:inspect_roles_only",
+    "inspect plans require provably read-only actions": (
+        "plan:inspect_read_only_actions"
+    ),
+    "verify plans require verify roles": "plan:verify_roles_only",
+    "intervene role order must be optional inspect, one intervene, then verify": (
+        "plan:intervene_role_order"
+    ),
+    "intervene plans require one or more trailing verify steps": (
+        "plan:intervene_requires_trailing_verify"
+    ),
+    "inspect steps require provably read-only actions": (
+        "plan:intervene_inspect_read_only"
+    ),
+    "intervene plans require exactly one intended mutation": (
+        "plan:intervene_exactly_one_mutation"
+    ),
+    "verification actions must be shell commands": (
+        "plan:verification_shell_only"
+    ),
+    "verification steps require a non-empty verification target": (
+        "plan:verification_target_required"
+    ),
+}
 _SECRET_VALUE_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}", re.IGNORECASE),
     re.compile(
@@ -448,6 +482,56 @@ def _planner_instruction(*, repair: bool) -> str:
         + " Transition predictions are optional; when provided, they must be declared"
         + " before execution, cover every Probe target hypothesis, and have"
         + " differentiated expected transitions."
+        + " Semantic contract: "
+        + json.dumps(
+            {
+                "inspect": {
+                    "actions": "provably_read_only_shell_only",
+                    "forbidden_shell_composition": [
+                        "semicolon",
+                        "ampersand",
+                        "pipe",
+                        "redirect",
+                        "command_substitution",
+                        "executable_path",
+                    ],
+                    "roles": ["inspect"],
+                    "safe_command_examples": [
+                        "pwd",
+                        "ls",
+                        "cat",
+                        "rg",
+                        "grep",
+                        "head",
+                        "tail",
+                        "stat",
+                        "wc",
+                        "git status",
+                        "git diff",
+                    ],
+                },
+                "verify": {
+                    "actions": "shell_only",
+                    "requirement": "non_empty_verification_target",
+                    "roles": ["verify"],
+                },
+                "intervene": {
+                    "mutation_count": 1,
+                    "mutation_role": "intervene",
+                    "role_order": (
+                        "optional_inspect_one_intervene_one_or_more_verify"
+                    ),
+                    "verification": "required_after_mutation",
+                },
+                "transition_predictions": {
+                    "allowed_mode": "intervene_only",
+                    "coverage": "exactly_probe_target_hypotheses",
+                    "expected_transitions": "distinct_non_empty_text",
+                    "required": False,
+                },
+            },
+            sort_keys=True,
+        )
         + " Schema: "
         + json.dumps(
             TerminalProbePlan.model_json_schema(),
@@ -521,15 +605,25 @@ def _repair_payload(
 
 
 def _safe_field_errors(error: ValidationError) -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            {
-                f"{'.'.join(_safe_field_location_component(part) for part in item['loc'])}"
-                f":{item['type']}"
-                for item in error.errors(include_url=False, include_input=False)
-            }
+    errors: set[str] = set()
+    for item in error.errors(include_url=False, include_input=False):
+        semantic_code = _safe_semantic_error_code(item)
+        if semantic_code is not None:
+            errors.add(semantic_code)
+            continue
+        location = ".".join(
+            _safe_field_location_component(part) for part in item["loc"]
         )
-    )[:32]
+        errors.add(f"{location}:{item['type']}")
+    return tuple(sorted(errors))[:32]
+
+
+def _safe_semantic_error_code(item: Mapping[str, Any]) -> str | None:
+    context = item.get("ctx")
+    error = context.get("error") if isinstance(context, Mapping) else None
+    if not isinstance(error, ValueError):
+        return None
+    return _SAFE_PLAN_SEMANTIC_ERROR_CODES.get(str(error))
 
 
 def _safe_field_location_component(value: object) -> str:
